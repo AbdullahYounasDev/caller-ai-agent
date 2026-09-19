@@ -1,0 +1,12 @@
+{
+  "invalidKey": "This chat isn't set up correctly. Please contact the site owner.",
+  "originNotAllowed": "This chat isn't allowed on this website. Please contact the site owner.",
+  "rateLimited": "You're sending messages too quickly. Please wait a moment.",
+  "tooManyRequests": "Too many requests right now. Please try again shortly.",
+  "invalidSession": "This conversation has expired. Start a new one to continue.",
+  "messageRequired": "Please type a message.",
+  "messageTooLong": "That message is too long. Please shorten it and try again.",
+  "accountSuspended": "This service is temporarily unavailable. Please contact the business directly.",
+  "quotaExceeded": "This service has reached its limit for now. Please try again later.",
+  "generic": "Something went wrong. Please try again."
+}

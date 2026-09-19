@@ -1,0 +1,193 @@
+// AI engine slice (Abdul's side). Lives in the `ai_engine` schema of a Postgres
+// instance shared with the partner's `tenant_core` schema. We deliberately do NOT
+// declare tenant_core models here — cross-schema Prisma relations would put us in
+// control of migrations for tables we don't own, and the two sides run different
+// migration tools (this is Prisma, tenant_core is managed from an Express/Prisma
+// or raw-SQL setup on the partner's side). tenant_id is a plain indexed column;
+// referential integrity to tenant_core.tenants(id) is enforced with a raw SQL FK
+// added in a migration, once that table exists, not through the Prisma schema.
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  schemas    = ["ai_engine"]
+  extensions = [vector]
+}
+
+model Conversation {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  channel   String // widget | whatsapp | voice — channel the conversation STARTED on
+  status    String   @default("active") // active | resolved | escalated
+  // Locale this conversation is being held in (en | it | ar | ur). Set from the
+  // end user's choice / host page, falling back to the tenant's defaultLocale.
+  // Per CONVERSATION, not per tenant: one business serves customers in several
+  // languages and the agent must reply in the one this customer actually used.
+  locale    String   @default("en")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  messages Message[]
+
+  @@index([tenantId])
+  @@map("conversations")
+  @@schema("ai_engine")
+}
+
+model Message {
+  id             String   @id @default(uuid())
+  conversationId String   @map("conversation_id")
+  tenantId       String   @map("tenant_id")
+  channel        String // widget | whatsapp | voice — channel THIS message came in on
+  role           String // user | assistant | system | tool
+  content        String
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id])
+
+  @@index([conversationId])
+  @@index([tenantId, channel])
+  @@map("messages")
+  @@schema("ai_engine")
+}
+
+// Prisma Client can read/write every column here EXCEPT `embedding` — the
+// `vector` type isn't natively supported, so it comes through as Unsupported().
+// Inserts/updates to embedding and similarity search both go through
+// prisma.$queryRaw / $executeRaw (see lib/agent/ingest.js and retrieve.js).
+//
+// vector(768): sized for Gemini's gemini-embedding-001 model with
+// outputDimensionality pinned to 768 (see lib/agent/gemini.js). If the
+// embedding model or its dimension ever changes, this column size and every
+// existing row's embedding both have to change together — there's no way to
+// mix dimensions in one column.
+model KnowledgeChunk {
+  id        String              @id @default(uuid())
+  tenantId  String              @map("tenant_id")
+  source    String // doc filename / URL / identifier the chunk came from
+  content   String
+  embedding Unsupported("vector(768)")
+  createdAt DateTime            @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@map("knowledge_chunks")
+  @@schema("ai_engine")
+}
+
+model CallLog {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  conversationId String?  @map("conversation_id")
+  durationSec    Int?     @map("duration_sec")
+  recordingUrl   String?  @map("recording_url") // raw audio → object storage, only the URL lives here
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@map("call_logs")
+  @@schema("ai_engine")
+}
+
+// Audit log of actions the agent actually executed against the tenant's systems.
+model AgentAction {
+  id             String   @id @default(uuid())
+  tenantId       String   @map("tenant_id")
+  conversationId String?  @map("conversation_id")
+  actionType     String   @map("action_type") // e.g. refund_issued | appointment_booked | record_updated
+  payload        Json // structured details of what was done — never a text blob
+  createdAt      DateTime @default(now())      @map("created_at")
+
+  @@index([tenantId])
+  @@map("agent_actions")
+  @@schema("ai_engine")
+}
+
+// Per-tenant agent configuration — the "businesses train/edit their agent" surface.
+//
+// WHY THIS LIVES IN ai_engine, NOT tenant_core: the partner owns tenants, users,
+// auth, plans and billing. This row is the AI engine's own concern — persona,
+// capabilities and widget theme all change whenever the prompt pipeline changes,
+// so keeping it on our side means prompt iteration never waits on their migrations.
+// The partner's dashboard edits it through /api/agent-config. One row per tenant.
+model AgentConfig {
+  id       String @id @default(uuid())
+  tenantId String @unique @map("tenant_id")
+
+  // --- identity / persona: what the agent says it is ---
+  businessName String  @map("business_name")
+  purpose      String  @default("") // what the agent is here to do, in the tenant's words
+  tone         String  @default("professional") // professional | friendly | concise | formal
+  timezone     String  @default("UTC") // IANA name — needed for hours + booking
+
+  // --- language ---
+  defaultLocale String   @default("en") @map("default_locale")
+  languages     String[] @default(["en"]) // locales this tenant has enabled: en | it | ar | ur
+
+  // --- free-form structured settings ---
+  // hours:      { mon: [["09:00","17:00"]], ... } — opening hours in `timezone`
+  // escalation: { email, phone, whenUserAsks, whenAgentUnsure }
+  hours      Json?
+  escalation Json?
+
+  // Per-capability tenant state, keyed by a capability id from
+  // lib/agent/capabilities/catalog.js:
+  //   { book_appointment: { enabled: true, channels: ["voice"], params: {...} } }
+  //
+  // JSON rather than a table ON PURPOSE: the catalog of what's possible lives in
+  // code, and only the tenant's on/off + params live here. A capabilities TABLE
+  // would mean a migration every time we add a capability. If you ever need to
+  // query "which tenants enabled X", add a GIN index on this column.
+  capabilities Json @default("{}")
+
+  // Widget theme: { logoUrl, primaryColor, position, greeting, launcherIcon }.
+  // Read by the widget at load time; shape is owned by lib/tenant/config.js.
+  widget Json @default("{}")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("agent_configs")
+  @@schema("ai_engine")
+}
+
+// Public keys that let an embedded widget identify its tenant WITHOUT the host
+// page knowing the tenant id. Modelled on Stripe's publishable keys: the value
+// is safe to paste into a <script> tag, because on its own it only grants
+// "start a conversation with this business" — and only from an allowed origin.
+//
+// WHY WE OWN THIS TABLE: a widget key is a credential for OUR channel endpoints.
+// The partner provisions it through /api/widget-keys when a tenant onboards,
+// exactly like agent_configs. When tenant_core exists, the only thing that
+// changes is that lib/tenant/registry.js also checks the tenant is active —
+// see the seam comment in that file.
+model WidgetKey {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+
+  // e.g. "pk_live_9f2a…". Unique across all tenants — it IS the lookup.
+  publicKey String @unique @map("public_key")
+
+  // Origins allowed to use this key, as full origins ("https://acme.com").
+  // EMPTY MEANS SAME-ORIGIN ONLY, never "allow everything" — an empty allowlist
+  // is what a half-finished onboarding looks like, and it must fail closed.
+  allowedOrigins String[] @default([]) @map("allowed_origins")
+
+  label     String? // human label in the dashboard, e.g. "Main site"
+  active    Boolean   @default(true)
+  revokedAt DateTime? @map("revoked_at")
+
+  // Touched at most once a minute (see registry.js) — enough to answer "is this
+  // key still in use?" in the dashboard without a write on every message.
+  lastUsedAt DateTime? @map("last_used_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("widget_keys")
+  @@schema("ai_engine")
+}

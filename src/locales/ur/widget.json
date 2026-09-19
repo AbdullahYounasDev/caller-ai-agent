@@ -1,0 +1,18 @@
+{
+  "launcher.open": "ہم سے بات کریں",
+  "launcher.close": "چیٹ بند کریں",
+  "header.title": "{businessName} سے گفتگو",
+  "header.subtitle": "ہم عموماً چند سیکنڈ میں جواب دیتے ہیں",
+  "greeting.default": "السلام علیکم! ہم آپ کی کیا مدد کر سکتے ہیں؟",
+  "input.placeholder": "اپنا پیغام لکھیں…",
+  "input.send": "بھیجیں",
+  "status.typing": "لکھ رہے ہیں…",
+  "status.connecting": "منسلک ہو رہا ہے…",
+  "status.offline": "لگتا ہے آپ آف لائن ہیں۔",
+  "action.retry": "دوبارہ کوشش کریں",
+  "action.startNew": "نئی گفتگو شروع کریں",
+  "action.switchLanguage": "زبان",
+  "disclaimer.ai": "آپ ایک اے آئی اسسٹنٹ سے بات کر رہے ہیں۔",
+  "unread_one": "{count} نیا پیغام",
+  "unread_other": "{count} نئے پیغامات"
+}

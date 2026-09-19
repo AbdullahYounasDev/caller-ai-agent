@@ -1,0 +1,12 @@
+{
+  "invalidKey": "Questa chat non è configurata correttamente. Contatta il proprietario del sito.",
+  "originNotAllowed": "Questa chat non è autorizzata su questo sito. Contatta il proprietario del sito.",
+  "rateLimited": "Stai inviando messaggi troppo rapidamente. Attendi un momento.",
+  "tooManyRequests": "Troppe richieste in questo momento. Riprova tra poco.",
+  "invalidSession": "Questa conversazione è scaduta. Avviane una nuova per continuare.",
+  "messageRequired": "Scrivi un messaggio.",
+  "messageTooLong": "Il messaggio è troppo lungo. Accorcialo e riprova.",
+  "accountSuspended": "Il servizio non è temporaneamente disponibile. Contatta direttamente l'azienda.",
+  "quotaExceeded": "Il servizio ha raggiunto il limite per ora. Riprova più tardi.",
+  "generic": "Si è verificato un errore. Riprova."
+}
