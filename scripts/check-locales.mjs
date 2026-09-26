@@ -28,6 +28,12 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "locales");
 const SOURCE_LOCALE = "en";
 
+// ACTIVE locales only. `ar` and `ur` remain on disk but dormant — checking them
+// would fail the build over languages the product does not currently ship, and
+// silently dropping them would lose translated work. Add a code here to bring
+// one back under enforcement (and to lib/i18n + catalogs.js).
+const ACTIVE_LOCALES = ["en", "it"];
+
 // CLDR plural categories. A key ending in one of these is a plural form.
 const PLURAL_SUFFIXES = ["zero", "one", "two", "few", "many", "other"];
 
@@ -71,9 +77,12 @@ function index(catalog) {
   return map;
 }
 
-const locales = readdirSync(ROOT, { withFileTypes: true })
+const onDisk = readdirSync(ROOT, { withFileTypes: true })
   .filter((d) => d.isDirectory())
   .map((d) => d.name);
+
+const locales = onDisk.filter((l) => ACTIVE_LOCALES.includes(l));
+const dormant = onDisk.filter((l) => !ACTIVE_LOCALES.includes(l));
 
 if (!locales.includes(SOURCE_LOCALE)) {
   console.error(`✗ source locale "${SOURCE_LOCALE}" not found in ${ROOT}`);
@@ -165,5 +174,8 @@ const keyCount = namespaces.reduce(
   0
 );
 console.log(
-  `✓ locales in sync — ${locales.length} locales × ${namespaces.length} namespaces (${keyCount} source keys)`
+  `✓ locales in sync — ${locales.length} active locales × ${namespaces.length} namespaces (${keyCount} source keys)`
 );
+if (dormant.length) {
+  console.log(`  dormant, not checked: ${dormant.join(", ")}`);
+}

@@ -1,26 +1,116 @@
-import { CATALOGS } from "./catalogs";
+import { CATALOGS, NAMESPACES } from "./catalogs";
 
 /**
  * Minimal i18n. Key → string, with interpolation, CLDR plurals and RTL support.
  *
- * WHY NOT next-intl / i18next: the chat widget ships as a standalone bundle onto
- * other people's websites, where every kilobyte is a cost we impose on someone
- * else's page load. A framework-coupled i18n library brings a provider tree, a
- * loader and a plugin system we don't need. This file is the whole system, and
- * the widget can import the one function it uses.
+ * ── TWO SEPARATE LANGUAGES, DELIBERATELY ─────────────────────────────────
+ * They are not the same setting and must never be collapsed into one:
+ *
+ *   UI LOCALE            what language the DASHBOARD is in — the language the
+ *   (uiLocale)           business owner reads while configuring their agent.
+ *                        Covers every namespace. Changing it changes the whole
+ *                        interface, not one panel.
+ *
+ *   REPLY LANGUAGE       what language the AGENT SPEAKS to a customer.
+ *   (replyLanguage)      "en", "it", or "auto" to mirror whichever language the
+ *                        customer used. Applied in prompt.js, never here.
+ *
+ * A clinic in Milan may run its dashboard in Italian while its agent mirrors
+ * whichever language each caller uses. One setting cannot express that.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * WHY NOT next-intl / i18next: this is the whole system in one file, with no
+ * provider tree, loader or plugin layer to learn. A framework-coupled library
+ * would be more machinery than the problem needs.
  *
  * THE RULES:
  *   - `en` is the source of truth. Every other locale is measured against it.
  *   - A key missing from a locale falls back to `en` — never to a blank string,
- *     and never to the raw key, because a customer seeing "widget.input.send"
- *     in a chat window is worse than seeing English.
+ *     and never to the raw key, because someone seeing "chat.input.send"
+ *     on screen is worse than seeing English.
  *   - Key parity is enforced by `npm run i18n:check`, so the fallback path
  *     should be unreachable in practice. It exists for the case where it isn't.
  */
 
-export const SUPPORTED_LOCALES = ["en", "it", "ar", "ur"];
+/**
+ * ACTIVE interface languages. English is the default and the source of truth.
+ *
+ * Arabic and Urdu catalogs still exist on disk under `src/locales/ar` and
+ * `src/locales/ur` — fully translated, including Arabic's six plural forms.
+ * They are DORMANT, not deleted: reactivating one means adding its code here
+ * and to `catalogs.js`, nothing more. Being dormant, they are not covered by
+ * `npm run i18n:check`, so expect them to have drifted from `en` by the time
+ * they come back.
+ */
+export const SUPPORTED_LOCALES = ["en", "it"];
 export const DEFAULT_LOCALE = "en";
+
+/**
+ * Kept although neither active language is RTL. The helpers below are generic,
+ * cost nothing, and every layout was already built on logical CSS properties —
+ * so turning Arabic back on is a config change rather than a redesign. Removing
+ * this would quietly reintroduce the left/right assumptions it exists to prevent.
+ */
 export const RTL_LOCALES = ["ar", "ur"];
+
+/**
+ * What language the AGENT replies in. Distinct from the interface language.
+ *
+ *   "en" | "it"  always answer in that language
+ *   "auto"       answer in whichever language the customer wrote in
+ *
+ * `auto` is not a locale and never reaches `t()` — it is an instruction to the
+ * model, applied in prompt.js. Treating it as a locale would send a lookup
+ * hunting for a catalog named "auto".
+ */
+export const REPLY_LANGUAGES = ["en", "it", "auto"];
+export const DEFAULT_REPLY_LANGUAGE = "auto";
+
+/** @param {unknown} value */
+export function isReplyLanguage(value) {
+  return typeof value === "string" && REPLY_LANGUAGES.includes(value);
+}
+
+/**
+ * Everything a language switcher needs, anywhere in the system.
+ *
+ * `nativeName` is the language's name IN THAT LANGUAGE — "Italiano", not
+ * "Italian". A switcher labelled in the language you currently can't read is
+ * useless to the person who most needs it.
+ */
+export const LOCALE_META = SUPPORTED_LOCALES.map((code) => ({
+  code,
+  nativeName: CATALOGS[code].common[`language.${code}`],
+  dir: RTL_LOCALES.includes(code) ? "rtl" : "ltr",
+}));
+
+/**
+ * Every string for one language, as `{ namespace: { key: value } }`.
+ *
+ * This is how a frontend gets its whole interface in one request instead of
+ * asking per key — the partner's dashboard calls `GET /api/locales/<code>` and
+ * renders from what comes back. Add a key to the catalogs and it appears in his
+ * UI with no change on his side.
+ *
+ * @param {string} locale
+ * @param {string[]} [namespaces] defaults to all of them
+ */
+export function getCatalog(locale, namespaces = NAMESPACES) {
+  const safeLocale = isSupportedLocale(locale) ? locale : DEFAULT_LOCALE;
+  const out = {};
+
+  for (const namespace of namespaces) {
+    if (!NAMESPACES.includes(namespace)) continue;
+    // Merged over English so a gap never reaches the client as a blank label.
+    // `i18n:check` should make this unreachable; it's here for when it isn't.
+    out[namespace] = {
+      ...CATALOGS[DEFAULT_LOCALE][namespace],
+      ...CATALOGS[safeLocale][namespace],
+    };
+  }
+
+  return out;
+}
 
 /** @param {string} locale */
 export function isRTL(locale) {
@@ -47,7 +137,7 @@ export function isSupportedLocale(locale) {
  *
  * @param {object} args
  * @param {string} args.locale
- * @param {string} args.key  "namespace:key.path" — e.g. "widget:input.send"
+ * @param {string} args.key  "namespace:key.path" — e.g. "dashboard:chat.send"
  * @param {Record<string, string|number>} [args.vars] interpolated into {placeholders}
  * @param {number} [args.count] selects a plural form; also available as {count}
  * @returns {string}
@@ -86,7 +176,7 @@ export function t({ locale, key, vars = {}, count }) {
  * handler actually wants.
  *
  *   const tr = translator("ar");
- *   tr("widget:input.send");
+ *   tr("dashboard:chat.send");
  *
  * @param {string} locale
  */
@@ -164,8 +254,22 @@ function interpolate(template, vars, locale) {
  * @param {string} args.fallback         the tenant's default locale
  */
 export function resolveLocale({ requested, acceptLanguage, enabled, fallback }) {
-  const allowed = (enabled ?? []).filter(isSupportedLocale);
-  const pool = allowed.length ? allowed : [DEFAULT_LOCALE];
+  // `enabled` UNDEFINED and `enabled` EMPTY mean opposite things, and conflating
+  // them is a real bug this code already had once: every dashboard request
+  // silently resolved to English because "no tenant restriction" was read as
+  // "only English allowed".
+  //
+  //   undefined / null → unrestricted. Used for UI language, which isn't limited
+  //                      by any business's customer-facing languages.
+  //   []               → a tenant with nothing configured. Fall back to default.
+  //   [..]             → exactly these.
+  let pool;
+  if (enabled === undefined || enabled === null) {
+    pool = SUPPORTED_LOCALES;
+  } else {
+    const allowed = enabled.filter(isSupportedLocale);
+    pool = allowed.length ? allowed : [DEFAULT_LOCALE];
+  }
 
   if (requested && pool.includes(requested)) return requested;
 
@@ -174,7 +278,10 @@ export function resolveLocale({ requested, acceptLanguage, enabled, fallback }) 
   }
 
   if (fallback && pool.includes(fallback)) return fallback;
-  return pool[0];
+
+  // With an unrestricted pool, pool[0] would be whatever happens to sit first in
+  // SUPPORTED_LOCALES — prefer the explicit default over list order.
+  return pool.includes(DEFAULT_LOCALE) ? DEFAULT_LOCALE : pool[0];
 }
 
 /**

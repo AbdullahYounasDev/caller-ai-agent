@@ -1,6 +1,10 @@
 /**
  * Sliding-window rate limiting for public channel endpoints.
  *
+ * ⚠️ NOTHING CALLS THIS YET. It was written for the embeddable widget, which has
+ * been removed; it is kept because TELEPHONY needs it and the reasoning below is
+ * the expensive part, not the code. Its first caller will be the Twilio webhook.
+ *
  * ⚠️ IN-PROCESS, AND THAT IS A REAL LIMITATION. Each Node instance keeps its own
  * counters, so N instances means a caller effectively gets N× the limit. That's
  * acceptable while this runs as one process; it is NOT acceptable once you scale
@@ -23,7 +27,7 @@ const MAX_BUCKETS = 10_000;
 
 /**
  * @param {object} args
- * @param {string} args.key    what's being limited, e.g. "widget:pk_abc" or "conv:uuid"
+ * @param {string} args.key    what is being limited, e.g. "tenant:abc" or "conv:uuid"
  * @param {number} args.limit  max requests allowed in the window
  * @param {number} args.windowMs
  * @returns {{ok: true, remaining: number} | {ok: false, retryAfterSec: number}}
@@ -67,18 +71,18 @@ export function resetRateLimits() {
   buckets.clear();
 }
 
-/**
- * The limits for the widget channel.
+/*
+ * NO LIMIT CONSTANTS HERE ON PURPOSE. The previous set was named for the widget
+ * and, once that channel went, was a dead export inviting reuse at numbers
+ * measured for a completely different traffic shape.
  *
- * Two layers on purpose:
- *  - PER KEY catches "someone scraped a tenant's key and is hammering it", but
- *    is necessarily loose, because a popular site legitimately has many
- *    simultaneous visitors sharing one key.
- *  - PER CONVERSATION catches the actual abuse shape — one script looping
- *    messages — and can be tight, because no real human types 20 messages a
- *    minute. This is the one that does the useful work.
+ * THE SHAPE THAT WORKED, for whoever wires telephony: TWO layers.
+ *  - A LOOSE per-tenant limit catches "this account's traffic has gone wrong",
+ *    but cannot be tight — a busy business legitimately has many callers at once.
+ *  - A TIGHT per-conversation limit catches the actual abuse shape, one caller
+ *    or script looping, and can be strict because no real person talks that
+ *    fast. This is the layer that does the useful work.
+ *
+ * Measure both against real traffic before committing to numbers, and put them
+ * beside the caller rather than back in here as a shared default.
  */
-export const WIDGET_LIMITS = {
-  perKey: { limit: 120, windowMs: 60_000 },
-  perConversation: { limit: 20, windowMs: 60_000 },
-};

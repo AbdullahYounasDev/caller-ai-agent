@@ -1,37 +1,65 @@
 import enCommon from "@/locales/en/common.json";
-import enWidget from "@/locales/en/widget.json";
+import enDashboard from "@/locales/en/dashboard.json";
+import enCapabilities from "@/locales/en/capabilities.json";
+import enValidation from "@/locales/en/validation.json";
 import enErrors from "@/locales/en/errors.json";
 
 import itCommon from "@/locales/it/common.json";
-import itWidget from "@/locales/it/widget.json";
+import itDashboard from "@/locales/it/dashboard.json";
+import itCapabilities from "@/locales/it/capabilities.json";
+import itValidation from "@/locales/it/validation.json";
 import itErrors from "@/locales/it/errors.json";
 
-import arCommon from "@/locales/ar/common.json";
-import arWidget from "@/locales/ar/widget.json";
-import arErrors from "@/locales/ar/errors.json";
-
-import urCommon from "@/locales/ur/common.json";
-import urWidget from "@/locales/ur/widget.json";
-import urErrors from "@/locales/ur/errors.json";
-
 /**
- * Every catalog, statically imported.
+ * Every ACTIVE catalog, statically imported.
  *
- * WHY STATIC: the server handles requests in all four languages, so it needs all
- * four anyway, and static imports mean a missing or malformed JSON file is a
- * BUILD failure rather than a 500 at 2am on a customer's site.
+ * Active languages are English and Italian. The `ar` and `ur` catalogs are
+ * still on disk, fully translated, but DORMANT — reactivating one means adding
+ * its six imports above and an entry below, plus its code to SUPPORTED_LOCALES
+ * and ACTIVE_LOCALES (scripts/check-locales.mjs). Nothing else.
  *
- * WHEN YOU BUILD THE WIDGET BUNDLE (Phase 2): don't import this file. A browser
- * only ever needs the one locale it's rendering, and shipping Arabic and Urdu to
- * an English visitor is dead bytes in a bundle that loads on someone else's
- * site. Import `@/locales/<locale>/widget.json` dynamically there instead — the
- * JSON files are the shared source of truth, this aggregation is not.
+ * THE NAMESPACES COVER THE WHOLE PRODUCT, not one screen:
+ *   common       shared words — buttons, states, language and tone names
+ *   dashboard    the business-facing admin screens: labels, help text, sections
+ *   capabilities what the agent can do, as a business reads it in the dashboard
+ *   validation   what a business is told when it enters something invalid
+ *   errors       runtime failures shown to whoever is talking to the agent
+ *
+ * There was a sixth, `widget`, for the embeddable browser chat. That channel was
+ * removed; do not add the namespace back without the channel.
+ *
+ * Picking a language changes ALL of it. Nothing user-facing anywhere in the
+ * system is a literal string in code.
+ *
+ * WHY STATIC: the server handles requests in every active language, so it needs
+ * them all anyway, and static imports mean a missing or malformed JSON file is
+ * a BUILD failure rather than a 500 at 2am on a customer's site.
+ *
+ * The server handles every active language, so it imports them all. A client
+ * that only needs one should fetch it from /api/locales rather than importing
+ * this file.
  */
 export const CATALOGS = {
-  en: { common: enCommon, widget: enWidget, errors: enErrors },
-  it: { common: itCommon, widget: itWidget, errors: itErrors },
-  ar: { common: arCommon, widget: arWidget, errors: arErrors },
-  ur: { common: urCommon, widget: urWidget, errors: urErrors },
+  en: {
+    common: enCommon,
+    dashboard: enDashboard,
+    capabilities: enCapabilities,
+    validation: enValidation,
+    errors: enErrors,
+  },
+  it: {
+    common: itCommon,
+    dashboard: itDashboard,
+    capabilities: itCapabilities,
+    validation: itValidation,
+    errors: itErrors,
+  },
 };
 
-export const NAMESPACES = ["common", "widget", "errors"];
+export const NAMESPACES = [
+  "common",
+  "dashboard",
+  "capabilities",
+  "validation",
+  "errors",
+];

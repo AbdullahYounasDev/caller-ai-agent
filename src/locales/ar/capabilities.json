@@ -1,0 +1,16 @@
+{
+  "collect_contact_info.label": "جمع بيانات التواصل",
+  "collect_contact_info.description": "يجمع اسم العميل ورقم هاتفه وبريده الإلكتروني وسبب تواصله، ثم يؤكدها معه.",
+
+  "book_appointment.label": "حجز المواعيد",
+  "book_appointment.description": "يسجّل الحجز — الخدمة والتاريخ والوقت وبيانات العميل.",
+
+  "take_message.label": "تدوين رسالة",
+  "take_message.description": "يسجّل رسالة لفريقك عندما لا يتوفر أحد أو عندما يحتاج الطلب إلى شخص.",
+
+  "check_order_status.label": "متابعة حالة الطلب",
+  "check_order_status.description": "يبحث عن طلب أو حجز برقمه المرجعي ويوضح حالته الحالية.",
+
+  "transfer_to_human.label": "التحويل إلى موظف",
+  "transfer_to_human.description": "يحوّل المحادثة إلى فريقك — تحويل مباشر في المكالمات، وتنبيه في المحادثة النصية."
+}

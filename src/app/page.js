@@ -1,27 +1,151 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { translator, dirFor, isRTL, SUPPORTED_LOCALES } from "@/lib/i18n";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { markdown } from "@codemirror/lang-markdown";
+import { EditorView } from "@codemirror/view";
+import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
 
-// Manual test harness for the API routes — NOT the real widget UI.
-// Its only job is letting you prove the pipeline works end to end without
-// curl/Postman. Delete it once a real widget frontend exists (Phase 2).
+// Hidden until tool-calling actually executes (Phase 4, respond.js) — showing
+// capability toggles for things the agent can only ever DESCRIBE, never do,
+// invited confusion about what switching them on actually changes right now.
+// Off is a display choice, not a data change: nothing here touches
+// config.capabilities itself, so flipping this back on needs no migration.
+const SHOW_CAPABILITIES = false;
+
+// A light, explicit CodeMirror theme. Without one, CodeMirror's own default
+// styling reads as near-white text on a white background in this app's light
+// UI — the editor LOOKED broken (illegible) even though editing worked fine.
+const editorTheme = EditorView.theme(
+  {
+    "&": { backgroundColor: "#ffffff", color: "#111827", fontSize: "13px" },
+    ".cm-content": { caretColor: "#111827" },
+    ".cm-gutters": { backgroundColor: "#f9fafb", color: "#9ca3af", border: "none" },
+    ".cm-activeLine": { backgroundColor: "#f3f4f6" },
+    ".cm-activeLineGutter": { backgroundColor: "#f3f4f6" },
+    "&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection": {
+      backgroundColor: "#bfdbfe !important",
+    },
+  },
+  { dark: false }
+);
+
+// A plain overlay + panel, not a <dialog> — <dialog>'s built-in light-dismiss
+// and focus trapping fight CodeMirror's own key handling (Escape, Tab) more
+// than they help here. Escape-to-close and click-outside-to-close are wired
+// by hand instead, and stopPropagation on the panel keeps a click landing on
+// the editor from bubbling up and closing it.
+function Modal({ title, onClose, children }) {
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded bg-white shadow-xl md:max-w-3xl lg:max-w-4xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-gray-200 px-4 py-3">
+          <h3 className="text-sm font-medium">{title}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded px-2 py-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Small inline icons (no icon library — three glyphs isn't worth a
+// dependency) for the per-document row actions. `aria-label` on the BUTTON
+// carries the same translated text a visible label would have; only the
+// visible text is gone, not the accessible name.
+const ICON_PROPS = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round", strokeLinejoin: "round" };
+
+function EditIcon() {
+  return (
+    <svg {...ICON_PROPS} aria-hidden="true">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg {...ICON_PROPS} aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+    </svg>
+  );
+}
+
+function RetryIcon() {
+  return (
+    <svg {...ICON_PROPS} aria-hidden="true">
+      <path d="M3 12a9 9 0 0 1 15-6.7L21 8" />
+      <path d="M21 3v5h-5" />
+      <path d="M21 12a9 9 0 0 1-15 6.7L3 16" />
+      <path d="M8 16H3v5" />
+    </svg>
+  );
+}
+
+/** Icon-only row action, coloured by intent (neutral/blue/red) instead of
+ *  carrying a text label — `title` gives the same word back as a hover
+ *  tooltip, and `aria-label` gives it to assistive tech. */
+function IconButton({ onClick, disabled, label, color, children }) {
+  const colors = {
+    neutral: "border-gray-300 text-gray-600 hover:bg-gray-50",
+    blue: "border-blue-300 text-blue-700 hover:bg-blue-50",
+    red: "border-red-300 text-red-700 hover:bg-red-50",
+  };
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={label}
+      aria-label={label}
+      className={`rounded border p-1.5 disabled:opacity-40 ${colors[color]}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+// THE TEST CONSOLE.
 //
-// NOTE ON THE CONFIG PANEL: /api/agent-config is a server-to-server endpoint
-// guarded by INTERNAL_API_KEY, and this page is a browser client, so the panel
-// only works while that variable is UNSET — i.e. on a dev machine. That's
-// deliberate: sending the internal secret to the browser to make a throwaway
-// harness more convenient would defeat the point of having the guard. In
-// production the partner's dashboard backend calls that endpoint, not a browser.
+// This is how we configure an agent and talk to it while the real channel —
+// telephony — is built. It is an internal tool, not a product surface: every
+// endpoint it calls is INTERNAL_API_KEY guarded, which is also why it only
+// works while that variable is unset (i.e. on a dev machine).
+//
+// The embeddable chat widget that used to be here has been removed entirely.
+// The chat panel below is a TEST HARNESS for the same brain a phone call will
+// use, not a channel we ship.
+//
+// TWO LANGUAGE CONTROLS, and they answer different questions:
+//   • Interface language     — changes THIS ENTIRE PAGE.
+//   • Agent reply language   — English, Italian, or mirror whoever is speaking.
 
 const DEFAULT_TENANT_ID = "test-tenant";
-const LOCALES = SUPPORTED_LOCALES;
 const TONES = ["professional", "friendly", "concise", "formal"];
 
-// Reads a fetch Response safely — the API routes should always return JSON, but
-// if the dev server hard-crashes (or a proxy/timeout steps in) the body can come
-// back empty or as an HTML error page. Parsing text first means the UI shows
-// *something* instead of throwing "Unexpected end of JSON input" with no clue.
 async function readJsonSafe(res) {
   const raw = await res.text();
   try {
@@ -35,141 +159,202 @@ async function readJsonSafe(res) {
   }
 }
 
+// A provider outage or quota limit is TRANSIENT — retrying later can genuinely
+// succeed, because nothing about the document itself was wrong. Shared by
+// humanizeError (what to say) and isRetryableError (whether "Try again" makes
+// sense) so the two classifications never drift apart.
+const QUOTA_PATTERN = /RESOURCE_EXHAUSTED|exceeded your current quota|rate.?limit/i;
+const UNAVAILABLE_PATTERN = /UNAVAILABLE|ECONNREFUSED|ECONNRESET|fetch failed|network/i;
+
+/**
+ * Turn a raw error — often a provider SDK's own error object stringified
+ * wholesale, brace-shaped JSON and all (a Gemini quota error is a multi-line
+ * JSON blob with internal links and a retry countdown) — into something a
+ * business owner can read. Our OWN validation messages ("Document is too
+ * large: 420 sections, limit 400") are already short, plain-English sentences
+ * with no JSON shape, so those pass through untouched; anything that LOOKS
+ * technical is matched against known signatures and replaced with a
+ * translated, human message instead.
+ */
+function humanizeError(raw, t) {
+  const message = String(raw ?? "").trim();
+  if (!message) return t("dashboard:errors.generic");
+
+  if (QUOTA_PATTERN.test(message)) return t("dashboard:errors.quotaExceeded");
+  if (UNAVAILABLE_PATTERN.test(message)) return t("dashboard:errors.unavailable");
+  // Our own thrown Errors are short, brace-free English sentences — safe as-is.
+  if (!/[{}]/.test(message) && message.length <= 200) return message;
+
+  return t("dashboard:errors.generic");
+}
+
+/**
+ * Is this failure worth offering "Try again" for? A quota/outage error will
+ * likely succeed on retry with the SAME content — no re-upload needed (see
+ * retrySource in lib/agent/ingest.js). A validation error like "Document is
+ * too large: 420 sections, limit 400" will fail again identically every
+ * time; offering to retry it would just train people to click a button that
+ * can never work.
+ */
+function isRetryableError(raw) {
+  const message = String(raw ?? "");
+  return QUOTA_PATTERN.test(message) || UNAVAILABLE_PATTERN.test(message);
+}
+
 export default function Home() {
   const [tenantId, setTenantId] = useState(DEFAULT_TENANT_ID);
 
-  // --- agent config state ---
+  // --- the two languages ---
+  const [uiLocale, setUiLocale] = useState("en");
+  // True once this tenant's SAVED dashboard language has been applied.
+  // A ref, not state: it must survive a refetch without causing one, and it
+  // must not be stored on the config object — the previous version did exactly
+  // that, every refetch replaced the object and lost the flag, and the
+  // adoption then re-ran and overrode whatever language the user had picked.
+  const adoptedRef = useRef(false);
+  // The actual <input type="file"> lives off-screen — the visible "Upload
+  // file" button just forwards its click here, so all three ingestion
+  // actions can be styled as identical buttons in one row.
+  const fileInputRef = useRef(null);
+
+  // --- agent config ---
   const [config, setConfig] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [configStatus, setConfigStatus] = useState(null);
   const [savingConfig, setSavingConfig] = useState(false);
+  const [reloadingConfig, setReloadingConfig] = useState(false);
 
-  // --- ingest panel state ---
-  const [source, setSource] = useState("faq.txt");
+  // --- knowledge ---
+  const [docs, setDocs] = useState([]);
+  const [limits, setLimits] = useState({ maxBytes: 0, extensions: [] });
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+  const [deletingSelected, setDeletingSelected] = useState(false);
+  const [dismissingJobs, setDismissingJobs] = useState(false);
+  // Per-document id currently mid Edit/Delete/Try-again — every button on
+  // that ONE row disables while any of the three is in flight, so a second
+  // click can't fire a second request against a document already being
+  // acted on (a double-click on Delete, say, must not send two DELETEs).
+  const [busyDocIds, setBusyDocIds] = useState(() => new Set());
+  const [editingId, setEditingId] = useState(null);
+  // True while the "Write document" modal is open for a BRAND NEW document —
+  // distinct from editingId, which is only set once a document already
+  // exists. Both open the same Modal+editor; saveDoc already branches
+  // correctly on editingId being null vs set.
+  const [composerOpen, setComposerOpen] = useState(false);
+  const [docTitle, setDocTitle] = useState("");
   const [docText, setDocText] = useState("");
+  const [jobs, setJobs] = useState([]);
+  // Bumped when an upload starts, to restart polling after it has gone quiet.
+  const [jobEpoch, setJobEpoch] = useState(0);
+  // True while the "Read website" row (url input + submit/cancel) is expanded
+  // in place of the three-button row.
+  const [crawlOpen, setCrawlOpen] = useState(false);
+  const [crawlUrl, setCrawlUrl] = useState("");
+  const [crawling, setCrawling] = useState(false);
   const [ingestStatus, setIngestStatus] = useState(null);
   const [ingesting, setIngesting] = useState(false);
 
-  // --- widget key state ---
-  // The chat panel now goes through the real public auth path: a widget key
-  // resolves to the tenant server-side. Kept in localStorage so a reload doesn't
-  // mean provisioning another one.
-  const [publicKey, setPublicKey] = useState("");
-  const [keyStatus, setKeyStatus] = useState(null);
-  const [creatingKey, setCreatingKey] = useState(false);
-
-  // --- chat panel state ---
+  // --- chat ---
   const [conversationId, setConversationId] = useState(null);
-  const [conversationToken, setConversationToken] = useState(null);
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
-  const [locale, setLocale] = useState("en");
   const [sending, setSending] = useState(false);
 
-  // The chat panel below renders through the SAME translator the widget will
-  // use, so switching the locale dropdown is a real preview of what an Italian
-  // or Arabic customer sees — including direction — not a mock-up.
-  const tr = useMemo(() => translator(locale), [locale]);
+  const t = useMemo(() => translator(uiLocale), [uiLocale]);
+  const dir = dirFor(uiLocale);
 
+  // The capability catalog is re-fetched whenever the dashboard language
+  // changes, because its labels are translated SERVER-side — the dashboard
+  // never holds its own copy of that text.
   const loadConfig = useCallback(async () => {
     setConfigStatus(null);
+    setReloadingConfig(true);
     try {
+      const q = `tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`;
       const [configRes, catalogRes] = await Promise.all([
-        fetch(`/api/agent-config?tenantId=${encodeURIComponent(tenantId)}`),
-        fetch("/api/agent-config/catalog"),
+        fetch(`/api/agent-config?${q}`),
+        fetch(`/api/agent-config/catalog?locale=${uiLocale}`),
       ]);
       const configData = await readJsonSafe(configRes);
       if (!configRes.ok) throw new Error(configData.error || "Failed to load config");
       const catalogData = await readJsonSafe(catalogRes);
       if (!catalogRes.ok) throw new Error(catalogData.error || "Failed to load catalog");
 
-      setConfig(configData.config);
-      setCatalog(catalogData.capabilities);
-      setLocale(configData.config.defaultLocale);
-      setConfigStatus(
-        configData.config.exists ? "Loaded." : "No config saved yet — showing defaults."
+      // ⚠️ DO NOT replace the whole config with the server's copy here.
+      //
+      // Changing the language dropdown re-runs this fetch (the capability
+      // labels are translated server-side). The server returns the SAVED
+      // language, which would overwrite the selection the user just made — so
+      // picking English on a business saved as Italian snapped straight back
+      // to Italian and the dropdown appeared broken.
+      //
+      // Once the saved language has been adopted, the in-flight choice wins
+      // until it is saved or the page is reloaded.
+      setConfig((prev) =>
+        adoptedRef.current && prev
+          ? { ...configData.config, uiLocale: prev.uiLocale }
+          : configData.config
       );
+
+      // Adopt the saved language ONCE, so the page opens in the language the
+      // business chose. Tracked in a ref rather than on the config object: the
+      // previous version kept an `__adopted` flag there, and every refetch
+      // replaced the object and lost it — which is what let the adoption run
+      // again and fight the user's selection.
+      if (!adoptedRef.current) {
+        adoptedRef.current = true;
+        if (configData.config.uiLocale) setUiLocale(configData.config.uiLocale);
+      }
+
+      setCatalog(catalogData.capabilities);
+      setConfigStatus(configData.config.exists ? t("common:state.saved") : null);
     } catch (err) {
-      setConfigStatus(`Error: ${err.message}`);
+      setConfigStatus(humanizeError(err.message, t));
+    } finally {
+      setReloadingConfig(false);
     }
-  }, [tenantId]);
+  }, [tenantId, uiLocale, t]);
 
   useEffect(() => {
     loadConfig();
   }, [loadConfig]);
 
-  // Restore this tenant's key from a previous session.
   useEffect(() => {
-    try {
-      setPublicKey(window.localStorage.getItem(`widgetKey:${tenantId}`) ?? "");
-    } catch {
-      // Private browsing / storage disabled — the field just starts empty.
-    }
-    // Keys are tenant-scoped, so switching tenant must drop the conversation too.
+    // A different business has its own saved language to adopt.
+    adoptedRef.current = false;
     setConversationId(null);
-    setConversationToken(null);
     setMessages([]);
   }, [tenantId]);
-
-  function rememberKey(key) {
-    setPublicKey(key);
-    try {
-      window.localStorage.setItem(`widgetKey:${tenantId}`, key);
-    } catch {
-      // Non-fatal: the key still works for this page load.
-    }
-  }
-
-  async function createKey() {
-    setCreatingKey(true);
-    setKeyStatus(null);
-    try {
-      const res = await fetch(`/api/widget-keys?tenantId=${encodeURIComponent(tenantId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        // Empty allowlist = same-origin only, which is exactly what this
-        // harness needs. A real tenant adds its site's origin here.
-        body: JSON.stringify({ allowedOrigins: [], label: "Test harness" }),
-      });
-      const data = await readJsonSafe(res);
-      if (!res.ok) throw new Error(data.error || "Could not create key");
-
-      rememberKey(data.key.publicKey);
-      setKeyStatus("Key created — same-origin only.");
-    } catch (err) {
-      setKeyStatus(`Error: ${err.message}`);
-    } finally {
-      setCreatingKey(false);
-    }
-  }
 
   async function saveConfig(e) {
     e.preventDefault();
     setSavingConfig(true);
     setConfigStatus(null);
     try {
-      const res = await fetch(`/api/agent-config?tenantId=${encodeURIComponent(tenantId)}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          businessName: config.businessName,
-          purpose: config.purpose,
-          tone: config.tone,
-          languages: config.languages,
-          defaultLocale: config.defaultLocale,
-          capabilities: config.capabilities,
-        }),
-      });
+      const res = await fetch(
+        `/api/agent-config?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            businessName: config.businessName,
+            purpose: config.purpose,
+            tone: config.tone,
+            uiLocale: config.uiLocale,
+            replyLanguage: config.replyLanguage,
+            capabilities: config.capabilities,
+          }),
+        }
+      );
       const data = await readJsonSafe(res);
       if (!res.ok) {
-        throw new Error(
-          data.details ? `${data.error}: ${data.details.join("; ")}` : data.error || "Save failed"
-        );
+        throw new Error(data.details ? data.details.join(" · ") : data.error || "Save failed");
       }
       setConfig(data.config);
-      setConfigStatus("Saved. New messages will use it immediately.");
+      setUiLocale(data.config.uiLocale);
+      setConfigStatus(t("common:state.saved"));
     } catch (err) {
-      setConfigStatus(`Error: ${err.message}`);
+      setConfigStatus(humanizeError(err.message, t));
     } finally {
       setSavingConfig(false);
     }
@@ -189,360 +374,1090 @@ export default function Home() {
     }));
   }
 
-  function toggleLanguage(code, on) {
-    setConfig((prev) => {
-      const languages = on
-        ? [...new Set([...prev.languages, code])]
-        : prev.languages.filter((l) => l !== code);
-      const safe = languages.length ? languages : ["en"];
-      return {
-        ...prev,
-        languages: safe,
-        // Keep the two in step — the API rejects a defaultLocale that isn't enabled.
-        defaultLocale: safe.includes(prev.defaultLocale) ? prev.defaultLocale : safe[0],
-      };
-    });
+  const loadDocs = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Failed to load documents");
+      setDocs(data.sources);
+      setLimits(data.limits);
+      // Drop any selected id no longer in this list — a tenant switch or a
+      // delete from another tab should fall out of "Delete selected (N)"
+      // instead of leaving a stale count behind.
+      setSelectedIds((prev) => {
+        const validIds = new Set(data.sources.map((s) => s.id));
+        const next = new Set([...prev].filter((id) => validIds.has(id)));
+        return next.size === prev.size ? prev : next;
+      });
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    }
+  }, [tenantId, uiLocale, t]);
+
+  useEffect(() => {
+    loadDocs();
+  }, [loadDocs]);
+
+  function resetDocForm() {
+    setEditingId(null);
+    setComposerOpen(false);
+    setDocTitle("");
+    setDocText("");
   }
 
-  async function handleIngest(e) {
+  function openComposer() {
+    setIngestStatus(null);
+    setDocTitle("");
+    setDocText("");
+    setComposerOpen(true);
+  }
+
+  function openCrawl() {
+    setIngestStatus(null);
+    setCrawlOpen(true);
+  }
+
+  function closeCrawl() {
+    setCrawlOpen(false);
+    setCrawlUrl("");
+  }
+
+  // Saving REPLACES when the name already exists — the server deletes the old
+  // chunks in the same transaction that writes the new ones. That is the whole
+  // point of this panel: a business can correct a wrong price instead of
+  // stacking a second copy of it on top of the first.
+  async function saveDoc(e) {
     e.preventDefault();
+    if (!docTitle.trim() || !docText.trim()) return;
+
+    // CONFIRM BEFORE REPLACE — only for a NEW document (editingId null). An
+    // actual edit is saving the SAME document back under its own title, which
+    // is never a collision; renaming one into ANOTHER document's title is a
+    // separate, already-guarded case (the PUT handler rejects it outright).
+    if (!editingId) {
+      const clash = docs.find((d) => d.title === docTitle.trim());
+      if (
+        clash &&
+        !window.confirm(t("dashboard:knowledge.confirmReplace", { vars: { titles: clash.title } }))
+      ) {
+        return;
+      }
+    }
+
     setIngesting(true);
     setIngestStatus(null);
     try {
-      const res = await fetch("/api/ingest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tenantId, source, text: docText }),
-      });
+      const query = `tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`;
+      const res = editingId
+        ? await fetch(`/api/knowledge/${editingId}?${query}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: docTitle, text: docText }),
+          })
+        : await fetch(`/api/knowledge?${query}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title: docTitle, text: docText }),
+          });
+
       const data = await readJsonSafe(res);
-      if (!res.ok) throw new Error(data.error || "Ingest failed");
-      setIngestStatus(`Inserted ${data.chunksInserted} chunk(s).`);
+      if (!res.ok) throw new Error(data.error || "Save failed");
+
+      setIngestStatus(
+        data.document?.replaced || editingId
+          ? t("dashboard:knowledge.replaced")
+          : t("dashboard:knowledge.added")
+      );
+      resetDocForm();
+      await loadDocs();
     } catch (err) {
-      setIngestStatus(`Error: ${err.message}`);
+      setIngestStatus(humanizeError(err.message, t));
     } finally {
       setIngesting(false);
     }
   }
 
-  async function handleSend(e) {
-    e.preventDefault();
-    if (!input.trim()) return;
+  // ---- import progress -----------------------------------------------------
+  //
+  // Polled rather than streamed: progress moves on chunk and page boundaries,
+  // seconds apart, so a 1s poll loses nothing a person can perceive and avoids
+  // a long-lived connection per open tab. Polling STOPS entirely once nothing
+  // is running, so an idle dashboard makes no requests at all.
+  const pollJobs = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `/api/knowledge/jobs?tenantId=${encodeURIComponent(tenantId)}`
+      );
+      if (!res.ok) return false;
+      const data = await readJsonSafe(res);
+      setJobs(data.jobs);
+      return data.active;
+    } catch {
+      // A failed poll is not worth surfacing — the next one usually succeeds,
+      // and an error banner that flickers on a dropped request is worse than
+      // a progress bar that pauses for a second.
+      return false;
+    }
+  }, [tenantId]);
 
-    if (!publicKey) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: "Error: create a widget key first." },
-      ]);
+  useEffect(() => {
+    let timer;
+    let stopped = false;
+
+    const tick = async () => {
+      const active = await pollJobs();
+      if (stopped) return;
+      if (active) {
+        timer = setTimeout(tick, 1000);
+      } else {
+        // Nothing running. Refresh the document list once — a finished import
+        // has just added or replaced a row — then go quiet.
+        await loadDocs();
+      }
+    };
+
+    tick();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+    // `jobEpoch` is bumped whenever an upload starts, which is what restarts
+    // polling after it has gone quiet.
+  }, [pollJobs, loadDocs, jobEpoch]);
+
+  async function dismissJobs() {
+    setDismissingJobs(true);
+    try {
+      await fetch(`/api/knowledge/jobs?tenantId=${encodeURIComponent(tenantId)}`, {
+        method: "DELETE",
+      });
+      setJobs([]);
+    } catch {
+      // Cosmetic; the rows age out of the query on their own.
+    } finally {
+      setDismissingJobs(false);
+    }
+  }
+
+  /** Human sentence for what a job is doing right now. */
+  function jobLabel(job) {
+    if (job.status === "done") return t("dashboard:jobs.done");
+    if (job.status === "failed") return job.error ? humanizeError(job.error, t) : t("dashboard:jobs.failed");
+    if (job.status === "cancelled") return t("dashboard:jobs.cancelled");
+    return t(`dashboard:jobs.stage.${job.stage}`, {
+      vars: { done: job.itemsDone, total: job.itemsTotal },
+    });
+  }
+
+  // Only a queued or processing job can be cancelled — the server no-ops on
+  // anything already finished. Optimistically flips this one row to
+  // "cancelled" so the button disappears immediately instead of waiting for
+  // the next 1s poll, which otherwise reads as the click having done nothing.
+  async function cancelJobRow(id) {
+    setJobs((prev) => prev.map((j) => (j.id === id ? { ...j, status: "cancelled" } : j)));
+    try {
+      await fetch(`/api/knowledge/jobs/${id}?tenantId=${encodeURIComponent(tenantId)}`, {
+        method: "DELETE",
+      });
+    } catch {
+      // The next poll reconciles with the server's actual state either way.
+    } finally {
+      await loadDocs();
+    }
+  }
+
+  // Crawling is queued as a background job on the server — same reason
+  // uploads are: several page fetches plus an embedding per chunk can run well
+  // past a request timeout. This used to read `data.document.pagesCrawled`
+  // straight off the POST response, which only ever made sense when crawling
+  // was synchronous; since the server answers with a job id (202) the field
+  // was always undefined and crawling a website threw
+  // "Cannot read properties of undefined (reading 'pagesCrawled')" before it
+  // ever got a chance to run. It now follows the exact same fire-and-forget +
+  // poll pattern as uploadDocs(), and the shared job progress panel below
+  // reports the outcome.
+  async function crawlWebsite() {
+    const url = crawlUrl.trim();
+    if (!url) return;
+
+    // CONFIRM BEFORE REPLACE. The server titles a crawl by the site's host
+    // (no title field is sent here) — replicated client-side just for this
+    // check, so a re-crawl of a site already in the list gets the same
+    // confirmation an upload or a typed document would.
+    let host;
+    try {
+      host = new URL(url).host;
+    } catch {
+      // An invalid URL is reported by the server's own validation below;
+      // this check simply has nothing to compare in that case.
+    }
+    const clash = host && docs.find((d) => d.title === host);
+    if (clash && !window.confirm(t("dashboard:knowledge.confirmReplace", { vars: { titles: host } }))) {
       return;
     }
 
+    setCrawling(true);
+    setIngestStatus(null);
+    try {
+      const res = await fetch(
+        `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url, maxPages: 10 }),
+        }
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Could not read that website");
+      closeCrawl();
+      setJobEpoch((n) => n + 1);
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      setCrawling(false);
+    }
+  }
+
+  // MANY FILES, ONE REQUEST, ONE JOB EACH.
+  //
+  // The server queues each file separately and answers immediately with job
+  // ids, so this returns in milliseconds however large the files are — the
+  // reading, OCR and embedding all happen behind the progress bars.
+  async function uploadDocs(files) {
+    const list = [...(files ?? [])];
+    if (!list.length) return;
+
+    // CONFIRM BEFORE REPLACE. A file whose name matches an existing document
+    // silently overwrote it — the server's "replace, don't append" rule
+    // (lib/agent/ingest.js) is correct for the workflow it was built for
+    // (fixing a wrong price and re-uploading), but nothing stopped it from
+    // firing on an accidental name collision too. Checked against the
+    // already-loaded list, so this is a UX courtesy — the server enforces the
+    // real rule regardless.
+    const existingTitles = new Set(docs.map((d) => d.title));
+    const collisions = list.filter((f) => existingTitles.has(f.name));
+    if (
+      collisions.length &&
+      !window.confirm(
+        t("dashboard:knowledge.confirmReplace", {
+          vars: { titles: collisions.map((f) => f.name).join(", ") },
+        })
+      )
+    ) {
+      return;
+    }
+
+    setIngesting(true);
+    setIngestStatus(null);
+    try {
+      const form = new FormData();
+      for (const file of list) form.append("file", file);
+
+      const res = await fetch(
+        `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        { method: "POST", body: form }
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok && !data.jobs?.length) throw new Error(data.error || "Upload failed");
+
+      // Files the server refused (wrong type, too large) are reported per file
+      // rather than failing the batch — nine good files should still import.
+      if (data.rejected?.length) {
+        setIngestStatus(
+          `${t("dashboard:knowledge.rejected", { vars: { count: data.rejected.length } })}: ` +
+            data.rejected.map((r) => `${r.fileName} — ${r.error}`).join(" · ")
+        );
+      }
+
+      // Restart polling: it stops when nothing is running, and this is the
+      // moment something is.
+      setJobEpoch((n) => n + 1);
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      setIngesting(false);
+    }
+  }
+
+  function markDocBusy(id, busy) {
+    setBusyDocIds((prev) => {
+      const next = new Set(prev);
+      if (busy) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  // Loads the ORIGINAL text back into the form. Chunks are derived data; this
+  // is what the business actually wrote, or what we extracted from their file.
+  async function editDoc(id) {
+    setIngestStatus(null);
+    markDocBusy(id, true);
+    try {
+      const res = await fetch(
+        `/api/knowledge/${id}?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Could not open document");
+      setEditingId(id);
+      setDocTitle(data.document.title);
+      setDocText(data.document.content);
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      markDocBusy(id, false);
+    }
+  }
+
+  // Re-embeds a FAILED document using what's already stored — no re-upload,
+  // no new Cloudinary call (see lib/agent/ingest.js retrySource). Queued as a
+  // background job like any other import, so it gets the same progress bar
+  // and can be cancelled the same way.
+  async function retryDoc(id) {
+    setIngestStatus(null);
+    markDocBusy(id, true);
+    try {
+      const res = await fetch(
+        `/api/knowledge/${id}/retry?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        { method: "POST" }
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Could not retry that document");
+      setJobEpoch((n) => n + 1);
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      // Left busy a beat longer would be wrong here: the retry is now a
+      // QUEUED JOB, not an in-flight request, so there is nothing further for
+      // this row's buttons to wait on — the job panel takes over from here.
+      markDocBusy(id, false);
+    }
+  }
+
+  async function deleteDoc(id) {
+    if (!window.confirm(t("dashboard:knowledge.confirmDelete"))) return;
+    setIngestStatus(null);
+    markDocBusy(id, true);
+    try {
+      const res = await fetch(
+        `/api/knowledge/${id}?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        { method: "DELETE" }
+      );
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Delete failed");
+      if (editingId === id) resetDocForm();
+      setSelectedIds((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+      setIngestStatus(t("dashboard:knowledge.deleted"));
+      await loadDocs();
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      markDocBusy(id, false);
+    }
+  }
+
+  function toggleSelected(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelectedIds((prev) => (prev.size === docs.length ? new Set() : new Set(docs.map((d) => d.id))));
+  }
+
+  // Reuses the same single-document DELETE the row button calls, in parallel —
+  // there is no bulk endpoint, and there does not need to be one: each delete
+  // is already its own transaction (cascade the chunks, then best-effort clean
+  // up Cloudinary), so N of them are just N independent calls.
+  async function deleteSelected() {
+    if (!selectedIds.size) return;
+    if (
+      !window.confirm(
+        t("dashboard:knowledge.confirmDeleteMany", { vars: { count: selectedIds.size } })
+      )
+    ) {
+      return;
+    }
+    setIngestStatus(null);
+    setDeletingSelected(true);
+    const ids = [...selectedIds];
+    try {
+      const results = await Promise.all(
+        ids.map((id) =>
+          fetch(`/api/knowledge/${id}?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`, {
+            method: "DELETE",
+          }).then((res) => res.ok)
+        )
+      );
+      const failedCount = results.filter((ok) => !ok).length;
+      if (editingId && ids.includes(editingId)) resetDocForm();
+      setSelectedIds(new Set());
+      setIngestStatus(
+        failedCount
+          ? t("dashboard:knowledge.deleteManyPartial", {
+              vars: { done: ids.length - failedCount, failed: failedCount },
+            })
+          : t("dashboard:knowledge.deletedMany", { vars: { count: ids.length } })
+      );
+      await loadDocs();
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+    } finally {
+      setDeletingSelected(false);
+    }
+  }
+
+  // Streams from /api/chat. Streaming is kept in the test console on purpose:
+  // voice needs token-by-token output to start speaking before a sentence is
+  // finished, so the path stays exercised rather than being rebuilt later.
+  async function handleSend(e) {
+    e.preventDefault();
+    if (!input.trim() || sending) return;
+
     const userMessage = input;
     setInput("");
-    setMessages((prev) => [...prev, { role: "user", content: userMessage }]);
+    setMessages((p) => [...p, { role: "user", content: userMessage }]);
     setSending(true);
 
     try {
-      // `?key=` in the URL as well as the body: a CORS preflight carries no
-      // body, so the OPTIONS handler reads the key from the query string.
-      const res = await fetch(`/api/widget?key=${encodeURIComponent(publicKey)}`, {
+      const res = await fetch(`/api/chat?tenantId=${encodeURIComponent(tenantId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          publicKey,
-          conversationId,
-          conversationToken,
-          message: userMessage,
-          locale,
-        }),
+        body: JSON.stringify({ message: userMessage, conversationId }),
       });
-      const data = await readJsonSafe(res);
-      if (!res.ok) throw new Error(data.error || "Widget call failed");
 
-      setConversationId(data.conversationId);
-      setConversationToken(data.conversationToken);
-      setMessages((prev) => [...prev, { role: "assistant", content: data.reply }]);
+      if (!res.ok || !res.body) {
+        const err = await res.json().catch(() => null);
+        throw new Error(err?.error || `Request failed (${res.status})`);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let streamingStarted = false;
+
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by a blank line, and a frame can arrive split
+        // across reads — so whatever follows the last separator stays buffered.
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+
+        for (const frame of frames) {
+          const event = (frame.match(/^event: (.*)$/m) || [])[1];
+          const data = (frame.match(/^data: (.*)$/m) || [])[1];
+          if (!data) continue;
+          const payload = JSON.parse(data);
+
+          if (event === "session") {
+            setConversationId(payload.conversationId);
+          } else if (event === "chunk") {
+            streamingStarted = true;
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant" && last.pending) {
+                return [...prev.slice(0, -1), { ...last, content: last.content + payload.text }];
+              }
+              return [...prev, { role: "assistant", content: payload.text, pending: true }];
+            });
+          } else if (event === "done") {
+            // model/sources are debug metadata from respond() (see
+            // lib/agent/respond.js) — which provider actually answered, and
+            // which of the tenant's documents (if any) it was grounded in.
+            // Attached to the bubble, never spoken or sent anywhere else.
+            setMessages((prev) => {
+              const last = prev[prev.length - 1];
+              if (last?.role === "assistant" && last.pending) {
+                return [
+                  ...prev.slice(0, -1),
+                  { ...last, pending: false, model: payload.model, sources: payload.sources },
+                ];
+              }
+              return streamingStarted
+                ? prev
+                : [
+                    ...prev,
+                    {
+                      role: "assistant",
+                      content: payload.reply,
+                      model: payload.model,
+                      sources: payload.sources,
+                    },
+                  ];
+            });
+          } else if (event === "error") {
+            throw new Error(payload.message);
+          }
+        }
+      }
     } catch (err) {
       setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `Error: ${err.message}` },
+        // Drop a half-streamed reply: a truncated sentence next to an error
+        // reads as though the agent said something it never finished.
+        ...prev.filter((m) => !(m.role === "assistant" && m.pending)),
+        { role: "error", content: humanizeError(err.message, t) },
       ]);
     } finally {
       setSending(false);
     }
   }
 
-  function resetConversation() {
-    setConversationId(null);
-    setConversationToken(null);
-    setMessages([]);
-  }
+  const label = "mb-1 block text-xs font-medium";
+  const help = "mt-1 text-xs text-gray-500";
+  const inputCls = "w-full rounded border border-gray-300 px-3 py-2 text-sm";
+  const card = "rounded border border-gray-200 p-4";
+  const btn = "rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40";
 
   return (
-    <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-8 p-6">
-      <header>
-        <h1 className="text-xl font-semibold">AI engine test harness</h1>
-        <p className="text-sm text-gray-500">
-          Manual test UI for /api/agent-config, /api/ingest and /api/widget — not the real widget.
-        </p>
+    <div dir={dir} className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-6">
+      <header className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold">{t("dashboard:agent.title")}</h1>
+          <p className="text-sm text-gray-500">{t("dashboard:agent.subtitle")}</p>
+        </div>
+        <div>
+          <label className={label} htmlFor="ui-locale">
+            {t("dashboard:field.uiLocale.label")}
+          </label>
+          <select
+            id="ui-locale"
+            className="rounded border border-gray-300 px-2 py-1 text-sm"
+            value={uiLocale}
+            onChange={(e) => {
+              setUiLocale(e.target.value);
+              patchConfig({ uiLocale: e.target.value });
+            }}
+          >
+            {LOCALE_META.map((l) => (
+              <option key={l.code} value={l.code}>{l.nativeName}</option>
+            ))}
+          </select>
+          <p className={help}>{t("dashboard:field.uiLocale.help")}</p>
+        </div>
       </header>
 
       <div>
-        <label className="mb-1 block text-sm font-medium">Tenant ID</label>
-        <input
-          className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-          value={tenantId}
-          onChange={(e) => setTenantId(e.target.value)}
-        />
-        <p className="mt-1 text-xs text-gray-500">
-          Any string works — tenant_id isn&apos;t FK-enforced yet. Keep it the same across
-          config, ingest and chat.
-        </p>
+        <label className={label} htmlFor="tenant">Tenant ID</label>
+        <input id="tenant" className={inputCls} value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
       </div>
 
-      <section className="rounded border border-gray-200 p-4">
-        <h2 className="mb-3 font-medium">1. Agent configuration</h2>
+      {!config ? (
+        <p className="text-sm text-gray-400">{t("common:state.loading")}</p>
+      ) : (
+        <form onSubmit={saveConfig} className={`${card} flex flex-col gap-4`}>
+          <div>
+            <label className={label} htmlFor="bn">{t("dashboard:field.businessName.label")}</label>
+            <input id="bn" className={inputCls} value={config.businessName}
+              onChange={(e) => patchConfig({ businessName: e.target.value })} />
+            <p className={help}>{t("dashboard:field.businessName.help")}</p>
+          </div>
 
-        {!config ? (
-          <p className="text-sm text-gray-400">Loading…</p>
-        ) : (
-          <form onSubmit={saveConfig} className="flex flex-col gap-3">
-            <div>
-              <label className="mb-1 block text-xs font-medium">Business name</label>
-              <input
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-                value={config.businessName}
-                onChange={(e) => patchConfig({ businessName: e.target.value })}
-              />
-            </div>
+          <div>
+            <label className={label} htmlFor="purpose">{t("dashboard:field.purpose.label")}</label>
+            <textarea id="purpose" className={`${inputCls} min-h-20`}
+              placeholder={t("dashboard:field.purpose.placeholder")}
+              value={config.purpose} onChange={(e) => patchConfig({ purpose: e.target.value })} />
+            <p className={help}>{t("dashboard:field.purpose.help")}</p>
+          </div>
 
-            <div>
-              <label className="mb-1 block text-xs font-medium">
-                Purpose — what the agent is here to do
-              </label>
-              <textarea
-                className="min-h-20 w-full rounded border border-gray-300 px-3 py-2 text-sm"
-                placeholder="e.g. Help customers book dental appointments and answer questions about our services."
-                value={config.purpose}
-                onChange={(e) => patchConfig({ purpose: e.target.value })}
-              />
-            </div>
-
-            <div className="flex gap-3">
-              <div className="flex-1">
-                <label className="mb-1 block text-xs font-medium">Tone</label>
-                <select
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-                  value={config.tone}
-                  onChange={(e) => patchConfig({ tone: e.target.value })}
-                >
-                  {TONES.map((t) => (
-                    <option key={t} value={t}>{t}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex-1">
-                <label className="mb-1 block text-xs font-medium">Default language</label>
-                <select
-                  className="w-full rounded border border-gray-300 px-3 py-2 text-sm"
-                  value={config.defaultLocale}
-                  onChange={(e) => patchConfig({ defaultLocale: e.target.value })}
-                >
-                  {config.languages.map((l) => (
-                    <option key={l} value={l}>{l}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">Enabled languages</label>
-              <div className="flex gap-4">
-                {LOCALES.map((code) => (
-                  <label key={code} className="flex items-center gap-1.5 text-sm">
-                    <input
-                      type="checkbox"
-                      checked={config.languages.includes(code)}
-                      onChange={(e) => toggleLanguage(code, e.target.checked)}
-                    />
-                    {code}
-                    {isRTL(code) && <span className="text-xs text-gray-400">(rtl)</span>}
-                  </label>
+          <div className="flex flex-wrap gap-3">
+            <div className="flex-1">
+              <label className={label} htmlFor="tone">{t("dashboard:field.tone.label")}</label>
+              <select id="tone" className={inputCls} value={config.tone}
+                onChange={(e) => patchConfig({ tone: e.target.value })}>
+                {TONES.map((tone) => (
+                  <option key={tone} value={tone}>{t(`common:tone.${tone}`)}</option>
                 ))}
-              </div>
+              </select>
             </div>
-
-            <div>
-              <label className="mb-1 block text-xs font-medium">
-                What the agent can do
+            <div className="flex-1">
+              <label className={label} htmlFor="reply">
+                {t("dashboard:field.replyLanguage.label")}
               </label>
+              <select id="reply" className={inputCls} value={config.replyLanguage}
+                onChange={(e) => patchConfig({ replyLanguage: e.target.value })}>
+                {REPLY_LANGUAGES.map((r) => (
+                  <option key={r} value={r}>{t(`common:replyLanguage.${r}`)}</option>
+                ))}
+              </select>
+              <p className={help}>{t("dashboard:field.replyLanguage.help")}</p>
+            </div>
+          </div>
+
+          {SHOW_CAPABILITIES && (
+            <div>
+              <span className={label}>{t("dashboard:capabilities.title")}</span>
+              <p className={`${help} mb-2`}>{t("dashboard:capabilities.help")}</p>
               <div className="flex flex-col gap-2">
                 {catalog.map((cap) => (
                   <label key={cap.id} className="flex items-start gap-2 text-sm">
-                    <input
-                      type="checkbox"
-                      className="mt-1"
+                    <input type="checkbox" className="mt-1"
                       checked={Boolean(config.capabilities?.[cap.id]?.enabled)}
-                      onChange={(e) => toggleCapability(cap.id, e.target.checked)}
-                    />
+                      onChange={(e) => toggleCapability(cap.id, e.target.checked)} />
                     <span>
                       {cap.label}
-                      {cap.requiresTool && (
-                        <span className="ml-1 text-xs text-amber-600">
-                          (collects details only until Phase 4)
-                        </span>
+                      {cap.setupNote && (
+                        <span className="ms-1 text-xs text-amber-600">{cap.setupNote}</span>
                       )}
                       <span className="block text-xs text-gray-500">{cap.description}</span>
                       <span className="block text-xs text-gray-400">
-                        channels: {cap.channels.join(", ")}
+                        {t("dashboard:capabilities.channelsLabel")}:{" "}
+                        {cap.channels.map((c) => cap.channelLabels[c]).join(" · ")}
                       </span>
                     </span>
                   </label>
                 ))}
               </div>
             </div>
+          )}
 
-            <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="submit" disabled={savingConfig} className={btn}>
+              {savingConfig ? t("common:state.saving") : t("common:action.save")}
+            </button>
+            <button type="button" onClick={loadConfig} disabled={reloadingConfig}
+              className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40">
+              {t("common:action.reload")}
+            </button>
+            {configStatus && <p className="text-sm">{configStatus}</p>}
+          </div>
+        </form>
+      )}
+
+
+      <section className={card}>
+        <h2 className="mb-1 font-medium">{t("dashboard:knowledge.title")}</h2>
+        <p className={`${help} mb-3`}>{t("dashboard:knowledge.help")}</p>
+
+        {/* ---- the three ways to teach the agent something, always on top ---- */}
+        {!crawlOpen ? (
+          <div className="mb-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={ingesting}
+              className={btn}
+            >
+              {t("dashboard:knowledge.upload")}
+            </button>
+            <button type="button" onClick={openComposer} className={btn}>
+              {t("dashboard:knowledge.addText")}
+            </button>
+            <button type="button" onClick={openCrawl} className={btn}>
+              {t("dashboard:knowledge.crawlButton")}
+            </button>
+            {/* The real file input stays off-screen — its native "Choose files"
+                button can't be restyled to match the other two, so a plain
+                button forwards its click here instead. */}
+            <input
+              ref={fileInputRef}
+              id="doc-file"
+              type="file"
+              multiple
+              accept={limits.extensions?.join(",")}
+              disabled={ingesting}
+              onChange={(e) => {
+                const files = e.target.files;
+                // Cleared so choosing the SAME file twice still fires a
+                // change — the common case when someone fixes a document and
+                // re-uploads it.
+                const picked = files ? [...files] : [];
+                e.target.value = "";
+                uploadDocs(picked);
+              }}
+              className="hidden"
+            />
+          </div>
+        ) : (
+          <div className="mb-4 flex flex-col gap-2">
+            <input
+              type="url"
+              autoFocus
+              className={inputCls}
+              placeholder={t("dashboard:knowledge.crawlPlaceholder")}
+              value={crawlUrl}
+              onChange={(e) => setCrawlUrl(e.target.value)}
+            />
+            <div className="flex flex-wrap gap-2">
               <button
-                type="submit"
-                disabled={savingConfig}
-                className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
+                type="button"
+                onClick={crawlWebsite}
+                disabled={crawling || !crawlUrl.trim()}
+                className={btn}
               >
-                {savingConfig ? "Saving…" : "Save configuration"}
+                {crawling ? t("dashboard:knowledge.crawling") : t("dashboard:knowledge.crawlButton")}
               </button>
               <button
                 type="button"
-                onClick={loadConfig}
+                onClick={closeCrawl}
+                disabled={crawling}
+                className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40"
+              >
+                {t("common:action.cancel")}
+              </button>
+            </div>
+          </div>
+        )}
+        <p className={`${help} mb-4`}>
+          {crawlOpen ? (
+            t("dashboard:knowledge.crawlHelp")
+          ) : (
+            <>
+              {t("dashboard:knowledge.uploadMany")}{" "}
+              {t("dashboard:knowledge.uploadHelp", {
+                vars: {
+                  types: (limits.extensions ?? []).join(" "),
+                  max: Math.round((limits.maxBytes ?? 0) / (1024 * 1024)),
+                },
+              })}
+            </>
+          )}
+        </p>
+        {ingestStatus && <p className="mb-4 text-sm">{ingestStatus}</p>}
+
+        {/* ---- queued / in-progress imports ---- */}
+        {jobs.length > 0 && (
+          <div className="mb-4 rounded border border-gray-200 bg-gray-50 p-3">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                {t("dashboard:jobs.title")}
+              </p>
+              {jobs.every((j) => j.status === "done" || j.status === "failed" || j.status === "cancelled") && (
+                <button
+                  type="button"
+                  onClick={dismissJobs}
+                  disabled={dismissingJobs}
+                  className="text-xs text-gray-500 underline disabled:opacity-40"
+                >
+                  {t("dashboard:jobs.dismiss")}
+                </button>
+              )}
+            </div>
+
+            <ul className="flex flex-col gap-2.5">
+              {jobs.map((job) => {
+                const failed = job.status === "failed";
+                const done = job.status === "done";
+                const cancelled = job.status === "cancelled";
+                const active = !failed && !done && !cancelled;
+                return (
+                  <li key={job.id}>
+                    <div className="mb-1 flex items-baseline justify-between gap-2">
+                      <span className="truncate text-sm font-medium">{job.title}</span>
+                      <span className="flex flex-none items-center gap-2">
+                        <span
+                          className={`text-xs ${
+                            failed
+                              ? "text-red-600"
+                              : done
+                                ? "text-green-700"
+                                : cancelled
+                                  ? "text-gray-400"
+                                  : "text-gray-500"
+                          }`}
+                        >
+                          {jobLabel(job)}
+                        </span>
+                        {/* A long import (a big PDF's OCR, an embedding queue) can
+                            run for minutes — this is the way out of it without
+                            waiting, and lib/agent/jobs.js + ingest.js make sure
+                            cancelling also removes whatever the job had already
+                            written: the row, its chunks, and any Cloudinary
+                            upload. */}
+                        {active && (
+                          <button
+                            type="button"
+                            onClick={() => cancelJobRow(job.id)}
+                            className="text-xs text-gray-500 underline"
+                          >
+                            {t("common:action.cancel")}
+                          </button>
+                        )}
+                      </span>
+                    </div>
+
+                    {/* A REAL bar: width is the job's actual progress, never an
+                        animation pretending to be one. */}
+                    <div
+                      className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200"
+                      role="progressbar"
+                      aria-valuenow={job.progress}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={job.title}
+                    >
+                      <div
+                        className={`h-full rounded-full transition-[width] duration-500 ease-out ${
+                          failed
+                            ? "bg-red-500"
+                            : done
+                              ? "bg-green-600"
+                              : cancelled
+                                ? "bg-gray-400"
+                                : "bg-black"
+                        }`}
+                        style={{ width: `${failed || cancelled ? 100 : job.progress}%` }}
+                      />
+                    </div>
+
+                    {/* OCR is markedly slower than the rest; saying why stops it
+                        reading as a stall. */}
+                    {job.stage === "ocr" && (
+                      <p className="mt-1 text-xs text-amber-700">
+                        {t("dashboard:jobs.scannedNote")}
+                      </p>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+
+        {/* ---- existing documents ---- */}
+        {docs.length === 0 ? (
+          <p className="mb-4 text-sm text-gray-400">{t("dashboard:knowledge.empty")}</p>
+        ) : (
+          <>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <label className="flex items-center gap-2 text-xs text-gray-500">
+                <input
+                  type="checkbox"
+                  checked={docs.length > 0 && selectedIds.size === docs.length}
+                  onChange={toggleSelectAll}
+                />
+                {t("dashboard:knowledge.selectAll")}
+              </label>
+              {selectedIds.size > 0 && (
+                <button
+                  type="button"
+                  onClick={deleteSelected}
+                  disabled={deletingSelected}
+                  className="rounded border border-red-300 px-3 py-1 text-xs text-red-700 disabled:opacity-40"
+                >
+                  {t("dashboard:knowledge.deleteSelected", { vars: { count: selectedIds.size } })}
+                </button>
+              )}
+            </div>
+            <ul className="mb-4 flex flex-col divide-y divide-gray-200 border-y border-gray-200">
+              {docs.map((d) => (
+                <li key={d.id} className="flex flex-wrap items-center gap-2 py-2">
+                  <input
+                    type="checkbox"
+                    className="flex-none"
+                    checked={selectedIds.has(d.id)}
+                    onChange={() => toggleSelected(d.id)}
+                    aria-label={d.title}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{d.title}</p>
+                    <p className="text-xs text-gray-500">
+                      {d.status === "ready"
+                        ? t("dashboard:knowledge.chunks", { vars: { count: d.chunkCount } })
+                        : d.status === "processing"
+                          ? t("dashboard:knowledge.status.processing")
+                          : t("dashboard:knowledge.status.failed")}
+                      {d.kind === "file" && d.fileName ? ` · ${d.fileName}` : ""}
+                      {d.byteSize ? ` · ${Math.max(1, Math.round(d.byteSize / 1024))} KB` : ""}
+                    </p>
+                    {d.status === "failed" && d.error && (
+                      <p className="text-xs text-red-600">{humanizeError(d.error, t)}</p>
+                    )}
+                  </div>
+                  {/* Only documents whose STORED TEXT IS THE DOCUMENT can be
+                      edited — typed text, .txt, .md. A PDF or Word file is stored
+                      as text we extracted from it, and that extraction is lossy;
+                      offering an edit box would present our approximation as if it
+                      were their file. For those the honest action is to upload a
+                      corrected version, which replaces it. */}
+                  {/* Only for a TRANSIENT failure (quota, an outage) — see
+                      isRetryableError. A document that failed for a reason
+                      retrying can't fix (too large, no text) doesn't get this
+                      button, since it would just fail again identically. */}
+                  {d.status === "failed" && isRetryableError(d.error) && (
+                    <IconButton
+                      onClick={() => retryDoc(d.id)}
+                      disabled={busyDocIds.has(d.id)}
+                      label={t("common:action.retry")}
+                      color="blue"
+                    >
+                      <RetryIcon />
+                    </IconButton>
+                  )}
+                  {d.editable ? (
+                    <IconButton
+                      onClick={() => editDoc(d.id)}
+                      disabled={busyDocIds.has(d.id)}
+                      label={t("dashboard:knowledge.edit")}
+                      color="neutral"
+                    >
+                      <EditIcon />
+                    </IconButton>
+                  ) : (
+                    <span
+                      className="text-xs text-gray-400"
+                      title={t("dashboard:knowledge.notEditable")}
+                    >
+                      {d.kind === "url" ? "url" : (d.fileName?.split(".").pop() ?? "file")}
+                    </span>
+                  )}
+                  <IconButton
+                    onClick={() => deleteDoc(d.id)}
+                    disabled={busyDocIds.has(d.id)}
+                    label={t("common:action.delete")}
+                    color="red"
+                  >
+                    <TrashIcon />
+                  </IconButton>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+
+      </section>
+
+      {/* ---- write a new document, or edit an existing one, in a real editor ---- */}
+      {(editingId || composerOpen) && (
+        <Modal
+          title={t(editingId ? "dashboard:knowledge.editing" : "dashboard:knowledge.addText")}
+          onClose={resetDocForm}
+        >
+          <form onSubmit={saveDoc} className="flex flex-col gap-3">
+            <div>
+              <input
+                className={inputCls}
+                placeholder={t("dashboard:knowledge.docName")}
+                value={docTitle}
+                onChange={(e) => setDocTitle(e.target.value)}
+              />
+              <p className={help}>{t("dashboard:knowledge.docNameHelp")}</p>
+            </div>
+            {/* CodeMirror rather than a plain textarea: line wrapping, find
+                (Ctrl/Cmd+F), undo history and a monospace layout that makes a
+                multi-section document's structure visible while editing it —
+                a document this size in a plain <textarea> is a wall of text
+                with no way to search it. Markdown-aware highlighting matches
+                what's actually in here: chunk.js splits on `#` headings, and
+                Word uploads arrive as markdown too (lib/agent/extract.js).
+                A fixed light theme + lineWrapping keep it readable — without
+                them CodeMirror's own default styling reads as near-invisible
+                text and a document has to scroll sideways to read a line. The
+                height scales up on larger screens, since a code-editor-style
+                box this small is cramped for anything but a phone. */}
+            <div className="h-[45vh] overflow-hidden rounded border border-gray-300 sm:h-[50vh] md:h-[60vh]">
+              <CodeMirror
+                value={docText}
+                onChange={setDocText}
+                theme={editorTheme}
+                placeholder={t("dashboard:knowledge.docText")}
+                extensions={[markdown(), EditorView.lineWrapping]}
+                height="100%"
+                // height="100%" alone isn't enough: @uiw/react-codemirror
+                // renders its OWN wrapper div (.cm-theme) around the actual
+                // editor with no sizing of its own, so a percentage height
+                // on .cm-editor had nothing real to be 100% OF — it collapsed
+                // to content height instead of filling this container. This
+                // style prop lands directly on that wrapper (via the
+                // library's own "other props" passthrough) and completes the
+                // chain down to the parent div's actual height above.
+                style={{ height: "100%" }}
+                basicSetup={{ lineNumbers: true, foldGutter: false }}
+              />
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="submit"
+                disabled={ingesting || !docTitle.trim() || !docText.trim()}
+                className={btn}
+              >
+                {ingesting ? t("common:state.saving") : t("common:action.save")}
+              </button>
+              <button
+                type="button"
+                onClick={resetDocForm}
                 className="rounded border border-gray-300 px-4 py-2 text-sm"
               >
-                Reload
+                {t("common:action.cancel")}
               </button>
-              {configStatus && <p className="text-sm">{configStatus}</p>}
+              {ingestStatus && <p className="text-sm">{ingestStatus}</p>}
             </div>
           </form>
-        )}
-      </section>
+        </Modal>
+      )}
 
-      <section className="rounded border border-gray-200 p-4">
-        <h2 className="mb-3 font-medium">2. Widget key</h2>
-        <p className="mb-3 text-xs text-gray-500">
-          The chat below authenticates the way a real embedded widget does: a public key
-          resolves to the tenant server-side. <code>tenantId</code> is never accepted from the
-          request body.
-        </p>
-        <div className="flex gap-2">
-          <input
-            className="flex-1 rounded border border-gray-300 px-3 py-2 font-mono text-xs"
-            placeholder="pk_…"
-            value={publicKey}
-            onChange={(e) => rememberKey(e.target.value)}
-          />
-          <button
-            type="button"
-            onClick={createKey}
-            disabled={creatingKey}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
-          >
-            {creatingKey ? "Creating…" : "Create key"}
-          </button>
-        </div>
-        {keyStatus && <p className="mt-2 text-sm">{keyStatus}</p>}
-      </section>
-
-      <section className="rounded border border-gray-200 p-4">
-        <h2 className="mb-3 font-medium">3. Add a document (ingest)</h2>
-        <form onSubmit={handleIngest} className="flex flex-col gap-3">
-          <input
-            className="rounded border border-gray-300 px-3 py-2 text-sm"
-            placeholder="source (e.g. faq.txt)"
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-          />
-          <textarea
-            className="min-h-32 rounded border border-gray-300 px-3 py-2 text-sm"
-            placeholder="Paste some FAQ / policy text to ingest..."
-            value={docText}
-            onChange={(e) => setDocText(e.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={ingesting || !docText.trim()}
-            className="self-start rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
-          >
-            {ingesting ? "Ingesting..." : "Ingest document"}
-          </button>
-          {ingestStatus && <p className="text-sm">{ingestStatus}</p>}
-        </form>
-      </section>
-
-      <section className="flex flex-1 flex-col rounded border border-gray-200 p-4">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="font-medium">4. Chat (widget channel)</h2>
+      <section className={`${card} flex flex-1 flex-col`}>
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="font-medium">{t("common:channel.chat")}</h2>
           <div className="flex items-center gap-2">
-            <select
-              className="rounded border border-gray-300 px-2 py-1 text-sm"
-              value={locale}
-              onChange={(e) => setLocale(e.target.value)}
-            >
-              {(config?.languages ?? LOCALES).map((l) => (
-                <option key={l} value={l}>{l}</option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={resetConversation}
-              className="rounded border border-gray-300 px-3 py-1 text-sm"
-            >
-              New conversation
+            {/* No language toggle here on purpose: this panel is rendered in the
+                INTERFACE language, and what the agent writes back is governed by
+                the reply-language setting above. */}
+            <button type="button"
+              onClick={() => { setConversationId(null); setMessages([]); }}
+              className="rounded border border-gray-300 px-3 py-1 text-sm">
+              {t("dashboard:chat.startNew")}
             </button>
           </div>
         </div>
 
-        <div
-          className="mb-3 flex min-h-48 flex-1 flex-col gap-2 overflow-y-auto"
-          dir={dirFor(locale)}
-        >
+        <div dir={dir} className="mb-3 flex min-h-40 flex-1 flex-col gap-2 overflow-y-auto">
           {messages.length === 0 && (
-            <p className="text-sm text-gray-400">
-              {tr("widget:greeting.default")}
-            </p>
+            <p className="text-sm text-gray-400">{t("dashboard:chat.empty")}</p>
           )}
           {messages.map((m, i) => (
-            <div
-              key={i}
-              className={
+            <div key={i} className={m.role === "user" ? "self-end" : "self-start"}>
+              <div className={
                 m.role === "user"
-                  ? "self-end rounded bg-black px-3 py-2 text-sm text-white"
-                  : "self-start rounded bg-gray-100 px-3 py-2 text-sm text-black"
-              }
-            >
-              {m.content}
+                  ? "rounded bg-black px-3 py-2 text-sm text-white"
+                  : m.role === "error"
+                    ? "rounded border border-dashed border-red-300 px-3 py-2 text-sm text-red-700"
+                    : "rounded bg-gray-100 px-3 py-2 text-sm text-black"
+              }>
+                {m.content}
+              </div>
+              {/* DEBUG METADATA — which model answered and which of the
+                  tenant's documents (if any) it drew from. This is why the
+                  test chat exists: proving a prompt/retrieval change without
+                  digging through server logs. Shown only once the reply has
+                  actually finished, and never for the user's own messages. */}
+              {m.role === "assistant" && !m.pending && m.model && (
+                <p className="mt-1 text-xs text-gray-400">
+                  {t("dashboard:chat.answeredBy", { vars: { model: m.model } })}
+                  {" · "}
+                  {m.sources?.length
+                    ? t("dashboard:chat.groundedIn", { vars: { sources: m.sources.join(", ") } })
+                    : t("dashboard:chat.noSources")}
+                </p>
+              )}
             </div>
           ))}
         </div>
 
-        <form onSubmit={handleSend} className="flex gap-2" dir={dirFor(locale)}>
-          <input
-            className="flex-1 rounded border border-gray-300 px-3 py-2 text-sm"
-            placeholder={tr("widget:input.placeholder")}
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-          />
-          <button
-            type="submit"
-            disabled={sending}
-            className="rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40"
-          >
-            {sending ? tr("widget:status.typing") : tr("widget:input.send")}
+        <form onSubmit={handleSend} dir={dir} className="flex gap-2">
+          <input className={`${inputCls} flex-1`} placeholder={t("dashboard:chat.placeholder")}
+            value={input} onChange={(e) => setInput(e.target.value)} />
+          <button type="submit" disabled={sending} className={btn}>
+            {sending ? t("dashboard:chat.typing") : t("dashboard:chat.send")}
           </button>
         </form>
-
-        <p className="mt-2 text-xs text-gray-400" dir={dirFor(locale)}>
-          {tr("widget:disclaimer.ai")}
+        <p dir={dir} className="mt-2 text-xs text-gray-400">
+          {t("dashboard:chat.disclaimer")}
         </p>
-
-        {conversationId && (
-          <p className="mt-2 text-xs text-gray-400">conversationId: {conversationId}</p>
-        )}
       </section>
     </div>
   );

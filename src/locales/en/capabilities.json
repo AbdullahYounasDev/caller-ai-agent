@@ -1,0 +1,16 @@
+{
+  "collect_contact_info.label": "Collect contact details",
+  "collect_contact_info.description": "Gather the customer's name, phone, email and reason for contact, then confirm them back.",
+
+  "book_appointment.label": "Book appointments",
+  "book_appointment.description": "Take a booking — service, date, time and the customer's details.",
+
+  "take_message.label": "Take a message",
+  "take_message.description": "Record a message for your team when nobody is available or the request needs a person.",
+
+  "check_order_status.label": "Check order status",
+  "check_order_status.description": "Look up an order or booking reference and report its current status.",
+
+  "transfer_to_human.label": "Transfer to a person",
+  "transfer_to_human.description": "Hand the conversation to your team — a warm transfer on calls, an escalation flag on chat."
+}
