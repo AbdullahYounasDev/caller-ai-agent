@@ -1,0 +1,59 @@
+{
+  "nav.agent": "آپ کا ایجنٹ",
+  "nav.knowledge": "معلومات",
+  "nav.channels": "ذرائع",
+  "nav.conversations": "گفتگوئیں",
+  "nav.settings": "ترتیبات",
+
+  "agent.title": "آپ کا ایجنٹ",
+  "agent.subtitle": "آپ کا اسسٹنٹ خود کو کیسے متعارف کراتا ہے اور آپ کے گاہکوں کے لیے کیا کر سکتا ہے۔",
+
+  "field.businessName.label": "کاروبار کا نام",
+  "field.businessName.help": "جب ایجنٹ اپنا تعارف کراتا ہے تو یہ استعمال ہوتا ہے۔",
+  "field.purpose.label": "آپ کا ایجنٹ کیا کام کرتا ہے",
+  "field.purpose.help": "اپنے الفاظ میں بتائیں، جیسے آپ کسی نئے استقبالیہ اہلکار کو سمجھاتے۔",
+  "field.purpose.placeholder": "گاہکوں کو اپائنٹمنٹ بُک کرنے میں مدد دینا اور ہماری خدمات کے بارے میں سوالات کے جواب دینا۔",
+  "field.tone.label": "گفتگو کا انداز",
+  "field.tone.help": "گاہکوں کو آپ کا ایجنٹ کیسا لگتا ہے۔",
+  "field.timezone.label": "ٹائم زون",
+  "field.timezone.help": "اوقاتِ کار اور اپائنٹمنٹ کے اوقات کے لیے استعمال ہوتا ہے۔",
+
+  "field.uiLocale.label": "ڈیش بورڈ کی زبان",
+  "field.uiLocale.help": "ان اسکرینوں کی زبان۔ صرف وہی بدلتا ہے جو آپ یہاں دیکھتے ہیں۔",
+  "field.languages.label": "گاہکوں کی زبانیں",
+  "field.languages.help": "وہ زبانیں جن میں آپ کا ایجنٹ جواب دے سکتا ہے۔",
+  "field.defaultLocale.label": "گاہکوں کی طے شدہ زبان",
+  "field.defaultLocale.help": "جب گاہک کی اپنی زبان معلوم نہ ہو سکے تو یہ استعمال ہوتی ہے۔",
+
+  "hours.title": "اوقاتِ کار",
+  "hours.help": "آپ کا ایجنٹ ان اوقات سے باہر اپائنٹمنٹ پیش نہیں کرے گا۔",
+  "hours.closed": "بند",
+
+  "capabilities.title": "آپ کا ایجنٹ کیا کر سکتا ہے",
+  "capabilities.help": "وہ کام آن کریں جو آپ کا ایجنٹ گاہکوں کے لیے سنبھالے۔",
+  "capabilities.channelsLabel": "دستیاب ہے",
+  "capabilities.needsSetup": "تفصیلات جمع کرتا ہے؛ آپ کی ٹیم دستی طور پر تصدیق کرتی ہے۔",
+
+  "theme.title": "ظاہری شکل",
+  "theme.help": "آپ کی ویب سائٹ پر چیٹ ونڈو کیسی دکھتی ہے۔",
+  "theme.logo": "لوگو",
+  "theme.color": "بنیادی رنگ",
+  "theme.position": "اسکرین پر جگہ",
+  "theme.greeting": "ابتدائی پیغام",
+  "theme.position.bottomEnd": "نیچے، بیرونی جانب",
+  "theme.position.bottomStart": "نیچے، اندرونی جانب",
+
+  "keys.title": "ویب سائٹ کیز",
+  "keys.help": "ہر کی ایک ویب سائٹ کو آپ کے ایجنٹ سے جوڑتی ہے۔",
+  "keys.create": "نئی کی بنائیں",
+  "keys.revoke": "منسوخ کریں",
+  "keys.origins": "اجازت یافتہ ویب سائٹس",
+  "keys.originsHelp": "آپ کا ایجنٹ صرف انہی پتوں پر کام کرے گا جو یہاں درج ہیں۔",
+  "keys.lastUsed": "آخری استعمال",
+  "keys.never": "کبھی استعمال نہیں ہوئی",
+  "keys.revoked": "منسوخ شدہ",
+  "keys.empty": "ابھی کوئی کی نہیں۔ ایجنٹ کو اپنی ویب سائٹ پر لگانے کے لیے ایک بنائیں۔",
+
+  "embed.title": "اپنی ویب سائٹ میں شامل کریں",
+  "embed.help": "یہ سطر اپنی ویب سائٹ میں، بند ہوتے body ٹیگ سے بالکل پہلے چسپاں کریں۔"
+}

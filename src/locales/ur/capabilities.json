@@ -1,0 +1,16 @@
+{
+  "collect_contact_info.label": "رابطے کی تفصیلات جمع کرنا",
+  "collect_contact_info.description": "گاہک کا نام، فون، ای میل اور رابطے کی وجہ جمع کرتا ہے، پھر تصدیق کے لیے دہراتا ہے۔",
+
+  "book_appointment.label": "اپائنٹمنٹ بُک کرنا",
+  "book_appointment.description": "بکنگ درج کرتا ہے — خدمت، تاریخ، وقت اور گاہک کی تفصیلات۔",
+
+  "take_message.label": "پیغام لینا",
+  "take_message.description": "جب کوئی دستیاب نہ ہو یا معاملے کے لیے کسی فرد کی ضرورت ہو تو آپ کی ٹیم کے لیے پیغام محفوظ کرتا ہے۔",
+
+  "check_order_status.label": "آرڈر کی صورتحال دیکھنا",
+  "check_order_status.description": "آرڈر یا بکنگ کا حوالہ نمبر دیکھ کر اس کی موجودہ صورتحال بتاتا ہے۔",
+
+  "transfer_to_human.label": "کسی فرد کو منتقل کرنا",
+  "transfer_to_human.description": "گفتگو آپ کی ٹیم کو منتقل کرتا ہے — کال پر براہِ راست منتقلی، چیٹ پر اطلاع۔"
+}

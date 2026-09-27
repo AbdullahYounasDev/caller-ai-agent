@@ -1,0 +1,59 @@
+{
+  "nav.agent": "المساعد",
+  "nav.knowledge": "المعلومات",
+  "nav.channels": "القنوات",
+  "nav.conversations": "المحادثات",
+  "nav.settings": "الإعدادات",
+
+  "agent.title": "المساعد الخاص بك",
+  "agent.subtitle": "كيف يُعرّف مساعدك عن نفسه وما الذي يمكنه فعله لعملائك.",
+
+  "field.businessName.label": "اسم النشاط التجاري",
+  "field.businessName.help": "يُستخدم عندما يُعرّف المساعد عن نفسه.",
+  "field.purpose.label": "ما الذي يقوم به مساعدك",
+  "field.purpose.help": "صِفه بكلماتك، كما لو كنت تشرح لموظف استقبال جديد.",
+  "field.purpose.placeholder": "مساعدة العملاء على حجز المواعيد والإجابة عن الأسئلة حول خدماتنا.",
+  "field.tone.label": "أسلوب الحديث",
+  "field.tone.help": "كيف يبدو مساعدك للعملاء.",
+  "field.timezone.label": "المنطقة الزمنية",
+  "field.timezone.help": "تُستخدم لأوقات العمل والمواعيد.",
+
+  "field.uiLocale.label": "لغة لوحة التحكم",
+  "field.uiLocale.help": "لغة هذه الشاشات. تغيّر ما تراه هنا فقط.",
+  "field.languages.label": "لغات العملاء",
+  "field.languages.help": "اللغات التي يُسمح لمساعدك بالرد بها.",
+  "field.defaultLocale.label": "لغة العملاء الافتراضية",
+  "field.defaultLocale.help": "تُستخدم عندما يتعذّر تحديد لغة العميل.",
+
+  "hours.title": "أوقات العمل",
+  "hours.help": "لن يعرض مساعدك مواعيد خارج هذه الأوقات.",
+  "hours.closed": "مغلق",
+
+  "capabilities.title": "ما الذي يستطيع مساعدك فعله",
+  "capabilities.help": "فعّل المهام التي تريد أن يتولاها مساعدك للعملاء.",
+  "capabilities.channelsLabel": "متاح على",
+  "capabilities.needsSetup": "يجمع التفاصيل؛ ويقوم فريقك بالتأكيد يدوياً.",
+
+  "theme.title": "المظهر",
+  "theme.help": "شكل نافذة المحادثة على موقعك.",
+  "theme.logo": "الشعار",
+  "theme.color": "اللون الأساسي",
+  "theme.position": "الموضع على الشاشة",
+  "theme.greeting": "رسالة الترحيب",
+  "theme.position.bottomEnd": "أسفل، الجهة الخارجية",
+  "theme.position.bottomStart": "أسفل، الجهة الداخلية",
+
+  "keys.title": "مفاتيح الموقع",
+  "keys.help": "كل مفتاح يربط موقعاً واحداً بمساعدك.",
+  "keys.create": "إنشاء مفتاح",
+  "keys.revoke": "إلغاء",
+  "keys.origins": "المواقع المسموح بها",
+  "keys.originsHelp": "لن يعمل مساعدك إلا على العناوين المذكورة هنا.",
+  "keys.lastUsed": "آخر استخدام",
+  "keys.never": "لم يُستخدم",
+  "keys.revoked": "مُلغى",
+  "keys.empty": "لا توجد مفاتيح بعد. أنشئ مفتاحاً لوضع المساعد على موقعك.",
+
+  "embed.title": "أضِفه إلى موقعك",
+  "embed.help": "الصق هذا السطر في موقعك، قبل وسم body الختامي مباشرة."
+}

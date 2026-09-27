@@ -1,0 +1,31 @@
+{
+  "tenantId.required": "کاروبار کی نشاندہی ضروری ہے۔",
+  "keyId.required": "کی کی نشاندہی ضروری ہے۔",
+  "body.invalid": "درخواست کا JSON آبجیکٹ ہونا ضروری ہے۔",
+
+  "businessName.required": "کاروبار کا نام درج کریں۔",
+  "businessName.tooLong": "کاروبار کا نام {max} حروف سے زیادہ نہیں ہونا چاہیے۔",
+  "purpose.invalid": "تفصیل متن کی صورت میں ہونی چاہیے۔",
+  "purpose.tooLong": "تفصیل {max} حروف سے زیادہ نہیں ہونی چاہیے۔",
+  "tone.invalid": "ان میں سے منتخب کریں: {allowed}۔",
+  "timezone.invalid": "درست ٹائم زون منتخب کریں۔",
+
+  "languages.empty": "گاہکوں کے لیے کم از کم ایک زبان منتخب کریں۔",
+  "languages.unsupported": "یہ زبانیں ابھی دستیاب نہیں: {invalid}۔",
+  "locale.invalid": "ان میں سے منتخب کریں: {allowed}۔",
+  "locale.notEnabled": "طے شدہ زبان آپ کی منتخب کردہ گاہک زبانوں میں سے ہونی چاہیے۔",
+
+  "capabilities.invalid": "صلاحیتیں اختیارات کا مجموعہ ہونی چاہئیں۔",
+  "capabilities.unknown": "نامعلوم صلاحیت: {id}۔",
+  "capabilities.invalidState": "{id} کی ترتیبات درست نہیں۔",
+  "capabilities.enabledInvalid": "{id} کا سوئچ آن یا آف ہونا چاہیے۔",
+  "capabilities.channelsInvalid": "{id} کے ذرائع فہرست کی صورت میں ہونے چاہئیں۔",
+  "capabilities.channelsUnknown": "{id} کے لیے نامعلوم ذرائع: {invalid}۔",
+  "capabilities.channelsUnsupported": "{id} ان پر دستیاب نہیں: {invalid}۔ دستیاب ہے: {supported}۔",
+
+  "origins.invalid": "یہ ویب سائٹ پتے درست نہیں: {invalid}۔ مکمل پتہ استعمال کریں جیسے ‎https://example.com‎۔",
+  "origins.required": "کم از کم ایک ویب سائٹ کا پتہ درج کریں۔",
+
+  "key.notFound": "یہ کی نہیں مل سکی۔",
+  "origins.notList": "ویب سائٹ کے پتے فہرست کی صورت میں ہونے چاہئیں۔"
+}

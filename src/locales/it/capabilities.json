@@ -1,0 +1,16 @@
+{
+  "collect_contact_info.label": "Raccogliere i dati di contatto",
+  "collect_contact_info.description": "Raccoglie nome, telefono, email e motivo del contatto, poi li ripete per conferma.",
+
+  "book_appointment.label": "Prenotare appuntamenti",
+  "book_appointment.description": "Registra una prenotazione — servizio, data, ora e dati del cliente.",
+
+  "take_message.label": "Prendere un messaggio",
+  "take_message.description": "Registra un messaggio per il tuo team quando nessuno è disponibile o serve una persona.",
+
+  "check_order_status.label": "Verificare lo stato di un ordine",
+  "check_order_status.description": "Cerca un ordine o una prenotazione tramite riferimento e ne riporta lo stato.",
+
+  "transfer_to_human.label": "Passare a una persona",
+  "transfer_to_human.description": "Passa la conversazione al tuo team — trasferimento diretto in chiamata, segnalazione in chat."
+}

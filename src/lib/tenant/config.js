@@ -1,11 +1,17 @@
 import { prisma } from "@/lib/db";
+import {
+  SUPPORTED_LOCALES,
+  RTL_LOCALES,
+  DEFAULT_REPLY_LANGUAGE,
+  isReplyLanguage,
+} from "@/lib/i18n";
 
 /**
  * THE TENANT CONFIG SEAM.
  *
  * Every part of the AI engine that needs to know anything about a business —
- * its name, persona, languages, what the agent is allowed to do, how the widget
- * looks — goes through getAgentConfig(). One function, one shape, one cache.
+ * its name, persona, language and what the agent is allowed to do — goes
+ * through getAgentConfig(). One function, one shape, one cache.
  *
  * Why a seam at all: the partner owns tenants/users/auth/plans/billing in the
  * `tenant_core` schema. If any of that ever has to be read here, it gets fetched
@@ -15,33 +21,26 @@ import { prisma } from "@/lib/db";
  */
 
 // Shape returned when a tenant has no agent_configs row yet. An un-onboarded
-// tenant must still get a working (if generic) agent rather than a 500 — the
-// widget can be embedded before anyone finishes the setup wizard.
+// tenant must still get a working (if generic) agent rather than a 500 — a
+// number can be pointed at us before anyone finishes the setup wizard.
 const DEFAULTS = {
   businessName: "this business",
   purpose: "",
   tone: "professional",
   timezone: "UTC",
-  defaultLocale: "en",
-  languages: ["en"],
+  uiLocale: "en",
+  replyLanguage: "auto",
   hours: null,
   escalation: null,
   capabilities: {},
-  widget: {},
 };
 
-// Widget theme defaults. Kept here rather than in the widget so an un-themed
-// tenant still renders something deliberate instead of unstyled HTML.
-const WIDGET_DEFAULTS = {
-  logoUrl: null,
-  primaryColor: "#171717",
-  position: "bottom-end", // logical, not bottom-right — RTL locales flip it (ar, ur)
-  greeting: null, // null = fall back to the translated default greeting
-  launcherIcon: "chat",
-};
 
-export const SUPPORTED_LOCALES = ["en", "it", "ar", "ur"];
-export const RTL_LOCALES = ["ar", "ur"];
+// Re-exported from lib/i18n so there is ONE list of supported locales in the
+// system, not a copy here that drifts out of step with the catalogs.
+export { SUPPORTED_LOCALES, RTL_LOCALES };
+
+const isSupported = (l) => SUPPORTED_LOCALES.includes(l);
 
 // In-process cache. The config is read on EVERY message on every channel, and it
 // changes only when a business edits it in the dashboard — so hitting Postgres
@@ -90,22 +89,11 @@ export function invalidateAgentConfig(tenantId) {
 
 /**
  * Merge a DB row (or null) over the defaults and sanity-check the values that
- * would otherwise reach the model or the widget unchecked.
+ * would otherwise reach the model unchecked.
  * @param {object|null} row
  */
 function normalizeConfig(row) {
-  if (!row) return { ...DEFAULTS, widget: { ...WIDGET_DEFAULTS }, exists: false };
-
-  const languages =
-    Array.isArray(row.languages) && row.languages.length
-      ? row.languages.filter((l) => SUPPORTED_LOCALES.includes(l))
-      : DEFAULTS.languages;
-
-  // A defaultLocale the tenant hasn't actually enabled would leave the agent
-  // replying in a language the business can't read in its own transcripts.
-  const defaultLocale = languages.includes(row.defaultLocale)
-    ? row.defaultLocale
-    : (languages[0] ?? DEFAULTS.defaultLocale);
+  if (!row) return { ...DEFAULTS, exists: false };
 
   return {
     exists: true,
@@ -114,12 +102,15 @@ function normalizeConfig(row) {
     purpose: row.purpose ?? DEFAULTS.purpose,
     tone: row.tone ?? DEFAULTS.tone,
     timezone: row.timezone ?? DEFAULTS.timezone,
-    defaultLocale,
-    languages: languages.length ? languages : DEFAULTS.languages,
+    // INTERFACE language: every screen the business owner reads.
+    uiLocale: isSupported(row.uiLocale) ? row.uiLocale : DEFAULTS.uiLocale,
+    // What the AGENT replies in. "auto" is not a locale — see lib/i18n.
+    replyLanguage: isReplyLanguage(row.replyLanguage)
+      ? row.replyLanguage
+      : DEFAULT_REPLY_LANGUAGE,
     hours: row.hours ?? null,
     escalation: row.escalation ?? null,
     capabilities: row.capabilities ?? {},
-    widget: { ...WIDGET_DEFAULTS, ...(row.widget ?? {}) },
     updatedAt: row.updatedAt,
   };
 }
@@ -140,12 +131,11 @@ export async function saveAgentConfig(tenantId, patch) {
     "purpose",
     "tone",
     "timezone",
-    "defaultLocale",
-    "languages",
+    "uiLocale",
+    "replyLanguage",
     "hours",
     "escalation",
     "capabilities",
-    "widget",
   ];
 
   const data = {};

@@ -5,18 +5,26 @@
  * Three consumers read this one list, which is the whole point of it existing:
  *   1. lib/agent/prompt.js  — turns enabled capabilities into system-prompt text
  *   2. /api/agent-config/catalog — the partner's dashboard renders toggles from it
- *   3. (Phase 4) the tool registry — `toolName` becomes a real function declaration
+ *   3. (later) the tool registry — `toolName` becomes a real function declaration
  *
  * Adding a capability = adding an object here. No migration, no dashboard change,
  * no prompt edit. That is why tenant state is JSON in agent_configs while the
  * catalog itself lives in code.
  *
+ * NO USER-FACING TEXT LIVES HERE. A capability's label and description are in
+ * src/locales/<locale>/capabilities.json, keyed by id — `<id>.label` and
+ * `<id>.description`. This file holds behaviour; the words a business reads are
+ * translated like everything else. Adding a capability means adding an object
+ * here AND its two strings to every active locale file; `npm run i18n:check`
+ * fails the build if you forget one.
+ *
  * FIELDS
- *   id           stable key — also the key used in agent_configs.capabilities. Never rename.
- *   label/description  shown in the partner's dashboard. User-facing → will need i18n (Phase 1c).
+ *   id           stable key — also the key used in agent_configs.capabilities, and
+ *                the translation key prefix. Never rename.
  *   channels     channels this capability can PHYSICALLY work on. A tenant may narrow
- *                this further, but never widen it. `document_upload` on a voice call
- *                is nonsense, and this is where that's enforced.
+ *                this further, but never widen it. Reading a long list aloud on
+ *                a call is not the same as showing it in a chat, and this is
+ *                where that distinction is enforced.
  *   requiresTool true = it must actually DO something in an external system, so it
  *                cannot work until tool-calling lands (Phase 4). See TOOL_EXECUTION_AVAILABLE
  *                in prompt.js — until then the agent gathers details and promises
@@ -31,10 +39,7 @@
 export const CAPABILITIES = [
   {
     id: "collect_contact_info",
-    label: "Collect contact details",
-    description:
-      "Gather the caller's name, phone, email and reason for contact, then confirm them back.",
-    channels: ["widget", "whatsapp", "voice"],
+    channels: ["chat", "voice"],
     // Conversational: the transcript in `messages` IS the captured record today.
     // Phase 4 upgrades this to a structured agent_actions row.
     requiresTool: false,
@@ -59,10 +64,7 @@ export const CAPABILITIES = [
 
   {
     id: "book_appointment",
-    label: "Book appointments",
-    description:
-      "Take a booking for a slot — service, date, time and the customer's details.",
-    channels: ["widget", "whatsapp", "voice"],
+    channels: ["chat", "voice"],
     requiresTool: true,
     toolName: "book_appointment",
     params: {
@@ -86,10 +88,7 @@ export const CAPABILITIES = [
 
   {
     id: "take_message",
-    label: "Take a message",
-    description:
-      "Record a message for the team when nobody is available or the request needs a human.",
-    channels: ["widget", "whatsapp", "voice"],
+    channels: ["chat", "voice"],
     requiresTool: false,
     toolName: null,
     params: { askForCallbackWindow: true },
@@ -107,9 +106,7 @@ export const CAPABILITIES = [
 
   {
     id: "check_order_status",
-    label: "Check order status",
-    description: "Look up an order or booking reference and report its current status.",
-    channels: ["widget", "whatsapp", "voice"],
+    channels: ["chat", "voice"],
     requiresTool: true,
     toolName: "check_order_status",
     params: { referenceLabel: "order number" },
@@ -123,10 +120,7 @@ export const CAPABILITIES = [
 
   {
     id: "transfer_to_human",
-    label: "Transfer to a human",
-    description:
-      "Hand the conversation to a person — warm transfer on calls, escalation flag on chat.",
-    channels: ["widget", "whatsapp", "voice"],
+    channels: ["chat", "voice"],
     requiresTool: true,
     toolName: "transfer_to_human",
     params: { allowOnRequest: true },
@@ -162,7 +156,7 @@ export function getCapability(id) {
  * @param {object} args
  * @param {Record<string, {enabled?: boolean, channels?: string[], params?: object}>} args.tenantCapabilities
  *        the `capabilities` JSON from agent_configs
- * @param {string} args.channel  "widget" | "whatsapp" | "voice"
+ * @param {string} args.channel  "chat" | "voice"
  * @returns {Array<{capability: object, params: object}>}
  */
 export function resolveCapabilities({ tenantCapabilities = {}, channel }) {

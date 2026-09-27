@@ -2,29 +2,39 @@ import { prisma } from "@/lib/db";
 import { getAgentConfig } from "@/lib/tenant/config";
 import { retrieveRelevantChunks } from "./retrieve";
 import { buildSystemInstruction } from "./prompt";
-import { generateReply } from "./gemini";
+import { generateReply, generateReplyStream } from "./llm";
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_CONTEXT_CHUNKS = 5;
 
 /**
- * The channel-agnostic "brain". Every channel adapter (widget route today,
- * WhatsApp/voice webhooks later) calls this same function with the same
- * shape — it doesn't know or care which channel it's being called from.
- * That's what keeps policy, knowledge and history in one place instead of
- * drifting per channel.
+ * The channel-agnostic "brain". Every channel adapter — the test chat today,
+ * the telephony webhook later — calls this same function with the same shape.
+ * It does not know or care which channel it is being called from, and that is
+ * what keeps policy, knowledge and history in one place instead of drifting
+ * per channel.
  *
  * @param {object} args
  * @param {string} args.tenantId
  * @param {string} args.conversationId
- * @param {string} args.channel - "widget" | "whatsapp" | "voice"
+ * @param {string} args.channel - "chat" | "voice"
  * @param {string} args.userMessage
- * @param {string} [args.locale] - overrides the conversation's stored locale
+ * @param {(chunk: string) => void} [args.onChunk] - when given, the reply streams
+ *        through this callback as it's generated. Everything else is identical:
+ *        same config, same retrieval, same prompt, same persistence. Streaming is
+ *        a DELIVERY choice, not a different brain — which is why it's a parameter
+ *        here rather than a second function that would drift out of step.
  */
-export async function respond({ tenantId, conversationId, channel, userMessage, locale }) {
+export async function respond({
+  tenantId,
+  conversationId,
+  channel,
+  userMessage,
+  onChunk,
+}) {
   // 1. Persist the incoming message. Same `messages` table regardless of
-  // channel, keyed by conversationId — this is what makes "started on
-  // WhatsApp, continued by voice" work later: one query, full history.
+  // channel, keyed by conversationId — so a conversation that starts in the
+  // test chat and continues by phone is one query with the full history.
   await prisma.message.create({
     data: { conversationId, tenantId, channel, role: "user", content: userMessage },
   });
@@ -48,31 +58,27 @@ export async function respond({ tenantId, conversationId, channel, userMessage, 
     }),
   ]);
 
-  // 4. Resolve the reply language: explicit argument (the end user just switched)
-  // beats the conversation's stored locale, which beats the tenant's default.
+  // 4. Record the language this conversation is being held in.
+  //
+  // This is a TRANSCRIPT RECORD, not an instruction. What the agent replies in
+  // is decided by config.replyLanguage inside prompt.js — when that is "auto",
+  // the model mirrors the customer and no locale here could know that in
+  // advance. We store the business's configured choice so the transcript says
+  // something honest, and leave "auto" as "auto".
+  const conversationLocale = config.replyLanguage;
   const conversation = await prisma.conversation.findUnique({
     where: { id: conversationId },
     select: { locale: true },
   });
-  const effectiveLocale =
-    locale ?? conversation?.locale ?? config.defaultLocale;
-
-  // Keep the conversation row in step, so later turns and the transcript the
-  // business reads both agree on what language this exchange was in.
-  if (conversation && conversation.locale !== effectiveLocale) {
+  if (conversation && conversation.locale !== conversationLocale) {
     await prisma.conversation.update({
       where: { id: conversationId },
-      data: { locale: effectiveLocale },
+      data: { locale: conversationLocale },
     });
   }
 
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
-  const systemInstruction = buildSystemInstruction({
-    config,
-    channel,
-    locale: effectiveLocale,
-    chunks,
-  });
+  const systemInstruction = buildSystemInstruction({ config, channel, chunks });
 
   // 6. Shape stored history into Gemini's `contents` format.
   const history = priorMessages.map((m) => ({
@@ -86,12 +92,31 @@ export async function respond({ tenantId, conversationId, channel, userMessage, 
   // function declarations here, execute them, and log each executed call to
   // agent_actions. Then flip TOOL_EXECUTION_AVAILABLE in prompt.js.
   // The model never silently mutates tenant data.
-  const assistantReply = await generateReply({ systemInstruction, history });
+  let answeredBy = null;
+  const onProvider = (description) => {
+    answeredBy = description;
+  };
+  const assistantReply = onChunk
+    ? await generateReplyStream({ systemInstruction, history, onChunk, onProvider })
+    : await generateReply({ systemInstruction, history, onProvider });
 
   // 8. Persist the reply.
   await prisma.message.create({
     data: { conversationId, tenantId, channel, role: "assistant", content: assistantReply },
   });
 
-  return { reply: assistantReply, locale: effectiveLocale };
+  return {
+    reply: assistantReply,
+    locale: conversationLocale,
+    // DEBUG METADATA, not part of the reply itself — the test chat displays
+    // these alongside the bubble so a human can tell what answered and from
+    // what, without digging through logs. Voice will simply ignore both:
+    // CHANNEL_STYLE.voice never reads structured fields, only `reply`.
+    model: answeredBy,
+    // Deduplicated, in retrieval order (closest match first) — empty when
+    // nothing cleared MAX_DISTANCE, which is itself useful to see: it means
+    // this reply came from the persona/instructions alone, not the knowledge
+    // base.
+    sources: [...new Set(chunks.map((c) => c.sourceTitle))],
+  };
 }

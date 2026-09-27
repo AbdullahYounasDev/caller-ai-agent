@@ -1,11 +1,9 @@
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-// NOTE: `subsets: ["latin"]` only preloads Latin glyphs. Arabic and Urdu text
-// currently falls through to a system font, which is acceptable for this admin
-// harness but NOT for the widget — Phase 2 needs a font stack that actually
-// covers Arabic script, or ar/ur customers get inconsistent rendering that
-// looks broken next to the rest of the business's site.
+// `subsets: ["latin"]` covers both active languages (English, Italian). If a
+// dormant locale is ever reactivated (ar/ur), this needs a font stack that
+// actually carries Arabic script.
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],

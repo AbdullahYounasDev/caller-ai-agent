@@ -2,11 +2,13 @@
  * Guard for INTERNAL, server-to-server endpoints — the ones the partner's
  * dashboard backend calls to read and write agent configuration.
  *
- * This is NOT the auth that will protect public channel endpoints (the widget,
- * webhooks). Those need per-tenant public keys, an origin allowlist and rate
- * limiting — that's Phase 1b. Two different problems:
- *   - this file: "is this our partner's server?"      → one shared secret
- *   - Phase 1b:  "which tenant is this browser?"      → per-tenant public key
+ * EVERY route is behind this today, including the test chat — there is no
+ * public surface yet. That changes with TELEPHONY, which is a different problem
+ * and needs different auth:
+ *   - this file:  "is this our partner's server?"  → one shared secret
+ *   - telephony:  "is this really the provider?"   → a verified webhook
+ *                                                    signature, then dialled
+ *                                                    number → tenant
  *
  * Never use this to authorize a request that reached us from a browser: the
  * secret would have to ship to the client to get there.

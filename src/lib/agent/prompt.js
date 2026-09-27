@@ -1,4 +1,5 @@
 import { resolveCapabilities } from "./capabilities/catalog";
+import { t, DEFAULT_LOCALE } from "@/lib/i18n";
 
 /**
  * Builds the system instruction. This is where a tenant's configuration stops
@@ -6,7 +7,7 @@ import { resolveCapabilities } from "./capabilities/catalog";
  *
  * It lives in its own file, separate from respond.js, because prompt text is the
  * thing that changes most often and is hardest to review inside unrelated logic.
- * Every channel gets its prompt from here — that's what stops the widget agent
+ * Every channel gets its prompt from here — that's what stops the test chat
  * and the phone agent from quietly becoming two different products.
  */
 
@@ -36,15 +37,15 @@ const TONE_GUIDANCE = {
 // How to SPEAK on each channel. Getting this wrong is the most obvious possible
 // tell that a product is a chatbot with a phone number bolted on.
 const CHANNEL_STYLE = {
-  widget:
-    "You are in a website chat widget. Keep replies short — two or three sentences. " +
+  // The INTERNAL TEST SURFACE. Kept close to how a person reads a transcript,
+  // so what you see while testing is close to what the call will say.
+  chat:
+    "You are in a chat window. Keep replies short — two or three sentences. " +
     "Short lists are fine. No headings, no long documents.",
 
-  whatsapp:
-    "You are on WhatsApp. Write like a person texting: brief, plain text, no markdown " +
-    "formatting or bullet symbols. Break longer thoughts across short messages rather " +
-    "than sending a wall of text.",
-
+  // THE REAL CHANNEL. Every word is spoken aloud by a text-to-speech voice,
+  // which is why these constraints are harder than for text: markdown is
+  // unspeakable, a caller cannot skim, and they will talk over a monologue.
   voice:
     "You are on a LIVE PHONE CALL and every word you produce is read aloud. " +
     "Never output markdown, asterisks, bullet points, numbered lists, emoji or URLs — " +
@@ -56,12 +57,14 @@ const CHANNEL_STYLE = {
 /**
  * @param {object} args
  * @param {object} args.config   from lib/tenant/config.js getAgentConfig()
- * @param {string} args.channel  "widget" | "whatsapp" | "voice"
- * @param {string} args.locale   "en" | "it" | "ar" | "ur"
+ * @param {string} args.channel  "chat" | "voice"
+ *   NOTE: there is no `locale` parameter. The reply language comes from
+ *   `config.replyLanguage` ("en" | "it" | "auto"); the INTERFACE language is a
+ *   presentation concern and must never leak into the prompt.
  * @param {Array<{source: string, content: string}>} args.chunks retrieved knowledge
  * @returns {string}
  */
-export function buildSystemInstruction({ config, channel, locale, chunks = [] }) {
+export function buildSystemInstruction({ config, channel, chunks = [] }) {
   const sections = [];
 
   // --- 1. Who the agent is -------------------------------------------------
@@ -77,18 +80,35 @@ export function buildSystemInstruction({ config, channel, locale, chunks = [] })
 
   // --- 2. Tone + channel style --------------------------------------------
   sections.push(`TONE: ${TONE_GUIDANCE[config.tone] ?? TONE_GUIDANCE.professional}`);
-  sections.push(`CHANNEL: ${CHANNEL_STYLE[channel] ?? CHANNEL_STYLE.widget}`);
+  sections.push(`CHANNEL: ${CHANNEL_STYLE[channel] ?? CHANNEL_STYLE.chat}`);
 
   // --- 3. Language ---------------------------------------------------------
-  // Explicit, because retrieved context is very often in a different language
-  // from the customer's question and the model will otherwise drift into the
-  // language of the documents it just read.
-  const languageName = LANGUAGE_NAMES[locale] ?? LANGUAGE_NAMES.en;
-  sections.push(
-    `LANGUAGE: reply in ${languageName}. Reply in ${languageName} even when the ` +
-      `reference material below is written in another language — translate what you need. ` +
-      `If the customer switches language mid-conversation, switch with them.`
-  );
+  // Always explicit, in both modes. Retrieved context is very often in a
+  // different language from the customer's question, and without an instruction
+  // the model drifts into the language of the documents it just read.
+  if (config.replyLanguage === "auto") {
+    // "Match the customer's language" — the business made no fixed choice, so
+    // the customer's own words decide. The knowledge base is usually in one
+    // language and the customer may write in another; saying so explicitly is
+    // what stops the model answering an Italian question in English simply
+    // because the price list was English.
+    sections.push(
+      "LANGUAGE: reply in THE SAME LANGUAGE THE CUSTOMER WROTE IN. Detect it from " +
+        "their message and mirror it exactly — including if that is a language the " +
+        "reference material below is not written in; translate what you need. " +
+        "If the customer switches language mid-conversation, switch with them and " +
+        "stay switched. Never announce or comment on which language you are using."
+    );
+  } else {
+    const languageName = LANGUAGE_NAMES[config.replyLanguage] ?? LANGUAGE_NAMES.en;
+    // The business fixed a language, so it wins even when the customer writes
+    // in another one — that is the point of choosing it rather than "auto".
+    sections.push(
+      `LANGUAGE: always reply in ${languageName}, whatever language the customer ` +
+        `writes in. Reply in ${languageName} even when the reference material below ` +
+        `is in another language — translate what you need.`
+    );
+  }
 
   // --- 4. Business hours ---------------------------------------------------
   if (config.hours) {
@@ -113,9 +133,18 @@ export function buildSystemInstruction({ config, channel, locale, chunks = [] })
     // The anti-hallucination guard described at TOOL_EXECUTION_AVAILABLE above.
     const pending = active.filter(({ capability }) => capability.requiresTool);
     if (!TOOL_EXECUTION_AVAILABLE && pending.length) {
+      // English labels on purpose: this sentence sits inside an English system
+      // instruction addressed to the model, not to the customer. The customer-
+      // facing language is set by the LANGUAGE section above.
+      const pendingLabels = pending
+        .map(({ capability }) =>
+          t({ locale: DEFAULT_LOCALE, key: `capabilities:${capability.id}.label` })
+        )
+        .join(", ");
+
       sections.push(
         "CRITICAL — you cannot yet complete these actions yourself: " +
-          pending.map(({ capability }) => capability.label).join(", ") + ". " +
+          pendingLabels + ". " +
           "Gather every detail needed and tell the customer a team member will confirm shortly. " +
           "NEVER say an action is done, booked, cancelled or processed. Do not invent " +
           "reference numbers, confirmation codes or times."
@@ -131,9 +160,24 @@ export function buildSystemInstruction({ config, channel, locale, chunks = [] })
   // --- 7. Knowledge + the grounding rule -----------------------------------
   // Last on purpose: it's the longest section and the rule that must survive
   // contact with it sits immediately after, where recency helps.
+  // Citing the document title AND the heading gives the model something
+  // specific to name — "our price list says" beats "our records show" — and
+  // makes a wrong answer traceable back to the document that caused it.
   const contextBlock = chunks.length
-    ? chunks.map((c, i) => `[${i + 1}] (source: ${c.source})\n${c.content}`).join("\n\n")
-    : "No reference material matched this question.";
+    ? chunks
+        .map((c, i) => {
+          const where = c.heading ? `${c.sourceTitle} › ${c.heading}` : c.sourceTitle;
+          // The date is here for the conflict rule below, not for the customer.
+          const updated = c.sourceUpdatedAt
+            ? `, updated ${new Date(c.sourceUpdatedAt).toISOString().slice(0, 10)}`
+            : "";
+          return `[${i + 1}] (source: ${where}${updated})\n${c.content}`;
+        })
+        .join("\n\n")
+    : // Retrieval returned nothing ABOVE THE RELEVANCE THRESHOLD — which is
+      // different from the business having no documents, and the model must not
+      // paper over either case. See MAX_DISTANCE in retrieve.js.
+      "NOTHING IN THIS BUSINESS'S DOCUMENTS IS RELEVANT TO THIS QUESTION.";
 
   sections.push(
     `REFERENCE MATERIAL FROM ${config.businessName.toUpperCase()}:\n${contextBlock}`
@@ -146,6 +190,24 @@ export function buildSystemInstruction({ config, channel, locale, chunks = [] })
       "about the business. An honest 'I don't know' is always better than a plausible " +
       "answer you made up — a wrong answer here becomes the business's problem, not yours."
   );
+
+  // CONFLICTING SOURCES. Businesses keep the same fact in two documents and
+  // correct only one — a price list and an FAQ that disagree. Both retrieve,
+  // both look authoritative, and without a rule the model picks whichever reads
+  // better. Observed in testing: a corrected price lost to a stale one.
+  //
+  // Recency is the only signal that distinguishes them, so it is stated as a
+  // rule rather than left to chance. Saying so out loud also matters: a
+  // customer told "our price list says X, though another document says Y" can
+  // ask, where a silently-picked wrong number just becomes a bad quote.
+  if (chunks.length > 1) {
+    sections.push(
+      "IF TWO SOURCES DISAGREE: prefer the one updated most recently — each is " +
+        "labelled with its date above. Mention that there is a discrepancy rather " +
+        "than quietly choosing, and offer to confirm with the team. Never average " +
+        "two numbers or present a range you were not given."
+    );
+  }
 
   return sections.join("\n\n");
 }

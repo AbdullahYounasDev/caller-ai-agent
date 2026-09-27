@@ -1,10 +1,35 @@
 {
+  "action.save": "محفوظ کریں",
+  "action.cancel": "منسوخ کریں",
+  "action.close": "بند کریں",
+  "action.delete": "حذف کریں",
+  "action.edit": "ترمیم کریں",
+  "action.create": "بنائیں",
+  "action.retry": "دوبارہ کوشش کریں",
+  "action.back": "واپس",
+  "action.next": "آگے",
+  "action.copy": "کاپی کریں",
+  "action.copied": "کاپی ہو گیا",
+  "action.reload": "دوبارہ لوڈ کریں",
+
+  "state.loading": "لوڈ ہو رہا ہے…",
+  "state.saving": "محفوظ ہو رہا ہے…",
+  "state.saved": "محفوظ ہو گیا",
+  "state.empty": "یہاں ابھی کچھ نہیں ہے",
+  "state.error": "کچھ غلط ہو گیا",
+
   "language.en": "English",
   "language.it": "Italiano",
   "language.ar": "العربية",
   "language.ur": "اردو",
-  "action.close": "بند کریں",
-  "action.cancel": "منسوخ کریں",
-  "action.save": "محفوظ کریں",
-  "state.loading": "لوڈ ہو رہا ہے…"
+  "channel.voice": "فون اور کالیں",
+  "channel.chat": "آزمائشی چیٹ",
+
+  "tone.professional": "پیشہ ورانہ",
+  "tone.friendly": "دوستانہ",
+  "tone.concise": "مختصر",
+  "tone.formal": "رسمی",
+
+  "yes": "ہاں",
+  "no": "نہیں"
 }

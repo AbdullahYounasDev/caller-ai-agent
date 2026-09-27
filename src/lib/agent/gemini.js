@@ -1,4 +1,13 @@
 import { GoogleGenAI } from "@google/genai";
+import { withRetry } from "./retry";
+
+/**
+ * Gemini provider. Chat AND embeddings.
+ *
+ * Nothing outside lib/agent/llm.js should import this file directly — the chat
+ * half is swappable and the embedding half is not, and llm.js is where that
+ * distinction is enforced and explained.
+ */
 
 // One client for the whole app, created lazily — so a missing GEMINI_API_KEY
 // only breaks the first real API call, not the build or an unrelated import.
@@ -13,51 +22,6 @@ function getClient() {
   return client;
 }
 
-/**
- * Retry transient upstream failures.
- *
- * NOT speculative hardening — during the first live run of this pipeline, Gemini
- * returned 503 "model is currently experiencing high demand" on roughly one call
- * in five. Without a retry, each one surfaced to a real customer as "something
- * went wrong" in the middle of a conversation with a business.
- *
- * Only genuinely transient statuses are retried. A 400 or 403 means the request
- * or the API key is wrong, and retrying it just makes the customer wait longer
- * for the same failure.
- *
- * Bounded at 3 attempts (~1.2s of added delay worst case) because someone is
- * waiting for a reply. If all three fail, the caller's try/catch turns it into
- * a translated error — see the widget route.
- */
-const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
-const MAX_ATTEMPTS = 3;
-
-async function withRetry(operation, label) {
-  let lastError;
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      return await operation();
-    } catch (err) {
-      lastError = err;
-      const status = err?.status ?? err?.code;
-      if (!RETRYABLE_STATUSES.has(status) || attempt === MAX_ATTEMPTS) throw err;
-
-      // Exponential backoff with jitter. The jitter matters under real load:
-      // without it, every request that failed in the same spike retries at the
-      // same instant and recreates the spike.
-      const delay = 300 * 2 ** (attempt - 1) + Math.random() * 200;
-      console.warn(
-        `[gemini] ${label} failed with ${status}, retrying in ${Math.round(delay)}ms ` +
-          `(attempt ${attempt}/${MAX_ATTEMPTS})`
-      );
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-
-  throw lastError;
-}
-
 // gemini-embedding-001 defaults to 3072-dim output (Matryoshka-truncatable).
 // We pin it to 768 — one of Google's three officially recommended sizes —
 // to keep storage and index cost down. This MUST match the vector(768)
@@ -65,12 +29,22 @@ async function withRetry(operation, label) {
 const EMBEDDING_MODEL = "gemini-embedding-001";
 export const EMBEDDING_DIMENSIONS = 768;
 
-// Gemini model names get retired/replaced over time on Google's side (this
-// exact string has already changed once) — if generateReply() ever 404s with
-// a "no longer available" message, that error tells you the current
-// replacement model name directly; swap it in here. Nothing else in the RAG
-// pipeline depends on which chat model this is.
-const CHAT_MODEL = "gemini-3.6-flash";
+// Gemini model names get retired/replaced over time on Google's side, and on
+// the FREE TIER each model carries its OWN separate daily quota — so switching
+// model is the normal way to keep working once one is exhausted, not an
+// exceptional event. That makes it config, not code: `OPENROUTER_MODEL` was
+// already env-driven and this being hardcoded was an inconsistency.
+//
+// Verified free and working (2026-09-20): gemini-3.5-flash-lite,
+// gemini-flash-lite-latest, gemini-3.1-flash-lite, gemini-3.5-flash.
+// The `-lite` models answered in ~1s; gemini-3.5-flash took ~15s.
+//
+// If a call 404s with "no longer available", the error names the replacement
+// directly — put it in GEMINI_CHAT_MODEL. Nothing else in the RAG pipeline
+// depends on which chat model this is.
+// Exported so llm.js can report the exact model that answered a given request
+// (the test chat surfaces it) without duplicating this default elsewhere.
+export const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || "gemini-3.5-flash-lite";
 
 /**
  * Embed a single piece of text into a 768-dim vector.
@@ -86,7 +60,7 @@ export async function embedText(text) {
         contents: text,
         config: { outputDimensionality: EMBEDDING_DIMENSIONS },
       }),
-    "embedContent"
+    "gemini:embed"
   );
 
   const values = response?.embeddings?.[0]?.values;
@@ -112,8 +86,56 @@ export async function generateReply({ systemInstruction, history }) {
         contents: history,
         config: { systemInstruction },
       }),
-    "generateContent"
+    "gemini:chat"
   );
 
   return response.text;
+}
+
+/**
+ * Same as generateReply, but yields the reply in pieces as the model produces it.
+ *
+ * WHY THIS EXISTS: a chat that sits blank for three seconds and then dumps a
+ * paragraph reads as broken, even when it's fast. Text appearing as it's written
+ * is the difference between an agent that feels alive and one that feels
+ * stuck. It matters far more on a CALL: voice cannot start speaking until it has
+ * text, so streaming is what keeps first-audio latency survivable. That is why
+ * the test chat streams too — the path stays exercised rather than being
+ * rebuilt when telephony lands.
+ *
+ * RETRY BEHAVIOUR IS DELIBERATELY NARROWER HERE. Only opening the stream is
+ * retried. Once the first token has reached the customer we cannot retry —
+ * a second attempt would restart the sentence from the beginning and the reply
+ * would visibly rewrite itself. A mid-stream failure propagates instead.
+ *
+ * @param {object} args
+ * @param {string} args.systemInstruction
+ * @param {Array<{role: "user"|"model", parts: Array<{text: string}>}>} args.history
+ * @param {(chunk: string) => void} args.onChunk called with each new piece of text
+ * @returns {Promise<string>} the complete reply, for persisting
+ */
+export async function generateReplyStream({ systemInstruction, history, onChunk }) {
+  const ai = getClient();
+
+  const stream = await withRetry(
+    () =>
+      ai.models.generateContentStream({
+        model: CHAT_MODEL,
+        contents: history,
+        config: { systemInstruction },
+      }),
+    "gemini:chat-stream"
+  );
+
+  let full = "";
+  for await (const chunk of stream) {
+    const text = chunk?.text;
+    // Chunks can legitimately carry no text (safety metadata, usage info), so
+    // an empty one is skipped rather than treated as the end of the stream.
+    if (!text) continue;
+    full += text;
+    onChunk(text);
+  }
+
+  return full;
 }

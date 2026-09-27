@@ -22,7 +22,7 @@ datasource db {
 model Conversation {
   id        String   @id @default(uuid())
   tenantId  String   @map("tenant_id")
-  channel   String // widget | whatsapp | voice — channel the conversation STARTED on
+  channel   String // chat | voice — chat is the internal test surface (§ CLAUDE.md)
   status    String   @default("active") // active | resolved | escalated
   // Locale this conversation is being held in (en | it | ar | ur). Set from the
   // end user's choice / host page, falling back to the tenant's defaultLocale.
@@ -43,7 +43,7 @@ model Message {
   id             String   @id @default(uuid())
   conversationId String   @map("conversation_id")
   tenantId       String   @map("tenant_id")
-  channel        String // widget | whatsapp | voice — channel THIS message came in on
+  channel        String // chat | voice — channel THIS message came in on
   role           String // user | assistant | system | tool
   content        String
   createdAt      DateTime @default(now()) @map("created_at")
@@ -66,15 +66,107 @@ model Message {
 // embedding model or its dimension ever changes, this column size and every
 // existing row's embedding both have to change together — there's no way to
 // mix dimensions in one column.
+/// A DOCUMENT a business gave its agent — one row per thing they uploaded or
+/// typed. This is the record they see, rename, edit and delete; chunks are an
+/// implementation detail beneath it.
+///
+/// WHY THIS TABLE EXISTS: without it, ingest was insert-only. Re-uploading a
+/// corrected price list left the OLD chunks in place competing with the new
+/// ones in retrieval, and the agent would sometimes quote a price the business
+/// had already fixed. A stable id per document is what makes "replace" and
+/// "delete" possible at all.
+model KnowledgeSource {
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+
+  /// What the business calls it. Unique per tenant so re-uploading the same
+  /// filename REPLACES rather than duplicates — that is the whole point.
+  title String
+
+  /// "text" (typed in the dashboard) | "file" (uploaded) | "url" (crawled)
+  kind String @default("text")
+
+  /// The extracted plain text, kept verbatim.
+  ///
+  /// Stored for two reasons: a business can re-read and EDIT what it gave the
+  /// agent, and re-chunking (a better splitter, a different chunk size) can be
+  /// replayed without asking them to upload everything again. Chunks are
+  /// derived data; this is the original.
+  content String
+
+  /// Upload provenance. Null for typed text.
+  fileName String? @map("file_name")
+  mimeType String? @map("mime_type")
+  byteSize Int?    @map("byte_size")
+
+  /// The ORIGINAL uploaded bytes, in Cloudinary — never what the agent answers
+  /// from (that's `content`, extracted text). Only set for kind "file". Null
+  /// when Cloudinary isn't configured or the upload failed: the original is
+  /// optional, the extracted text is not. `filePublicId` is what lib/agent/
+  /// storage.js needs to delete the asset when this document is replaced or
+  /// deleted — the URL alone isn't enough to address it for deletion.
+  fileUrl      String? @map("file_url")
+  filePublicId String? @map("file_public_id")
+
+  /// Denormalised so the list screen doesn't COUNT chunks per row.
+  chunkCount Int @default(0) @map("chunk_count")
+
+  /// "ready" | "processing" | "failed" — embedding a large PDF is not a
+  /// request-response operation, and a business needs to see which it is.
+  status String  @default("ready")
+  error  String?
+
+  chunks KnowledgeChunk[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([tenantId, title])
+  @@index([tenantId])
+  @@map("knowledge_sources")
+  @@schema("ai_engine")
+}
+
 model KnowledgeChunk {
-  id        String              @id @default(uuid())
-  tenantId  String              @map("tenant_id")
-  source    String // doc filename / URL / identifier the chunk came from
+  id       String @id @default(uuid())
+  tenantId String @map("tenant_id")
+
+  /// Cascade: deleting a document deletes its chunks in one statement, with no
+  /// window where a source is gone but its chunks still answer questions.
+  sourceId String          @map("source_id")
+  source   KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+
+  /// Denormalised title, so retrieval can cite a source without a join on the
+  /// hot path. Rewritten when a document is renamed.
+  sourceTitle String @map("source_title")
+
+  /// The heading path this chunk sits under, e.g. "Pricing > Whitening".
+  /// Prepended to the embedded text so a chunk about "250 euros" still matches
+  /// a question about "whitening" even when the word appears only in the heading.
+  heading String?
+
+  /// Position within the document, for stable ordering when showing a preview.
+  ordinal Int @default(0)
+
   content   String
   embedding Unsupported("vector(768)")
-  createdAt DateTime            @default(now()) @map("created_at")
+  createdAt DateTime @default(now()) @map("created_at")
 
   @@index([tenantId])
+  @@index([sourceId])
+  /// ⚠️⚠️ THERE IS AN HNSW INDEX ON `embedding` THAT PRISMA CANNOT SEE. ⚠️⚠️
+  ///
+  ///   knowledge_chunks_embedding_idx
+  ///   USING hnsw (embedding ai_engine.vector_cosine_ops)
+  ///
+  /// Prisma 6 has no `Hnsw` index type, so it cannot be declared here — and
+  /// because Prisma does not know it exists, **`prisma migrate diff` emits a
+  /// `DROP INDEX` for it every single time.** Dropping it does not error and
+  /// nothing breaks visibly; every similarity query just silently reverts to a
+  /// sequential scan, which is invisible at 14 chunks and crippling at 10,000.
+  ///
+  /// SO: never paste a generated migration in unread. Delete that DROP INDEX
+  /// line. `npm run db:check` verifies the index is still there.
   @@map("knowledge_chunks")
   @@schema("ai_engine")
 }
@@ -110,7 +202,8 @@ model AgentAction {
 //
 // WHY THIS LIVES IN ai_engine, NOT tenant_core: the partner owns tenants, users,
 // auth, plans and billing. This row is the AI engine's own concern — persona,
-// capabilities and widget theme all change whenever the prompt pipeline changes,
+// capabilities and prompt-facing settings all change whenever the prompt
+// pipeline changes,
 // so keeping it on our side means prompt iteration never waits on their migrations.
 // The partner's dashboard edits it through /api/agent-config. One row per tenant.
 model AgentConfig {
@@ -124,8 +217,20 @@ model AgentConfig {
   timezone     String  @default("UTC") // IANA name — needed for hours + booking
 
   // --- language ---
-  defaultLocale String   @default("en") @map("default_locale")
-  languages     String[] @default(["en"]) // locales this tenant has enabled: en | it | ar | ur
+  // TWO SETTINGS, and they answer different questions. Never merge them.
+  //
+  // uiLocale       "en" | "it" — the INTERFACE language. Drives the dashboard
+  //                Every screen a business owner reads. One choice, one dropdown.
+  //
+  // replyLanguage  "en" | "it" | "auto" — what the AGENT REPLIES IN.
+  //                "auto" means answer in whichever language the customer wrote
+  //                in. It is NOT a locale: it never reaches the translation
+  //                lookup, it becomes an instruction to the model in prompt.js.
+  //
+  // A clinic can run its dashboard in Italian while its agent mirrors whatever
+  // language each customer happens to open with. One field cannot express that.
+  uiLocale      String @default("en") @map("ui_locale")
+  replyLanguage String @default("auto") @map("reply_language")
 
   // --- free-form structured settings ---
   // hours:      { mon: [["09:00","17:00"]], ... } — opening hours in `timezone`
@@ -143,10 +248,6 @@ model AgentConfig {
   // query "which tenants enabled X", add a GIN index on this column.
   capabilities Json @default("{}")
 
-  // Widget theme: { logoUrl, primaryColor, position, greeting, launcherIcon }.
-  // Read by the widget at load time; shape is owned by lib/tenant/config.js.
-  widget Json @default("{}")
-
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -154,40 +255,58 @@ model AgentConfig {
   @@schema("ai_engine")
 }
 
-// Public keys that let an embedded widget identify its tenant WITHOUT the host
-// page knowing the tenant id. Modelled on Stripe's publishable keys: the value
-// is safe to paste into a <script> tag, because on its own it only grants
-// "start a conversation with this business" — and only from an allowed origin.
-//
-// WHY WE OWN THIS TABLE: a widget key is a credential for OUR channel endpoints.
-// The partner provisions it through /api/widget-keys when a tenant onboards,
-// exactly like agent_configs. When tenant_core exists, the only thing that
-// changes is that lib/tenant/registry.js also checks the tenant is active —
-// see the seam comment in that file.
-model WidgetKey {
+
+/// A unit of work that takes too long to do inside a request.
+///
+/// Embedding a 40-page PDF is thirty-odd model calls; OCR of a scanned one is
+/// slower still. Doing that inline means an HTTP request open for minutes, a
+/// business staring at a spinner with no idea whether anything is happening,
+/// and a proxy timeout silently killing the upload half-finished.
+///
+/// So the upload returns a JOB immediately and the work happens behind it. The
+/// row is what makes progress observable: the dashboard polls it, and because
+/// it is in the DATABASE rather than only in memory, a business can reload the
+/// page mid-import and still see where it got to.
+model IngestJob {
   id       String @id @default(uuid())
   tenantId String @map("tenant_id")
 
-  // e.g. "pk_live_9f2a…". Unique across all tenants — it IS the lookup.
-  publicKey String @unique @map("public_key")
+  /// The document this job is building. Null until the source row exists.
+  sourceId String? @map("source_id")
+  title    String
+  kind     String  @default("file") // text | file | url
 
-  // Origins allowed to use this key, as full origins ("https://acme.com").
-  // EMPTY MEANS SAME-ORIGIN ONLY, never "allow everything" — an empty allowlist
-  // is what a half-finished onboarding looks like, and it must fail closed.
-  allowedOrigins String[] @default([]) @map("allowed_origins")
+  /// queued | processing | done | failed | cancelled
+  status String @default("queued")
 
-  label     String? // human label in the dashboard, e.g. "Main site"
-  active    Boolean   @default(true)
-  revokedAt DateTime? @map("revoked_at")
+  /// What it is doing RIGHT NOW — extracting | ocr | chunking | embedding.
+  /// Shown to the business, because "embedding 12 of 40" is reassuring in a way
+  /// that an unlabelled progress bar is not.
+  stage String @default("queued")
 
-  // Touched at most once a minute (see registry.js) — enough to answer "is this
-  // key still in use?" in the dashboard without a write on every message.
-  lastUsedAt DateTime? @map("last_used_at")
+  /// 0–100. Derived from the stage weights in lib/agent/jobs.js rather than
+  /// stored per-stage, so the bar never goes backwards.
+  progress Int @default(0)
+
+  /// Unit counts for the current stage, e.g. chunks embedded or pages OCR'd.
+  itemsDone  Int @default(0) @map("items_done")
+  itemsTotal Int @default(0) @map("items_total")
+
+  /// Upload provenance, kept so a failed job can still say what it was about.
+  fileName String? @map("file_name")
+  byteSize Int?    @map("byte_size")
+
+  error String?
+
+  /// Set when the job leaves the queue, so a job abandoned by a process crash
+  /// can be told apart from one that is genuinely still working.
+  startedAt  DateTime? @map("started_at")
+  finishedAt DateTime? @map("finished_at")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  @@index([tenantId])
-  @@map("widget_keys")
+  @@index([tenantId, status])
+  @@map("ingest_jobs")
   @@schema("ai_engine")
 }
