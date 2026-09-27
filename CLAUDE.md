@@ -74,6 +74,9 @@ public.
 | **Chat model** | Pluggable: `LLM_PROVIDER` = `gemini` \| `openrouter` | Via [`llm.js`](src/lib/agent/llm.js). |
 | **Embeddings** | **Gemini only — not swappable** | `gemini-embedding-001` @ 768 dims. §6.2 explains why this is a correctness constraint. |
 | Documents | `pdfjs-dist`, `mammoth`, `tesseract.js`, `@napi-rs/canvas` | All four in `serverExternalPackages`; see §6.8. |
+| File storage | **Cloudinary** (`resource_type: raw`) | The ORIGINAL uploaded file only — never what the agent answers from. See §6.13. |
+| HTTP client (crawl only) | **`undici`**, not global `fetch` | Needed to pin a crawled connection to the exact IP already validated. See §6.9. |
+| Test console editor | `@uiw/react-codemirror` + `@codemirror/*` | Edit-in-modal for typed/`.txt`/`.md` documents. Needs an explicit theme + `style={{height:"100%"}}` — see the comment at its call site in `page.js`, both are easy to lose on a refactor. |
 
 ---
 
@@ -121,7 +124,9 @@ src/app/
     agent-config/catalog/      # capability list, translated, for his UI
     knowledge/route.js         # list + add/replace: typed text, uploads, URL crawl
     knowledge/[id]/route.js    # read, edit, rename, delete one document
+    knowledge/[id]/retry/route.js  # re-embed a FAILED document — no re-upload (§6.15)
     knowledge/jobs/route.js    # background import progress (§6.6)
+    knowledge/jobs/[id]/route.js   # cancel ONE queued/processing job (§6.14)
     knowledge/search/route.js  # retrieval debug + eval harness
     locales/route.js           # whole UI in one language, for his dashboard
     ingest/route.js            # legacy single-document ingest
@@ -137,8 +142,9 @@ src/lib/
     extract.js                 # pdf/docx/txt/md/csv → text; editability rule (§6.7)
     ocr.js                     # scanned-PDF OCR (§6.5)
     crawl.js                   # website crawling + SSRF defences (§6.9)
-    ingest.js                  # create/REPLACE/rename/delete documents (§6.10)
-    jobs.js                    # background import queue (§6.6)
+    ingest.js                  # create/REPLACE/rename/delete/retry documents (§6.10, §6.15)
+    jobs.js                    # background import queue + cancellation (§6.6, §6.14)
+    storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
     capabilities/catalog.js    # what the agent can DO, per channel
   tenant/ config.js, registry.js   # ★ the two seams
   i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
@@ -223,6 +229,21 @@ Re-run the sweep after changing the embedding model, the chunker or chunk size.
 If the two numbers ever **overlap**, no threshold separates them and the fix is
 better chunking, not a different number.
 
+**Retrieval is now HYBRID, but the gate above is untouched.** `retrieveRelevantChunks`
+pulls a wider pool of threshold-admitted candidates (`CANDIDATE_POOL_SIZE = 20`,
+still every one `<= MAX_DISTANCE`), re-ranks that pool with Reciprocal Rank
+Fusion against a Postgres full-text keyword score, then diversifies the final
+`topK` with a heading round-robin so five near-duplicate chunks from one table
+can't crowd out a relevant chunk from elsewhere. This exists because pure
+cosine similarity has no special regard for an exact code, price or name — it
+can rank a chunk merely "about the same topic" above the one that actually
+contains what was asked. **Membership is still decided by `MAX_DISTANCE`
+alone** — the keyword score only ever re-orders chunks that vector search
+already allowed in; it can never admit one vector search would have rejected.
+`retrieveWithoutThreshold` (the eval/debug path) stays pure-vector on purpose —
+mixing in keyword scores there would defeat its one job, showing the raw
+rejected-chunk distances.
+
 ### 6.4 Chunking is heading-aware
 
 [`chunk.js`](src/lib/agent/chunk.js) splits at headings, then paragraphs, then
@@ -233,6 +254,31 @@ mid-sentence, producing chunks that each read as a different rule.
 heading "Whitening" the body often says "250 euros" and never repeats the word —
 embedded alone, that chunk cannot match "how much is whitening?". The heading
 puts the words back for the vector while the quoted text stays clean.
+
+**A plain-text heading must be short, unpunctuated, AND followed by a blank
+line — markdown headings need none of this, `#` is already unambiguous.**
+Without the blank-line requirement, `detectHeading()` classified lines like
+`Phone: 123` or a bare URL as headings (short, title-cased, no terminal
+punctuation is exactly what a real heading looks like too). A heading's own
+text never enters a chunk's body, only its breadcrumb — so a contact line with
+nothing under it before the next real heading **silently vanished from the
+document**. Lines with an internal colon (`label: value`) or a URL/email are
+now excluded outright, on top of the blank-line check.
+
+**A single sentence (or a run of text with no terminal punctuation) longer
+than `TARGET_CHARS` gets a character-count hard split.** The comment always
+described this as the last-resort fallback after paragraph- and
+sentence-splitting; the code didn't actually have it until it was added —
+before that, an oversized run-on sentence just sailed through as one
+oversized chunk. `hardSplit()` carries `OVERLAP_CHARS` backward into each
+piece so a phrase landing on the cut point isn't orphaned in only one of them.
+
+**A section's own leading runt merges FORWARD, not just backward.** A tiny
+first paragraph under a fresh heading (e.g. "See below.") used to have no
+same-heading predecessor to fold into and sat alone as a fragment that
+matches everything weakly. `mergeRunts()` folds it into the piece that
+follows within the same section before `chunkDocument`'s existing
+cross-section backward merge ever runs.
 
 ### 6.5 OCR, and the detached-buffer trap
 
@@ -265,8 +311,20 @@ and the work continues behind them.
 - **`reapStaleJobs()`** marks jobs abandoned by a process restart as failed.
   Left alone they show a bar that never moves, which reads as *still working* —
   the most misleading state available.
+  **It only reaps `processing` rows on a timeout — never `queued` ones on the
+  same timeout.** Concurrency is 1 (see above), so a queued job can
+  legitimately sit untouched for a long time behind a slow one ahead of it,
+  with no progress update of its own the whole time because it hasn't started
+  yet. Reaping it on the same clock used to mark it "failed" purely for
+  waiting its turn, and then `drain()` ran it anyway once its turn came,
+  flipping the status right back — a business saw a job randomly un-fail
+  itself. A `queued` row is instead checked against the in-memory `queue`
+  array: still present means the process is alive and it's genuinely waiting;
+  absent (a restart wiped `queue` back to empty) means it's truly orphaned.
 - **Typed text stays synchronous.** It is fast, and someone who just clicked Save
   expects the document to be there.
+- **A running job can be cancelled** (§6.14), and **a failed one retried**
+  without re-uploading (§6.15).
 
 ⚠️ In-process queue. Before scaling out, move it to BullMQ/Redis; only `jobs.js`
 changes.
@@ -309,11 +367,31 @@ Not optional, not to be simplified:
   loopback, link-local and reserved ranges — decided on the address, not the name.
 - **Redirects followed manually** and re-validated at every hop. A public
   hostname can redirect to `127.0.0.1`; checking only the first URL misses it.
+- **Redirects are also pinned to the origin that was actually requested.**
+  Re-validating the SSRF blocklist at every hop stops a redirect landing on a
+  private address, but says nothing about a redirect to a different PUBLIC
+  site — an open redirect (or an ad tracker) could hand the crawler off to an
+  unrelated domain and it would get ingested as if it were the business's own
+  content. `fetchPage` now rejects a hop whose origin differs from the one it
+  started with (`reason: "crossOriginRedirect"`).
+- **The TCP connection is pinned to the exact address `checkUrl()` validated —
+  not left to `fetch()` to re-resolve.** Global `fetch()` is `undici`
+  underneath, and by default it does its OWN DNS lookup when it actually
+  connects, moments after ours. That gap is a DNS-rebinding hole: a hostile
+  authoritative DNS server can answer our check with a safe public IP and
+  `fetch()`'s with `127.0.0.1` or a cloud metadata address. A per-hop `undici`
+  `Agent` with a custom `connect.lookup` forces the real connection to the
+  checked address, closing the gap. **Must import `fetch` from the `undici`
+  package itself, not use the global one** — mixing a global-`fetch` request
+  with a separately-installed-`undici` `Agent` fails outright
+  (`invalid onRequestStart method`) because the two copies' internal Request
+  shapes don't match.
 - Size-capped, time-capped, bounded page count, HTML/text only.
 - **Same-origin links only.** A business asked us to read THEIR site.
 
 Verified refused: cloud metadata, `127.0.0.1`, `localhost`, `10.x`, `192.168.x`,
-IPv6 loopback, `file://`.
+IPv6 loopback, `file://`, a redirect to a different public origin, a redirect
+to a private address on the second hop.
 
 One document per SITE so a re-crawl is an ordinary replace. **The starting page
 is exempt from the thin-page filter** — the business typed that address
@@ -335,6 +413,28 @@ they had just fixed. **Never reintroduce an append-only path.**
   needs no re-upload.
 - **A rename does not re-embed** — it rewrites the denormalised `sourceTitle`.
 
+**The row itself must roll back on failure, not just the chunks.** The upsert
+that marks a document "processing" happens BEFORE chunking/embedding, writing
+the NEW content/metadata onto the row immediately — but the old chunks aren't
+touched until the whole embed succeeds. Left alone, an ordinary failure (a
+quota error, a chunk-count limit) used to leave the row **displaying the new,
+never-embedded text while retrieval kept answering from the old chunks** — a
+business corrects a price, the save appears to go through, and the agent
+keeps quoting the old number with no visible sign anything is wrong.
+`ingestDocument`'s catch now restores every field to the pre-attempt row
+(content, `fileName`, `fileUrl`/`filePublicId`, `status`, `error`) whenever a
+REPLACE fails or is cancelled — a brand-new document with no prior version
+still gets the old behaviour (a visible "failed" row), since there's nothing
+to roll back to.
+
+**The console confirms before replacing.** Same-name-replaces was always the
+right server rule (see below), but nothing stopped it firing on an accidental
+name collision. Upload, write and crawl each check the title against the
+already-loaded document list client-side and prompt ("X already exists and
+will be replaced. Continue?") before submitting — a UX courtesy, not a second
+security boundary; the server still enforces the real rule regardless of what
+the client checked.
+
 **Known limitation:** replace fixes duplicates *within* a document. Two different
 documents that disagree is a separate problem — retrieval passes each source's
 last-updated date and the prompt has a conflict rule, so the agent surfaces the
@@ -352,11 +452,111 @@ reply "you're booked for Tuesday at 3" — a plausible lie to a real customer.
 Flip the flag only **after** tools genuinely execute, and log every executed call
 to `agent_actions`.
 
+**The console's capability toggles are hidden from the UI for the same
+reason** (`SHOW_CAPABILITIES = false` in `page.js`) — showing switches for
+things the agent can only ever describe, never do, invited confusion about
+what flipping them actually changes today. This is a display choice only:
+`config.capabilities` and `toggleCapability` are untouched, so re-enabling it
+when tools genuinely execute needs no migration, just flipping the flag back.
+
 ### 6.12 API routes always return JSON
 
 Wrap handlers in try/catch and return `NextResponse.json({ error }, { status })`.
 An uncaught throw sends an empty body and the client sees "Unexpected end of
 JSON input" instead of the real cause.
+
+**`return someAsyncHandler(...)` inside the try block is NOT the same as
+`return await someAsyncHandler(...)`.** `knowledge/route.js`'s `POST` handler
+did exactly this for `handleUploads`/`handleCrawl`/`handleTypedText` — the
+`try` block "succeeds" the instant it returns the pending promise, so a
+REJECTION from that promise settles later, after `catch` has already exited,
+and escapes as an unhandled rejection instead of being formatted as JSON. This
+produced precisely the empty-500 failure mode above for something as ordinary
+as a too-large document. Every handler that can throw asynchronously must be
+awaited before `return`, even one line above the `catch`.
+
+### 6.13 Cloudinary stores the original file, never what the agent answers from
+
+[`storage.js`](src/lib/agent/storage.js) uploads an uploaded document's raw
+bytes (`resource_type: "raw"`) purely so a business can get its original file
+back and so deleting/replacing a document also removes the copy sitting in
+Cloudinary. It has nothing to do with retrieval — `content` (extracted text,
+already in Postgres) is what the agent answers from regardless of whether
+Cloudinary is even configured.
+
+- **Best-effort, always.** `uploadOriginalFile`/`deleteOriginalFile` never
+  throw — a Cloudinary outage must not fail an otherwise-successful import,
+  and a failed delete must not block removing the document or its vector
+  data. Postgres is the source of truth for whether a document exists;
+  Cloudinary never is.
+- **The OLD file is deleted only after the NEW version is fully committed** —
+  inside `ingestDocument`, after the chunk-swap transaction succeeds, never
+  right after the upsert. Deleting it any earlier risks a failed or cancelled
+  replace leaving the row with no original at all, for either version.
+- **A cancelled or failed replace restores the OLD `fileUrl`/`filePublicId`**
+  onto the row (see §6.10) and deletes whatever the NEW, now-abandoned
+  attempt had already uploaded — never the reverse.
+
+### 6.14 Job cancellation is cooperative, and the writer owns the rollback
+
+A running job (`lib/agent/jobs.js`) can't be stopped mid-`await` — `run()` is
+a plain async function, not a cancellable operation. `cancelJob()` only
+records the request (`cancelledJobIds`); the job's own next progress
+checkpoint (`JobContext.report`, called once per page fetched, OCR'd or chunk
+embedded) notices and throws `JobCancelledError`, unwinding out of
+`crawlSite`/`ocrPdf`/`ingestDocument`.
+
+- **A queued job is removed from the in-memory array immediately** — nothing
+  was ever written for it, so there's nothing to roll back.
+- **`ingestDocument` — not `cancelJob` — owns cleaning up whatever a running
+  job had already written**, because it's the only place that knows whether
+  this was a brand-new document (delete the row + any Cloudinary upload) or a
+  replace (restore the old row, see §6.10 and §6.13). `cancelJob` itself never
+  touches the document row.
+- **`ocrPdf` and `crawlSite` must let `JobCancelledError` propagate, not
+  swallow it as an ordinary failure.** Both wrap their work in a broad
+  try/catch that used to catch everything indiscriminately; a cancellation
+  arriving through their `onProgress` callback needs an explicit
+  `if (err instanceof JobCancelledError) throw err;` before the generic
+  catch, or it gets reported as "unreadable"/a crawl failure instead of being
+  recognised and cleaned up as a cancellation.
+
+### 6.15 A failed import can be retried without re-uploading
+
+`retrySource()` re-embeds a document whose LAST attempt failed, using what's
+already on the row: `content` was saved before embedding was ever attempted
+(§6.10), and the Cloudinary reference (§6.13) was never touched by the
+failure. A retry therefore never re-reads an uploaded file or hits Cloudinary
+again — it re-runs chunking + embedding through the same `ingestDocument`
+every other ingest uses, which is what gives it the same rollback and
+cancellation behaviour for free. Passing the row's OWN `fileUrl`/`filePublicId`
+back in as `file` matters: omitting it would make `ingestDocument`'s upsert
+write `fileUrl: null`, silently orphaning the Cloudinary asset.
+
+**Only offered in the console for TRANSIENT failures** (quota, a provider
+outage — `isRetryableError` in `page.js`). A document that failed because it's
+genuinely too large, or produced no chunks, will fail again identically no
+matter how many times it's retried; showing the button for those would just
+train people to click something that can never work. `POST
+/api/knowledge/:id/retry` re-checks `status === "failed"` itself rather than
+trusting the client's classification.
+
+### 6.16 User-facing errors must never leak provider internals
+
+A Gemini quota error's `.message` is a multi-line JSON blob — status codes,
+doc links, a retry countdown. Stored and logged verbatim (useful for
+debugging), but a business or a customer must never see it raw: it happened
+once, showing a `RESOURCE_EXHAUSTED` JSON dump next to a failed upload instead
+of "The AI service is at its usage limit for now."
+
+`humanizeError()` in `page.js` classifies a raw message before display —
+known technical signatures (quota, network/`ECONNREFUSED`) map to a
+translated, friendly sentence; our OWN thrown Errors (short, brace-free
+English like "Document is too large: 420 sections, limit 400") pass through
+untouched; anything else technical-looking falls back to a generic translated
+message. Applied everywhere a raw error could reach the screen — job
+failures, document failures, save/upload/crawl/chat errors — never only in
+one place, or the next one added will leak again.
 
 ---
 
@@ -401,18 +601,23 @@ right language, with history persisted per tenant.
 
 | Area | State |
 | --- | --- |
-| RAG retrieval | ✅ 100% hit@1, MRR 1.000, 100% off-topic rejection (`npm run eval:retrieval`) |
-| Heading-aware chunking | ✅ verified on tables and multi-section documents |
+| RAG retrieval | ✅ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3); 100% hit@1, MRR 1.000, 100% off-topic rejection (`npm run eval:retrieval`) |
+| Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
 | PDF / DOCX / TXT / MD / CSV | ✅ extracted; Word heading levels survive into chunk headings |
 | **OCR for scanned PDFs** | ✅ character-perfect on an image-only PDF |
-| Background jobs + live progress | ✅ real percentages, stage labels, stale-job reaping |
-| Website crawling | ✅ with SSRF defences verified against 8 attack vectors |
-| Replace / edit / rename / delete | ✅ enforced server-side |
+| Background jobs + live progress | ✅ real percentages, stage labels, stale-job reaping that no longer flaps a legitimately-queued job (§6.6) |
+| **Job cancellation** | ✅ cooperative cancel of a queued/processing import, with correct rollback of the row/chunks/Cloudinary file (§6.14) |
+| **Retry a failed import** | ✅ re-embeds already-stored content, no re-upload — offered only for transient errors (§6.15) |
+| **Original file storage** | ✅ Cloudinary, cleaned up on delete/replace/cancel, never touched by retrieval (§6.13) |
+| Website crawling | ✅ SSRF defences verified against 8+ attack vectors, now including DNS-rebinding pinning and cross-origin-redirect blocking (§6.9) |
+| Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
 | Interface + reply languages | ✅ independent, both directions |
-| Test chat (SSE streaming) | ✅ `/api/chat` |
+| Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
+| **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
+| Console UI | ✅ upload/write/crawl as three top-level actions; write/edit share one modal + CodeMirror editor; multi-select bulk delete; every action button disables while its own request is in flight |
 
 ### Limitations — be honest about these
 
@@ -422,10 +627,17 @@ right language, with history persisted per tenant.
    §9 is the plan.
 3. **No tool execution.** The agent collects booking details but cannot book.
    Guarded so it never claims otherwise (§6.11).
-4. **Free-tier model quotas.** Gemini free tier is ~20 chat requests/day *per
-   model*; switching `GEMINI_CHAT_MODEL` moves to a fresh quota. OpenRouter's
-   free Gemma pool has never once responded. **A paid key is required before any
-   demo**; embeddings are on a separate, working quota.
+4. **Free-tier model quotas — two SEPARATE daily caps, both hit in practice.**
+   Chat is ~20 requests/day *per model*; switching `GEMINI_CHAT_MODEL` moves to
+   a fresh quota. Embeddings are a different cap
+   (`EmbedContentRequestsPerDayPerProjectPerModel-FreeTier`, ~1000/day) — easy
+   to exhaust during active testing (a few multi-chunk uploads plus eval runs
+   in one session is enough), and every ingest and every chat reply needs at
+   least one embedding call, so hitting it stops BOTH uploads and retrieval,
+   not just chat. `humanizeError` (§6.16) shows this as a friendly "usage
+   limit" message; the underlying error names which of the two quotas it is.
+   OpenRouter's free Gemma pool has never once responded. **A paid key is
+   required before any demo.**
 5. **No automated unit tests.** The retrieval eval and the OpenRouter test are
    the only mechanical checks; everything else was verified by hand.
 6. **In-process state** — job queue and caches. Multi-instance needs Redis.
@@ -439,8 +651,11 @@ right language, with history persisted per tenant.
 
 ### 9.1 Next, in order
 
-1. **RAG optimisation** — retrieval quality is the product. Re-ranking, better
-   chunk sizing, query rewriting, evals on real business documents.
+1. **RAG optimisation** — retrieval quality is the product. Hybrid re-ranking
+   (vector + keyword RRF + heading diversity, §6.3) is done; still open: query
+   rewriting, evals on real (not fixture) business documents, and revisiting
+   `MAX_DISTANCE`/chunk sizing once real documents surface cases the fixture
+   doesn't.
 2. **Vector store scale** — HNSW parameter tuning, index maintenance, per-tenant
    partitioning as chunk counts grow.
 3. **Multi-file handling at scale** — per-tenant limits, larger batches,
@@ -514,6 +729,9 @@ stale.
   allowed with a warning in dev, which is what lets the test console work.
 - `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER`, `OPENROUTER_*`, `OPENROUTER_BASE_URL`
   (any OpenAI-compatible endpoint — Ollama, Groq — with no code change).
+- `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` —
+  optional. Uploads work without them; `storage.js` just skips storing the
+  original file (§6.13) and logs a warning instead of failing the import.
 
 `.env*` is gitignored. Never commit keys; update `.env.example` instead.
 
