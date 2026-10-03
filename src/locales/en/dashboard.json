@@ -85,6 +85,9 @@
   "chat.answeredBy": "Model: {model}",
   "chat.groundedIn": "From: {sources}",
   "chat.noSources": "No matching document — answered from persona only",
+  "chat.searchedFor": "Searched for: {query}",
+  "chat.searchRewriteFailed": "Couldn't rewrite the question — searched it as typed",
+  "chat.searchRewriteSkipped": "Question rewriting is paused after repeated failures — searched it as typed",
   "errors.generic": "Something went wrong. Please try again.",
   "errors.quotaExceeded": "The AI service is at its usage limit for now. Please try again in a few minutes.",
   "errors.unavailable": "We couldn't reach the AI service right now. Please try again shortly."

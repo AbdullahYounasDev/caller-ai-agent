@@ -1,5 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { withRetry } from "./retry";
+import { USE_EMBEDDING_TASK_TYPES } from "./embed-scheme";
 
 /**
  * Gemini provider. Chat AND embeddings.
@@ -46,28 +47,66 @@ export const EMBEDDING_DIMENSIONS = 768;
 // (the test chat surfaces it) without duplicating this default elsewhere.
 export const CHAT_MODEL = process.env.GEMINI_CHAT_MODEL || "gemini-3.5-flash-lite";
 
+// Which side of the retrieval a text is on. Gemini's embedding model takes a
+// `taskType` so that a QUESTION and the PASSAGE that answers it land closer
+// together than two arbitrary texts would — a question and its answer are not
+// similar text, and symmetric embedding leaves that gap in every distance.
+const TASK_TYPE_FOR_ROLE = { document: "RETRIEVAL_DOCUMENT", query: "RETRIEVAL_QUERY" };
+
+function embedConfig(role) {
+  if (!TASK_TYPE_FOR_ROLE[role]) {
+    // No default on purpose: a caller that does not know which side it is on
+    // would otherwise embed with the wrong one without a sound (§6.2's worst
+    // failure mode, by a smaller route).
+    throw new Error(`embed role must be "document" or "query" (got ${JSON.stringify(role)})`);
+  }
+  return {
+    outputDimensionality: EMBEDDING_DIMENSIONS,
+    ...(USE_EMBEDDING_TASK_TYPES ? { taskType: TASK_TYPE_FOR_ROLE[role] } : {}),
+  };
+}
+
 /**
- * Embed a single piece of text into a 768-dim vector.
- * @param {string} text
- * @returns {Promise<number[]>}
+ * Embed several texts in ONE request — 768-dim vectors, in input order.
+ *
+ * This saves LATENCY, not quota: the free-tier cap is counted per text (probed
+ * with a near-empty quota: batches of 2, 3 and 5 succeeded, a batch of 10 got a
+ * 429, then three single-text calls succeeded — a per-request cap would have
+ * let the batch of 10 through). Batches also fail whole: one 429 loses all of it.
+ *
+ * @param {string[]} texts
+ * @param {{role: "document"|"query"}} options
+ * @returns {Promise<number[][]>}
  */
-export async function embedText(text) {
+export async function embedTexts(texts, { role } = {}) {
+  const config = embedConfig(role);
+  if (!texts.length) return [];
+
   const ai = getClient();
   const response = await withRetry(
-    () =>
-      ai.models.embedContent({
-        model: EMBEDDING_MODEL,
-        contents: text,
-        config: { outputDimensionality: EMBEDDING_DIMENSIONS },
-      }),
+    () => ai.models.embedContent({ model: EMBEDDING_MODEL, contents: texts, config }),
     "gemini:embed"
   );
 
-  const values = response?.embeddings?.[0]?.values;
-  if (!values) {
-    throw new Error("Gemini returned no embedding values for the given text");
+  const vectors = (response?.embeddings ?? []).map((e) => e?.values);
+  // A short or misordered reply would attach vectors to the wrong chunks and
+  // retrieval would return confident nonsense — refuse it instead.
+  if (vectors.length !== texts.length || vectors.some((v) => !v?.length)) {
+    throw new Error(
+      `Gemini returned ${vectors.length} embedding(s) for ${texts.length} text(s) — refusing to store a mismatched batch`
+    );
   }
-  return values;
+  return vectors;
+}
+
+/**
+ * Embed a single piece of text into a 768-dim vector.
+ * @param {string} text
+ * @param {{role: "document"|"query"}} options
+ * @returns {Promise<number[]>}
+ */
+export async function embedText(text, { role } = {}) {
+  return (await embedTexts([text], { role }))[0];
 }
 
 /**
@@ -75,14 +114,16 @@ export async function embedText(text) {
  * @param {object} args
  * @param {string} args.systemInstruction
  * @param {Array<{role: "user"|"model", parts: Array<{text: string}>}>} args.history
+ * @param {string} [args.model] overrides CHAT_MODEL for this one call — used by the
+ *   query-rewrite step (GEMINI_REWRITE_MODEL, see llm.js). Absent = the chat model.
  * @returns {Promise<string>}
  */
-export async function generateReply({ systemInstruction, history }) {
+export async function generateReply({ systemInstruction, history, model }) {
   const ai = getClient();
   const response = await withRetry(
     () =>
       ai.models.generateContent({
-        model: CHAT_MODEL,
+        model: model || CHAT_MODEL,
         contents: history,
         config: { systemInstruction },
       }),

@@ -884,7 +884,14 @@ export default function Home() {
               if (last?.role === "assistant" && last.pending) {
                 return [
                   ...prev.slice(0, -1),
-                  { ...last, pending: false, model: payload.model, sources: payload.sources },
+                  {
+                    ...last,
+                    pending: false,
+                    model: payload.model,
+                    sources: payload.sources,
+                    searchQuery: payload.searchQuery,
+                    rewriteStatus: payload.rewriteStatus,
+                  },
                 ];
               }
               return streamingStarted
@@ -896,6 +903,8 @@ export default function Home() {
                       content: payload.reply,
                       model: payload.model,
                       sources: payload.sources,
+                      searchQuery: payload.searchQuery,
+                      rewriteStatus: payload.rewriteStatus,
                     },
                   ];
             });
@@ -1157,7 +1166,7 @@ export default function Home() {
                 return (
                   <li key={job.id}>
                     <div className="mb-1 flex items-baseline justify-between gap-2">
-                      <span className="truncate text-sm font-medium">{job.title}</span>
+                      <span className="truncate text-sm font-medium text-black">{job.title}</span>
                       <span className="flex flex-none items-center gap-2">
                         <span
                           className={`text-xs ${
@@ -1442,6 +1451,29 @@ export default function Home() {
                   {m.sources?.length
                     ? t("dashboard:chat.groundedIn", { vars: { sources: m.sources.join(", ") } })
                     : t("dashboard:chat.noSources")}
+                  {/* What was actually SEARCHED, when that differs from what
+                      the customer typed — a follow-up like "and the Pro one?"
+                      is rewritten into a standalone query first (§6.19). A
+                      failed rewrite is shown too: it silently falls back to
+                      the raw message, and that must not be invisible. */}
+                  {m.searchQuery && (
+                    <>
+                      {" · "}
+                      {t("dashboard:chat.searchedFor", { vars: { query: m.searchQuery } })}
+                    </>
+                  )}
+                  {m.rewriteStatus === "failed" && (
+                    <>
+                      {" · "}
+                      {t("dashboard:chat.searchRewriteFailed")}
+                    </>
+                  )}
+                  {m.rewriteStatus === "skipped" && (
+                    <>
+                      {" · "}
+                      {t("dashboard:chat.searchRewriteSkipped")}
+                    </>
+                  )}
                 </p>
               )}
             </div>

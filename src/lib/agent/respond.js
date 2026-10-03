@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getAgentConfig } from "@/lib/tenant/config";
-import { retrieveRelevantChunks } from "./retrieve";
+import { retrieveForTurn } from "./query";
 import { buildSystemInstruction } from "./prompt";
 import { generateReply, generateReplyStream } from "./llm";
 
@@ -41,22 +41,56 @@ export async function respond({
 
   // 2. Everything the business configured about its agent — name, purpose,
   // tone, languages, what it's allowed to do, hours. Cached, so this is
-  // usually not a DB round trip. Fetched alongside history and retrieval
-  // because none of the three depend on each other.
-  const [config, priorMessages, chunks] = await Promise.all([
+  // usually not a DB round trip. Fetched alongside history and the
+  // conversation's stored locale (step 4) because none of the three depend on
+  // each other — folding the locale read in here too means it costs nothing
+  // extra (see §6.17).
+  //
+  // RETRIEVAL IS NO LONGER IN THIS BLOCK. It used to run alongside these reads
+  // because it only needed the raw message. Conversation-aware retrieval needs
+  // the history first ("and the Pro one?" cannot be searched without knowing
+  // what was being discussed), so it runs right after — one DB round trip
+  // earlier than it could have started, which is the price of resolving
+  // follow-ups at all (§6.19).
+  const [config, recentMessages, conversation] = await Promise.all([
     getAgentConfig(tenantId),
+    // MOST RECENT MAX_HISTORY_MESSAGES, not the oldest — see §6.17. `desc` +
+    // `.reverse()` below is what turns "most recent N" back into the
+    // chronological order the model expects.
     prisma.message.findMany({
       where: { conversationId },
-      orderBy: { createdAt: "asc" },
+      orderBy: { createdAt: "desc" },
       take: MAX_HISTORY_MESSAGES,
     }),
-    // 3. Tenant knowledge relevant to this message — the actual RAG step.
-    retrieveRelevantChunks({
-      tenantId,
-      query: userMessage,
-      topK: MAX_CONTEXT_CHUNKS,
+    prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { locale: true },
     }),
   ]);
+  // `desc` fetched the NEWEST N messages, newest first — reversed here so the
+  // model still reads the conversation in the order it actually happened.
+  // The just-persisted message from step 1 is always the newest of all, so
+  // it is always the LAST element after this reverse, never silently outside
+  // the window (see §6.17 for what went wrong before this).
+  const priorMessages = recentMessages.reverse();
+
+  // 3. Tenant knowledge relevant to this message — the actual RAG step, now
+  // resolved against the conversation so a follow-up is searched as the
+  // question it really is. `earlierTurns` is everything BEFORE this message:
+  // step 1 already persisted it, so it is the last element and must not be
+  // shown to the rewrite as if it were history.
+  const last = priorMessages[priorMessages.length - 1];
+  const earlierTurns =
+    last && last.role === "user" && last.content === userMessage
+      ? priorMessages.slice(0, -1)
+      : priorMessages;
+  const turn = await retrieveForTurn({
+    tenantId,
+    message: userMessage,
+    history: earlierTurns,
+    topK: MAX_CONTEXT_CHUNKS,
+  });
+  const chunks = turn.chunks;
 
   // 4. Record the language this conversation is being held in.
   //
@@ -66,25 +100,53 @@ export async function respond({
   // advance. We store the business's configured choice so the transcript says
   // something honest, and leave "auto" as "auto".
   const conversationLocale = config.replyLanguage;
-  const conversation = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    select: { locale: true },
-  });
   if (conversation && conversation.locale !== conversationLocale) {
-    await prisma.conversation.update({
-      where: { id: conversationId },
-      data: { locale: conversationLocale },
-    });
+    // NOT awaited. This write only matters for a transcript a human might read
+    // later — nothing later in this function reads it back — so it must not
+    // add a DB round trip to reply latency on the common turn where the
+    // locale hasn't changed either (see §6.17). Best-effort, like jobs.js's
+    // own progress writes (§6.6): losing this update loses a label, never
+    // correctness.
+    void prisma.conversation
+      .update({ where: { id: conversationId }, data: { locale: conversationLocale } })
+      .catch(() => {});
   }
 
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
   const systemInstruction = buildSystemInstruction({ config, channel, chunks });
 
   // 6. Shape stored history into Gemini's `contents` format.
-  const history = priorMessages.map((m) => ({
+  let history = priorMessages.map((m) => ({
     role: m.role === "assistant" ? "model" : "user",
     parts: [{ text: m.content }],
   }));
+
+  // DROP A LEADING "model" TURN. Once a conversation is longer than
+  // MAX_HISTORY_MESSAGES, the window fetched above is a slice into the
+  // MIDDLE of it and can start on either role — roughly half the time it
+  // starts on an assistant reply, since turns alternate. Verified live
+  // against the real Gemini API that a leading "model" turn does not error
+  // (the model just answers as if replying to unstated context), but it is
+  // a turn with no question attached to it — pure noise, not useful
+  // grounding — so it is trimmed rather than kept on the strength of
+  // undocumented tolerance. The just-persisted message from step 1 is
+  // always the newest turn and always "user" (see priorMessages above), so
+  // this can never empty the array — at most one leading turn is trimmed,
+  // since strict user/assistant alternation means the turn behind a "model"
+  // turn is always "user".
+  let start = 0;
+  while (start < history.length && history[start].role === "model") start++;
+  history = history.slice(start);
+
+  // CONSECUTIVE SAME-ROLE TURNS (e.g. two "user" turns in a row, left behind
+  // when a prior reply failed before step 8 ever persisted one — see the
+  // catch-free LLM call below) are deliberately left AS TWO TURNS, not
+  // merged into one. Verified live against the real Gemini API that this
+  // does not error and the model correctly uses context from both turns;
+  // OpenAI-style chat APIs (OpenRouter, in openrouter.js's toOpenAiMessages)
+  // don't require strict role alternation either. Merging would invent a
+  // turn structure that never actually happened in the conversation for a
+  // problem that, tested, does not exist.
 
   // 7. Call the LLM.
   // TODO (Phase 4): tool-calling. The tenant's enabled capabilities already
@@ -118,5 +180,13 @@ export async function respond({
     // this reply came from the persona/instructions alone, not the knowledge
     // base.
     sources: [...new Set(chunks.map((c) => c.sourceTitle))],
+    // What was actually SEARCHED when it differs from what the customer said
+    // (§6.19) — so "why did it answer about the Pro plan?" is answerable by
+    // looking at the bubble instead of the server log. null when the message
+    // was searched as typed. `rewriteStatus` is "failed" when the rewrite step
+    // errored and the raw message was searched instead (it never fails the
+    // reply), so a silent fallback is still visible to a human.
+    searchQuery: turn.searchQuery !== userMessage ? turn.searchQuery : null,
+    rewriteStatus: turn.rewrite?.status ?? null,
   };
 }

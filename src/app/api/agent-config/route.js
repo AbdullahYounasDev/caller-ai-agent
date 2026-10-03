@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getAgentConfig, saveAgentConfig } from "@/lib/tenant/config";
 import { getCapability } from "@/lib/agent/capabilities/catalog";
 import { checkInternalAuth } from "@/lib/auth/internal";
+import { requireServiceableTenant } from "@/lib/tenant/registry";
 import {
   translator,
   resolveLocale,
@@ -106,6 +107,14 @@ export async function PUT(request) {
 
     if (!tenantId) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
+    }
+
+    // Mutates the tenant's agent configuration — the partner's dashboard
+    // contract (§4), so it goes through the same shared check every other
+    // mutating route does.
+    const serviceable = await requireServiceableTenant({ tenantId, tr });
+    if (!serviceable.ok) {
+      return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
     const patch = await request.json().catch(() => null);

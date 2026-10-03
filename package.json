@@ -12,10 +12,21 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "i18n:check": "node scripts/check-locales.mjs",
+    "test": "node --no-warnings --import ./scripts/alias-register.mjs --test \"tests/**/*.test.mjs\"",
     "test:openrouter": "node scripts/test-openrouter.mjs",
     "eval:retrieval": "node scripts/eval-retrieval.mjs",
     "eval:sweep": "node scripts/eval-retrieval.mjs --sweep",
-    "db:check": "node scripts/check-db.mjs"
+    "audit:chunks": "node --no-warnings --import ./scripts/alias-register.mjs scripts/audit-chunks.mjs",
+    "eval:trigger": "node --no-warnings --import ./scripts/alias-register.mjs scripts/eval-trigger.mjs",
+    "eval:keyword": "node --no-warnings --import ./scripts/alias-register.mjs scripts/eval-keyword.mjs",
+    "eval:real": "node scripts/eval-retrieval-real.mjs",
+    "eval:real:sweep": "node scripts/eval-retrieval-real.mjs --sweep",
+    "db:check": "node scripts/check-db.mjs",
+    "eval:embedding-variants": "node --no-warnings --import ./scripts/alias-register.mjs scripts/eval-embedding-variants.mjs",
+    "test:reembed": "node --no-warnings --import ./scripts/test-reembed-register.mjs scripts/test-reembed.mjs",
+    "db:backfill-search": "node --no-warnings --import ./scripts/alias-register.mjs scripts/backfill-search-config.mjs",
+    "reembed": "node --no-warnings --import ./scripts/alias-register.mjs scripts/reembed.mjs",
+    "reembed:dry": "node --no-warnings --import ./scripts/alias-register.mjs scripts/reembed.mjs --dry-run"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",

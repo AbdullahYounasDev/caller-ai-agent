@@ -103,7 +103,12 @@ them here means prompt iteration never waits on his migrations.
 | [`tenant/registry.js`](src/lib/tenant/registry.js) | May this tenant be served? | Billing/suspension/quota exists — edit `assertTenantServiceable()` and **nothing else** |
 
 Never let tenant-state checks leak into route handlers. The day one is missed is
-the day a suspended tenant keeps being served.
+the day a suspended tenant keeps being served. **Routes don't call
+`assertTenantServiceable()` directly — they call `requireServiceableTenant()`**,
+the translated, route-facing wrapper next to it in the same file. It is called
+from every route that serves or mutates a tenant's data: `/api/chat`, all of
+`/api/knowledge` (upload/crawl/typed-text, edit, delete, retry) and
+`PUT /api/agent-config`. See §6.18.
 
 ---
 
@@ -111,10 +116,28 @@ the day a suspended tenant keeps being served.
 
 ```
 prisma/schema.prisma           # ai_engine only — read its header
+prisma/migrations/             # some hand-written (incl. embed_hash, §6.21): Prisma would emit a DROP INDEX for the HNSW index (§6.1)
+docker-compose.yml             # Postgres 16 + pgvector — `npm run db:up`
+tests/                         # `npm test` — node:test, no deps, NO database/network/quota (§8, §11)
+test-docs/                     # the 12-file fixture corpus `eval:real` ingests (+ TESTING-GUIDE, TEST-REPORT, RETEST-REPORT)
+eng.traineddata, ita.traineddata   # Tesseract language data for OCR (§6.5)
 scripts/
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
-  eval-retrieval.mjs           # retrieval quality gate + threshold sweep (§6.3)
+  eval-retrieval.mjs           # fast fixture-only smoke check — not the hybrid pipeline (§6.3)
+  eval-retrieval-real.mjs      # THE retrieval gate — real hybrid pipeline, full test-docs corpus (§6.3)
+  chat-probe.mjs               # REAL chat calls through respond(), with a hard cumulative call budget (counter file) — scarce quota (§6.10)
+  audit-chunks.mjs             # `npm run audit:chunks` — per-document chunk stats over test-docs/, read-only, offline (§6.23)
+  eval-trigger.mjs             # `npm run eval:trigger` — rewrite-trigger precision/recall, regex only, ZERO quota (§6.19)
+  eval-keyword.mjs             # `npm run eval:keyword` — keyword-only, SQL over stored chunks, ZERO quota (§6.22)
+  eval-retrieval-real.baseline.json  # saved numbers eval-real diffs against; commit changes deliberately
+  eval-questions.mjs           # the labelled question set, shared by both real-path evals
+  eval-embedding-variants.mjs  # picks an embedding scheme IN MEMORY before anything is re-embedded (§6.2, §6.20)
+  test-reembed*.mjs            # `npm run test:reembed` — ingest/re-embed invariants with a faked embedder, no quota
+  repro-tenant-recall.mjs      # synthetic multi-tenant data: does the shared HNSW index lose a tenant's rows? (§6.1)
+  backfill-search-config.mjs   # `npm run db:backfill-search` — label chunks with their document's language; no embeddings (§6.3)
+  reembed.mjs                  # resumable re-embed of existing documents under the current scheme (§6.2, §6.10)
+  alias-loader.mjs / alias-register.mjs  # lets plain-node scripts import src/ (the "@/" alias) so they run the app's own code
   test-openrouter.mjs          # OpenRouter integration vs. a local stand-in
 src/app/
   page.js                      # THE TEST CONSOLE — config, knowledge, chat
@@ -127,18 +150,24 @@ src/app/
     knowledge/[id]/retry/route.js  # re-embed a FAILED document — no re-upload (§6.15)
     knowledge/jobs/route.js    # background import progress (§6.6)
     knowledge/jobs/[id]/route.js   # cancel ONE queued/processing job (§6.14)
-    knowledge/search/route.js  # retrieval debug + eval harness
+    knowledge/search/route.js  # retrieval debug + eval harness (GET raw/`real=1`; POST = conversation-aware, §6.19)
     locales/route.js           # whole UI in one language, for his dashboard
-    ingest/route.js            # legacy single-document ingest
 src/lib/
   agent/
     llm.js                     # ★ LLM SEAM — chat swappable, embeddings are not
     gemini.js / openrouter.js  # providers; import ONLY from llm.js
+    language.js                # per-document text-search language: english | italian | simple (§6.3)
+    embed-scheme.js            # ★ everything that changes a stored vector + the scheme VERSION (§6.2)
     retry.js                   # shared backoff; quota vs. rate-limit
     respond.js                 # ★ THE BRAIN — channel-agnostic
     prompt.js                  # ALL prompt text
-    retrieve.js                # cosine kNN + relevance threshold (§6.3)
-    chunk.js                   # heading-aware splitter (§6.4)
+    retrieve.js                # cosine kNN + relevance threshold; rankCandidates() = pure RRF + diversity (§6.3)
+    breaker.js                 # circuit breaker + timeout for the OPTIONAL rewrite call; pure, fake-clock tested (§6.19)
+    prepare.js                 # text -> chunks for ingest/retry/re-embed/audits; CSV conversion at chunk time (§6.23)
+    tables.js                  # pure: CSV/DOCX tables -> self-describing rows; flag OFF (§6.23)
+    keyword-query.js           # pure: question -> OR tsquery of content words; flag OFF (§6.22)
+    query.js                   # what gets SEARCHED for: follow-up resolution, rewrite step (§6.19)
+    chunk.js                   # heading-aware splitter (§6.4); optional title-in-embedText, off (§6.20)
     extract.js                 # pdf/docx/txt/md/csv → text; editability rule (§6.7)
     ocr.js                     # scanned-PDF OCR (§6.5)
     crawl.js                   # website crawling + SSRF defences (§6.9)
@@ -146,9 +175,10 @@ src/lib/
     jobs.js                    # background import queue + cancellation (§6.6, §6.14)
     storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
     capabilities/catalog.js    # what the agent can DO, per channel
-  tenant/ config.js, registry.js   # ★ the two seams
+  auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
+  tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18)
   i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
-  security/rate-limit.js       # generic limiter — telephony webhooks will need it
+  security/rate-limit.js       # generic limiter — first wired up on /api/chat (§6.18)
   db.js                        # PrismaClient singleton
 src/locales/en|it/             # ACTIVE: common, dashboard, capabilities, validation, errors
 src/locales/ar|ur/             # DORMANT — translated, on disk, not build-enforced
@@ -179,7 +209,50 @@ each one just reverts to a sequential scan. Invisible at 14 chunks; crippling at
 10,000.
 
 **Never paste a generated migration in unread.** Delete that line.
-`npm run db:check` catches it if you do.
+`npm run db:check` catches it if you do. (The two hand-written migrations since —
+`embedding_scheme`, `chunk_search_config` — say so in their first lines, and drop
+nothing.)
+
+**The same index fails silently a second way: the tenant filter runs AFTER the
+graph walk.** One HNSW index spans every tenant. pgvector fetches the
+`hnsw.ef_search` (default 40) nearest chunks in the WHOLE table, then applies
+`tenant_id = X` and the distance cap. If the nearest 40 belong to other tenants —
+every clinic has a pricing page — a tenant that really has matching chunks gets
+fewer back, or none. Seen directly: `EXPLAIN ANALYZE` showed
+`Index Scan … Rows Removed by Filter: 39` beside `rows=1` where an exact scan
+returned 8. No error; the answer just comes from less material (§6.3).
+
+Be exact about what was and was not shown, because it is not what the problem
+statement assumed. `scripts/repro-tenant-recall.mjs` builds a scratch table with
+the same index, 24–60 synthetic tenants (7k–18k chunks) sharing topics, and one
+small target tenant: **the loss appeared in ONE index build (1–4 of 8 rows found,
+every query) and in none of five others** — including an 18,000-chunk build with
+interleaved tenants. Index builds are randomised, so it depends on the graph you
+happened to get: the most dangerous kind, a bug a test can pass by luck.
+Also: at small scale the planner never uses HNSW for a tenant-filtered query at
+all — with the `tenant_id` btree it reads the tenant exactly (and today's 227
+chunks are a sequential scan) — so the failure needs a table big enough that
+HNSW wins. It is a scale problem arriving before anyone is looking.
+
+**Fix: `hnsw.iterative_scan = strict_order`, set with `set_config(…, true)` inside
+the retrieval transaction** (`retrieve.js`). Iterative scans (pgvector ≥ 0.8.0;
+the container runs 0.8.6) keep walking until the FILTERED `LIMIT` is satisfied
+or `hnsw.max_scan_tuples` (20,000) is hit. Chosen over the alternatives:
+- *higher `ef_search`* — a bigger fixed window, not a guarantee; max 1000, and
+  it taxes every query to fix the rare one;
+- *per-tenant partial indexes / partitioning* — the real answer at scale, but a
+  migration per tenant and a planner dance; deferred (§9.1);
+- *a database-level `ALTER DATABASE … SET`* — invisible, lost silently on a
+  restored or new database; a per-transaction setting travels with the code.
+`strict_order` rather than `relaxed_order` because the RRF takes the SQL order as
+the vector rank. Measured cost: none (3.2 ms vs 3.5 ms average). It is
+insurance, not a measured recall gain — the repro could not show a gain because
+it could not reliably show the loss. The ceiling that remains is
+`max_scan_tuples`: a tiny tenant in a table of millions can still be starved.
+(Measured since: exactly that, at 40,000 packed rows with a 1-in-2,000 tenant — §9.1 item 3.)
+**`npm run db:check` now asserts** pgvector ≥ 0.8.0 and that the setting can be
+set per transaction (on an older server the query would otherwise ERROR on a
+customer's call), plus the keyword-index columns of §6.3.
 
 ### 6.2 The chat model is swappable. The embedding model is NOT.
 
@@ -194,6 +267,32 @@ worst failure mode a RAG system has.
 Changing the embedding model means changing the `vector(768)` column **and
 re-embedding every row** in one migration. OpenRouter has no embedding models at
 all (checked across all 447), so only the chat half moves.
+
+**Smaller changes to what is embedded have the same shape.** A document-title
+prefix, a Gemini `taskType`, a different chunker — none changes the model, all
+change every vector they touch, and old rows keep their old ones. The result is
+not nonsense (same model, same space) but a quiet skew between chunks embedded
+two ways, and the measured `MAX_DISTANCE` (§6.3) stops describing the corpus.
+So they are all decided in ONE file, [`embed-scheme.js`](src/lib/agent/embed-scheme.js),
+behind a version number: change a flag, bump `EMBEDDING_SCHEME_VERSION`, run
+`npm run reembed`, re-run the threshold sweep. Each `knowledge_sources` row
+records the version it was embedded under (`embedding_scheme`; the migration
+defaults every existing row to 0), `npm run db:check` FAILS while any ready
+document is behind, and `reembed` is resumable off that same column.
+
+**`embedText(text, { role })` takes a REQUIRED `role`: "document" (a chunk
+being stored) or "query" (a question being searched) — no default, it throws
+without one.** That is not a provider argument (there is still exactly one
+provider and no way to pass another); it is there so a caller that forgets which
+side of retrieval it is on fails loudly instead of embedding with the wrong one.
+Whether the role reaches the API as `taskType` RETRIEVAL_DOCUMENT /
+RETRIEVAL_QUERY is `USE_EMBEDDING_TASK_TYPES` in `embed-scheme.js` — **off until
+measured** with `npm run eval:embedding-variants` (§6.20). The SDK also accepts a
+`title` with RETRIEVAL_DOCUMENT; it is not used — a title in the text itself
+works for every role, is visible in the chunk the model is shown, and is
+testable. `embedTexts(texts, { role })` embeds a batch in one request and refuses
+a short or misordered reply (vectors attached to the wrong chunks would be §6.2's
+failure mode again).
 
 **Provider fallback:** `LLM_FALLBACK_PROVIDER` is tried only when the first
 provider fails for *its own* reasons — rate limit, outage, bad key. A malformed
@@ -229,20 +328,174 @@ Re-run the sweep after changing the embedding model, the chunker or chunk size.
 If the two numbers ever **overlap**, no threshold separates them and the fix is
 better chunking, not a different number.
 
+**After ANY change to what is embedded (§6.2), the boundary has to be re-measured
+before `MAX_DISTANCE` is trusted again — and it can move a lot, because a
+`taskType` rescales distances.** Order: (1) `npm run eval:embedding-variants` picks
+the scheme on pure vectors, each candidate at its OWN midpoint threshold (a fixed
+0.43 means something different in each); (2) adopt it in `embed-scheme.js` and bump
+the version; (3) `npm run reembed:dry`, then `npm run reembed`; (4) `npm run db:check`;
+(5) `npm run eval:sweep` and `npm run eval:real:sweep`, set `MAX_DISTANCE` from the
+measured midpoint and rewrite the comment block in `retrieve.js` with the NEW
+numbers; (6) `npm run eval:real` against the saved baseline. If the must-answer and
+must-reject distances overlap, no threshold fixes it — fix the chunking. The
+embedding quota is ~1000 texts a day (§8 limitation 3), so this is done ONCE per
+batch of ideas, never once per idea. **Today the scheme is v0 and `MAX_DISTANCE`
+is the 0.43 measured on it; nothing in this paragraph has been re-run yet.**
+
 **Retrieval is now HYBRID, but the gate above is untouched.** `retrieveRelevantChunks`
 pulls a wider pool of threshold-admitted candidates (`CANDIDATE_POOL_SIZE = 20`,
 still every one `<= MAX_DISTANCE`), re-ranks that pool with Reciprocal Rank
 Fusion against a Postgres full-text keyword score, then diversifies the final
-`topK` with a heading round-robin so five near-duplicate chunks from one table
-can't crowd out a relevant chunk from elsewhere. This exists because pure
-cosine similarity has no special regard for an exact code, price or name — it
-can rank a chunk merely "about the same topic" above the one that actually
+`topK` on two axes so five near-duplicate chunks from one table can't crowd
+out a relevant chunk from elsewhere. This exists because pure cosine
+similarity has no special regard for an exact code, price or name — it can
+rank a chunk merely "about the same topic" above the one that actually
 contains what was asked. **Membership is still decided by `MAX_DISTANCE`
 alone** — the keyword score only ever re-orders chunks that vector search
 already allowed in; it can never admit one vector search would have rejected.
 `retrieveWithoutThreshold` (the eval/debug path) stays pure-vector on purpose —
 mixing in keyword scores there would defeat its one job, showing the raw
 rejected-chunk distances.
+
+**The keyword half is LANGUAGE-AWARE.** It used to be `to_tsvector('english', …)`
+for everything: an Italian document got no correct stemming and its stop words
+("il", "per", "della") counted as content. Now each chunk carries
+`search_config` (a Postgres `regconfig`: `english` | `italian` | `simple`) and
+`content_tsv`, a STORED generated column `to_tsvector(search_config, content)` —
+precomputed, so no per-query tokenising of every candidate.
+- **Language is decided per DOCUMENT, at ingest** ([`language.js`](src/lib/agent/language.js)),
+  not per chunk: a chunk is too short to identify a language and a document is
+  written in one. A stop-word ratio, no dependency. It fails toward today's
+  behaviour: clear Italian → `italian`; mostly non-Latin script (dormant ar/ur) →
+  `simple`; anything else, including "unsure", → `english`. `simple` is NOT the
+  unsure-fallback: a CSV price table has no prose and ranked fine as English. On the
+  real corpus it labels the 2 Italian documents Italian and the other 50 English.
+- **The column is a `regconfig`, not text,** because a generated column needs an
+  IMMUTABLE expression and `to_tsvector(text::regconfig, …)` is only STABLE.
+- **No GIN index, deliberately** (it was suggested): the keyword score only RANKS
+  vector-admitted rows and never filters with `@@` — filtering would let keyword
+  admit a chunk vector search rejected, which is the invariant above — so nothing
+  would ever use it and it would only slow writes.
+- **The query is analysed with EACH CHUNK's own config** (a `CASE` over three
+  `plainto_tsquery` calls, in the same statement and the same row set). Italian
+  question → Italian chunk: Italian stemming on both sides. **Cross-language
+  (Italian question, English chunk): the English-analysed query contributes only
+  what is language-neutral** — a brand, a plan name, a number — and the vector
+  half carries the meaning, exactly as before. Nothing translates, and the query's
+  language never has to be detected.
+- **Invariant verified, not assumed:** over 12 query/tenant comparisons the set of
+  chunks admitted by the new SQL was identical to the old query's. Membership is
+  still `MAX_DISTANCE` alone.
+- Existing rows defaulted to `english` (= their old behaviour, so applying the
+  migration changed nothing); `npm run db:backfill-search` relabelled 10 chunks
+  (the 2 Italian documents) — no embeddings, no quota, no `MAX_DISTANCE` change.
+  `db:check` fails on any document whose chunks are not in its language.
+
+**What the keyword rank measurably did (pure SQL, no embeddings; `__eval_real__`):**
+"piano Growth costo" now matches the Italian FAQ (rank 0.117; before: no hit — the
+English stemmer left "costo"/"costa" unmatched); "abbonamenti annuali rimborso"
+unchanged (0.037, already a hit). **But five natural full-sentence Italian
+questions got ZERO keyword hits before AND after.** `plainto_tsquery` ANDs every
+term, so one word the chunk lacks ("vostra", "trovano") zeroes the rank — the same
+is true of English sentences. The stemming fix therefore helps short,
+keyword-style queries; for a sentence the keyword half is mostly inert whatever the
+language. An OR-style query (`to_tsquery` with `|`) would change that, and it
+changes ranking for English too — now BUILT and measured keyword-only, off by default,
+awaiting the integrated `eval:real` run the embedding quota is blocking (§6.22). **The before/after `eval:real`
+(no category may regress, cross_language especially) has NOT been run for the same
+reason** — what is established is the invariant above and the SQL-level numbers.
+
+**STAGES 2–3 are a pure function, `rankCandidates(candidates, topK)`** (exported from
+`retrieve.js`; STAGE 1, the SQL and the `MAX_DISTANCE` gate, stay in
+`retrieveRelevantChunks`). Extracted verbatim — tests/rank-equivalence.test.mjs runs
+the pre-refactor code (kept in tests/helpers/legacy-rank.mjs) and the new function over
+5,000 seeded random candidate sets and requires identical output — and tests/rank.test.mjs
+pins the conflict fixture below, heading crowding and the RRF behaviour with hand-built
+rows. It must stay free of I/O.
+
+**The diversity round-robin is by DOCUMENT first, HEADING second — heading
+alone gave zero protection for two documents that disagree.** A black-box
+test sweep found that asking about a price two documents quote differently
+got a confident, wrong answer with no hint a second document existed, even
+though the conflicting chunk was threshold-admitted (§6.10's conflict rule
+never got a chance to fire — the model never saw the contradicting chunk at
+all). Root cause: a single dense document naturally has many DIFFERENT
+headings of its own (an intro chunk, a "Pro" chunk, a "Plan Comparison"
+chunk…), so grouping only by heading text never even merges it with a
+competing document's chunk — the dominant document's ten distinct headings
+simply outrank the other document's one relevant chunk on fused score and
+fill every round-robin slot before a second round of selection is ever
+reached. Confirmed against exactly that fixture (a 10-chunk pricing sheet vs.
+a 3-chunk conflicting price list): the conflicting chunk ranked 11th and
+never reached a `topK` of 6. The fix round-robins across DOCUMENTS as the
+PRIMARY axis — every document represented before a second chunk from any one
+of them — and only then diversifies by heading within each document's own
+share, which is what still protects the original single-document case (a long
+price table split into sub-chunks crowding out a different section of the
+SAME document). `sourceTitle` is the document identity used to group on —
+unique per tenant (`@@unique([tenantId, title])`), so it's safe to key on
+without an extra join.
+
+**`npm run eval:retrieval` measures a DIFFERENT retriever than the one the
+agent runs — know which number you're reading.** It scores
+`retrieveWithoutThreshold` (pure vector, no RRF, no diversity) against three
+tiny single-topic fixture documents. `respond.js` calls `retrieveRelevantChunks`
+— threshold + hybrid RRF + document/heading diversity, above — against
+whatever a real tenant actually uploaded. A change to the diversity stage, the
+RRF constant or the candidate pool size can pass `eval:retrieval` unchanged,
+because that script never calls the function the change is in. **`npm run
+eval:real`** (`scripts/eval-retrieval-real.mjs`) closes this gap: it calls
+`retrieveRelevantChunks` itself, over HTTP, via `/api/knowledge/search`'s
+`&real=1` flag (read-only, internal-auth guarded, never called by the agent —
+see that route's header comment); ingests the full `test-docs/` fixture pack
+(12 files — PDF, DOCX, CSV, a scanned/OCR PDF, an Italian FAQ, a deliberate
+cross-document price conflict, an off-topic recipe) through the real upload
+path, not a shortcut; and scores a 94-question labelled set (71 standalone, 23 carrying a conversation §6.19; the set lives in `scripts/eval-questions.mjs`), per category,
+against a saved JSON baseline (`scripts/eval-retrieval-real.baseline.json`) so
+a later run FAILS (non-zero exit, tolerance 3 points) on a real regression
+instead of silently drifting. **`eval:retrieval` is not obsolete** — it is a
+fast, cheap fixture-only smoke check with no ingestion cost, still worth
+running first. `eval:real` is the one that actually gates the pipeline the
+agent runs, and it is slower (real ingestion, real OCR) on purpose.
+
+**Measured baseline (`npm run eval:real`, this corpus, `MAX_DISTANCE = 0.43`,
+`topK = 5` — matches `respond.js`'s `MAX_CONTEXT_CHUNKS`):**
+
+| Category | hit@1 | hit@3 | MRR | Notes |
+| --- | --- | --- | --- | --- |
+| factual (24 q) | 92% | 100% | 0.958 | direct, clearly-worded questions |
+| phrased_loosely (11 q) | 64% | 82% | 0.712 | natural phone-caller phrasing of the same facts |
+| cross_language (10 q) | 100% | 100% | 1.000 | Italian↔English — the multilingual embedding holds up better than the keyword half (§6.2/§6.3) would suggest |
+| **generic_overview (8 q)** | **0%** | **0%** | **0.000** | **"tell me about your company" / "who are you" style openers — every one returned NOTHING, not a low rank** |
+| overall (53 q, excl. off-topic/conflict/followup) | 74% | 81% | 0.770 | — |
+| off_topic (8 q) | — | — | — | 88% rejected; ONE leak: "What are your flight change fees?" → the refund-policy doc, 0.397 (semantic collision on "fees"/"changes", not a threshold miss) |
+| conflict (3 q) | — | — | — | 100% both-sources-present — §6.10's conflict rule fires correctly, but the sweep below shows this by only 0.009 of margin |
+| **followup (16 q, with conversation)** | **100%** | **100%** | **1.000** | via the rewrite step (§6.19); the SAME questions searched raw score 31% hit@1 / MRR 0.313 |
+| followup_offtopic (7 q in the set, with conversation) | — | — | — | 100% rejected — a rewrite must never glue an unrelated question onto the previous topic (§6.19). **The saved baseline holds only the first 4** (n=4) — see §6.19 |
+| report_phrasings (7 q) | — | — | — | the seven openers from TEST-REPORT §4 — three pass, four are declined by under 0.04 (§6.20). **Not in the baseline yet**: added after it was saved; the next `eval:real` run extends the baseline with it |
+
+**This is the honest number CLAUDE.md should have had all along — not the
+old §8 table's "100% hit@1, MRR 1.000".** That figure was never wrong for
+what it measured; it was measuring the wrong thing. `npm run eval:real:sweep`
+shows WHY generic_overview fails outright rather than merely ranking low:
+
+```
+category            hardest question that must be ANSWERED   vs. off-topic boundary
+factual                0.316                              clear, gap 0.080
+phrased_loosely        0.453                              ⚠ OVERLAPS
+cross_language         0.261                              clear, gap 0.135
+generic_overview       0.520                              ⚠ OVERLAPS
+conflict               0.387                              clear, gap 0.009
+```
+
+A vague opener with no business-specific keyword in it embeds too far from
+every chunk in the corpus to clear ANY threshold that also rejects genuinely
+off-topic questions (the closest off-topic question sits at 0.397) — moving
+`MAX_DISTANCE` cannot fix this without also letting car-insurance questions
+through to a dental clinic's agent. The fix is not a threshold change. §6.20
+adds the always-available business profile (answers "who are you / what do
+you do" with no retrieval at all) and measures why retrieval itself still
+fails; the retrieval half is open — see §6.20 and §9.1.
 
 ### 6.4 Chunking is heading-aware
 
@@ -280,6 +533,35 @@ matches everything weakly. `mergeRunts()` folds it into the piece that
 follows within the same section before `chunkDocument`'s existing
 cross-section backward merge ever runs.
 
+**PDFs never have plain-text headings detected, because pdfjs never gives us
+a blank line — so PDF headings are promoted to markdown BEFORE `chunk.js`
+ever sees the text.** A black-box test sweep found a whole PDF collapsing
+into two heading-less mega-chunks, one of them containing a fluent but
+FABRICATED-sounding instruction ("set up your branch chains") that was
+actually a hyphenated line-wrap artifact from the middle of an unsplit
+1,400-character run-on sentence — the hard-split fallback above never
+triggered either, because the section containing it was never recognised as
+its own section in the first place. Root cause, confirmed against the actual
+PDF: `extractPdf()` in [`extract.js`](src/lib/agent/extract.js) joined every
+line within a page with a single `\n`, so a numbered or title-case heading
+was NEVER followed by the blank line `detectHeading()`'s plain-text path
+requires (added for the label/value fix above) — meaning NO PDF, ever, could
+have a plain-text heading detected, no matter how clearly it read as one. A
+vertical-gap heuristic was tried first and rejected: in the actual PDF tested,
+an ordinary wrapped line and a genuine section break rendered with
+near-identical vertical gaps, so gap alone mostly just planted blank lines
+mid-sentence instead of at real breaks. **Font size is the reliable signal
+instead** — verified against that same PDF: title 22pt, every numbered
+section heading 15pt, all body text 11pt, with no exceptions. `extractPdf()`
+now finds the document's most common line height (the body size), promotes
+every line from a larger-than-body size tier to a markdown heading (largest
+tier `#`, next `##`, …), and lets `chunk.js` parse those exactly like a
+markdown file — no blank-line rule needed, because markdown syntax is already
+unambiguous. This mirrors what `extractDocx` already does with mammoth's
+heading styles; a PDF with no distinct heading size at all (headings only
+bolded, not enlarged) simply yields no detected headings, same as before —
+this is a best-effort structural read, not a guarantee.
+
 ### 6.5 OCR, and the detached-buffer trap
 
 [`ocr.js`](src/lib/agent/ocr.js) renders each page with pdfjs and reads it with
@@ -298,8 +580,8 @@ images get slow without reading any better.
 
 ### 6.6 Slow imports run as background jobs
 
-Embedding a large PDF is one model round trip per chunk; OCR is seconds per
-**page**. Neither belongs in an HTTP request. Uploads return **202 with job ids**
+Embedding a large PDF is one embedding per chunk (sent 16 to a request, §6.14);
+OCR is seconds per **page**. Neither belongs in an HTTP request. Uploads return **202 with job ids**
 and the work continues behind them.
 
 - **Progress lives in `ingest_jobs`, not memory** — so a business can reload
@@ -389,6 +671,17 @@ Not optional, not to be simplified:
 - Size-capped, time-capped, bounded page count, HTML/text only.
 - **Same-origin links only.** A business asked us to read THEIR site.
 
+**Judged on the address's numbers, not its spelling (tests/crawl.test.mjs).**
+`isBlockedAddress` parses IPv6 into eight groups: `::ffff:127.0.0.1`,
+`::ffff:7f00:1` (the form `new URL()` actually produces), NAT64, 6to4,
+IPv4-compatible, all of fe80::/10, site-local and multicast are blocked by their
+embedded IPv4 / prefix. `checkUrl` strips the brackets from `[::1]` before
+`isIP`: before, an IPv6 literal fell through to a DNS lookup of the string
+"[::1]" (blocked only by accident, and a public IPv6 literal could never be
+crawled); stripping them without the hex-mapped handling would have OPENED a hole,
+so the two travel together. `htmlToText` no longer throws on an out-of-range
+numeric entity (`&#99999999999;` made `String.fromCodePoint` abort the crawl).
+
 Verified refused: cloud metadata, `127.0.0.1`, `localhost`, `10.x`, `192.168.x`,
 IPv6 loopback, `file://`, a redirect to a different public origin, a redirect
 to a private address on the second hop.
@@ -412,6 +705,17 @@ they had just fixed. **Never reintroduce an append-only path.**
 - **`content` is the original text.** Chunks are rebuilt from it, so re-chunking
   needs no re-upload.
 - **A rename does not re-embed** — it rewrites the denormalised `sourceTitle`.
+- **A REPLACE re-embeds only chunks whose text changed (§6.21).**
+- **A RE-EMBED (`npm run reembed`, §6.2) follows the same rules, from the stored
+  `content`** — no re-upload, no Cloudinary. It embeds ALL of a document's chunks
+  first and swaps them in one transaction, so a quota stop or crash leaves the
+  document answering from its old chunks, never with none (verified: a failure on
+  batch 2 of 3 left every old chunk id in place). **It must NOT bump
+  `updated_at`**: that date is what the conflict rule uses to decide which of two
+  disagreeing documents is newer, and a re-embed is not an edit — so it writes the
+  scheme and chunk count with raw SQL, because Prisma's `@updatedAt` only fires
+  through the client. If the document is edited while it embeds, the swap is
+  skipped (the edit's own ingest already used the current scheme).
 
 **The row itself must roll back on failure, not just the chunks.** The upsert
 that marks a document "processing" happens BEFORE chunking/embedding, writing
@@ -440,6 +744,46 @@ documents that disagree is a separate problem — retrieval passes each source's
 last-updated date and the prompt has a conflict rule, so the agent surfaces the
 discrepancy rather than silently picking. Observed and fixed after a corrected
 price lost to a stale one in another file.
+
+**The conflict rule, second version (`prompt.js`) — it used to say "prefer the newest and
+mention it", and that was the bug.** Retrieval was fine; the prompt was not. Rebuilt offline
+from the stored chunks of test-docs 03 and 08 (no model call), the old prompt showed:
+(1) a rule that told the model to PICK the most recent source, with "mention the discrepancy"
+as an afterthought — so a reply could comply with the rule and still give one number;
+(2) recency that cannot decide, because both documents were updated on the same day
+(2026-09-29, eight seconds apart); (3) labels `(source: …)` that never said these were
+different documents, so 179 once against 149 twice read as a majority vote.
+Now:
+- Passages are labelled `[1] (document: "storepulse price list", section: Pro Plan, updated
+  29 September 2026)`. Document names are humanised (no number prefix, extension or hyphens —
+  a first live run read `08-storepulse-price-list-conflict` aloud) unless two documents would
+  collapse to the same name; dates are "29 September 2026" in fixed English month names and
+  UTC, not ISO. When the passages come from 2+ distinct documents a `NOTE: these passages come
+  from N DIFFERENT documents` line precedes them.
+- The rule `IF DOCUMENTS DISAGREE` is included ONLY for 2+ distinct documents (two passages of
+  one document are not a disagreement between sources), is the LAST section of the prompt
+  (after the reference block, the grounding rule and the profile exception), is three
+  sentences, and has no markdown, digits or file names: give BOTH values, name each document by
+  its plain name and its date, offer to have the team confirm, "never average"; recency may be
+  mentioned but is no longer a tie-break; "if the documents give the same value, say nothing
+  about documents or any discrepancy".
+- 22 assertions pin it (tests/prompt.test.mjs): gating, wording, position, sentence count,
+  voice-safety, identical on chat and voice, labels, the NOTE, date format, name collisions.
+
+**Verified with 9 real chat calls** (`scripts/chat-probe.mjs`, tenant `retest-conflict`, a
+hard cumulative budget of 10 enforced by a counter file). Baseline with the OLD prompt (2 calls):
+both languages did mention a discrepancy and both prices — but named no document and no date.
+With the new prompt, final run: EN "How much is StorePulse Pro?" → *"…Our 'storepulse price list
+conflict' document updated on 29 September 2026 lists it at 179 euro per month, while our
+'storepulse pricing plans' document updated on the same date lists it at 149 euro/month. Would
+you like us to have our team confirm…"*; IT → both prices, both documents, "29 settembre 2026",
+offer to confirm; the non-conflict question (Lite, 59 in both) → one price, no discrepancy; the
+off-topic question → declined, no sources. **Honest limits of that evidence:** one sample per
+question on a non-deterministic model — the original failure was "sometimes", so this shows the
+new wording CAN produce the right reply, not that it always does; the Lite reply still cited
+both documents by name and date ("according to both…") when asked for a price they agree on,
+which the last clause asks the model not to do (harmless, but not fully obeyed); and the
+fixture's two documents carry the same date, so "which is newer" was never exercised.
 
 ### 6.11 The model never silently mutates tenant data
 
@@ -502,8 +846,9 @@ Cloudinary is even configured.
 A running job (`lib/agent/jobs.js`) can't be stopped mid-`await` — `run()` is
 a plain async function, not a cancellable operation. `cancelJob()` only
 records the request (`cancelledJobIds`); the job's own next progress
-checkpoint (`JobContext.report`, called once per page fetched, OCR'd or chunk
-embedded) notices and throws `JobCancelledError`, unwinding out of
+checkpoint (`JobContext.report`, called once per page fetched, OCR'd or BATCH of
+16 chunks embedded — checked BEFORE the batch's request is spent, so a cancelled
+job never pays for another batch) notices and throws `JobCancelledError`, unwinding out of
 `crawlSite`/`ocrPdf`/`ingestDocument`.
 
 - **A queued job is removed from the in-memory array immediately** — nothing
@@ -520,6 +865,36 @@ embedded) notices and throws `JobCancelledError`, unwinding out of
   `if (err instanceof JobCancelledError) throw err;` before the generic
   catch, or it gets reported as "unreadable"/a crawl failure instead of being
   recognised and cleaned up as a cancellation.
+- **`cancelJob()` must not claim "cancelled" before confirming the job hasn't
+  already finished.** A black-box test sweep cancelled a job immediately after
+  starting it, got back `status:"cancelled"`, then polled a moment later and
+  found `status:"done"` for the SAME job id — data integrity was fine (no
+  duplicate/orphan rows), but the DELETE response itself had lied. Root cause:
+  a small/fast job can run PAST its last `report()` checkpoint — nothing left
+  ahead of it to throw `JobCancelledError` — while `cancelJob()`'s own
+  unconditional write ("cancelled") and `drain()`'s completion write ("done")
+  race for the same row, and `drain()`'s write is not conditioned on the
+  other, so it always wins a moment later regardless of what `cancelJob()`
+  already told its caller. `jobSettlers` (a `Map<jobId, Promise>`) fixes this:
+  `drain()` creates an entry when a job starts and resolves it with that job's
+  OWN final row the instant it reaches "done" or "failed" (or `null` on a
+  genuine `JobCancelledError`). `cancelJob()`, for a job already processing,
+  races that promise against a short bounded timeout (300ms) before writing
+  "cancelled" itself — if the settler resolves first, it means `drain()` won
+  the race, so `cancelJob()` returns the REAL row instead of a stale claim. A
+  genuinely long-running job is not kept waiting: the timeout loses that race
+  by design, and cancellation proceeds exactly as before. Verified against the
+  live race by importing this exact module with a stub DB and controlled
+  timing — a job cancelled after its last checkpoint reports "done" (not
+  "cancelled"), and a job cancelled before its next checkpoint still throws
+  `JobCancelledError` and reports "cancelled", unchanged.
+- **A second, narrower window of the same race** (found by tests/jobs.test.mjs,
+  pinned there): the row `cancelJob` reads at the top can be stale — a job that
+  finishes during that read has no settler left, and the final write was an
+  unconditional `update`, overwriting a completed import with "cancelled". It is
+  now `updateMany` conditional on `status in (queued, processing)`, followed by a
+  re-read; if it matched nothing the request is also cleared from
+  `cancelledJobIds`.
 
 ### 6.15 A failed import can be retried without re-uploading
 
@@ -557,6 +932,600 @@ untouched; anything else technical-looking falls back to a generic translated
 message. Applied everywhere a raw error could reach the screen — job
 failures, document failures, save/upload/crawl/chat errors — never only in
 one place, or the next one added will leak again.
+
+### 6.17 Conversation history is the MOST RECENT N messages, not the first N
+
+`respond.js` bounds how much of a conversation it sends to the model —
+`MAX_HISTORY_MESSAGES = 20` — because an unbounded history eventually blows
+the context window and the per-turn bill. **The query that enforces that
+bound MUST sort newest-first before `take()`, then reverse in JS** —
+`orderBy: { createdAt: "asc" }, take: 20` (the original code) takes the
+OLDEST 20 messages instead. Once a conversation passes 20 messages that
+window stops moving at all: the model is shown the same early-conversation
+slice forever, and — this is the sharper failure, confirmed live rather than
+assumed — **the customer's live question is not in it**, because step 1
+always persists that message first and it is therefore always the NEWEST row
+in the table. Depending on where the fixed 20-message window happens to end,
+Gemini either answers from stale context with no idea a new question was
+asked, or (when the window ends on an assistant turn — see below) rejects
+the request outright: `400 Requests ending with a model turn are not
+supported`. Reproduced exactly by seeding a 30-message conversation and
+replaying the buggy query before fixing it — this is not a theoretical edge
+case, it is guaranteed to happen to every conversation that runs long enough,
+and it gets WORSE the longer the conversation continues past the limit, not
+better. Fixed with `orderBy: { createdAt: "desc" }, take: 20` followed by
+`.reverse()` — same bound, but the newest 20, back in chronological order.
+
+**A window into the middle of a longer conversation needs two more guards
+that a window starting at message 1 never did:**
+
+- **A leading "model" turn is trimmed.** Once history no longer starts at
+  message 1, it can start on either role — roughly half the time on an
+  assistant reply, since turns alternate. Verified live against the real
+  Gemini API that this does not error (the model just answers past it), but
+  it is a turn with no question attached, so it is dropped rather than kept
+  on the strength of undocumented tolerance across model/provider versions.
+- **Consecutive same-role turns (e.g. two "user" turns when an earlier reply
+  failed before persisting its half) are left AS-IS, not merged.** Verified
+  live — both synthetically and by hitting this exact situation for real
+  after a failed call left an orphaned user turn — that neither Gemini nor
+  OpenRouter's OpenAI-style dialect require strict alternation. Merging would
+  invent a turn structure that never happened, to solve a problem that,
+  tested, does not exist.
+
+**The conversation-locale read/write (step 4) is folded into the same
+`Promise.all` as config and history, and its write is fire-and-forget.**
+(Retrieval used to be in that block too; it now runs right after, because it
+needs the history to resolve a follow-up — §6.19.)
+It doesn't depend on the other two, so querying it serially after
+them was pure added latency for no reason; and the write is a transcript
+label nothing downstream reads back, so it doesn't need to block the reply
+either — the same "must never break the work it's reporting on" reasoning
+`jobs.js` already applies to progress writes (§6.6).
+
+### 6.18 The tenant seam and the rate limiter existed but were never wired up
+
+Two enforcement points were written, documented, and never actually called:
+`assertTenantServiceable()` (§4) claimed in its own comment to be "already
+called on the paths that matter" — it had zero callers. `hit()` in
+`lib/security/rate-limit.js` had zero callers too, so `/api/chat` had no
+throttle at all, despite every message costing an embedding call plus a
+generation call against a shared, scarce quota (limitation #3). A suspended
+tenant would have kept being served; a runaway script could have exhausted
+that quota for every tenant in minutes.
+
+**Fixed with one shared, translated wrapper, not six copies of tenant-state
+logic.** `requireServiceableTenant({ tenantId, tr })` in `registry.js` is
+what every route calls — never `assertTenantServiceable()` directly — and it
+is now called from `/api/chat`, all of `/api/knowledge` (the POST covering
+upload/crawl/typed-text, `PUT`/`DELETE` on one document, and the retry route),
+and `agent-config`'s `PUT`. Deliberately NOT called from any `GET` (reading a
+suspended tenant's own data isn't the failure mode `assertTenantServiceable`
+guards against) or from the job-management routes (cancelling an already-
+permitted background job isn't a new grant of service). It translates by the
+verdict's STATUS CODE, not by matching `assertTenantServiceable()`'s raw
+`error` string — so the one function §4 says to edit can gain new reasons
+without this wrapper, or any of its callers, needing a matching edit.
+
+**The same wrapper is also where tenantId's SHAPE is enforced**
+(`^[A-Za-z0-9_-]{1,100}$`), because `tenantId` was an unvalidated query param
+flowing into a Cloudinary folder path built by string interpolation —
+`storage.js`: `` `caller-ai-agent/${tenantId}` ``. Verified directly against
+Cloudinary, not assumed: a `tenantId` containing `..` is rejected by
+Cloudinary's OWN `public_id` validation (`public_id (...) is invalid`), but a
+tenantId containing a plain `/` is NOT rejected — `caller-ai-agent/victim/
+nested-by-attacker` landed exactly there, confirmed via the upload result's
+`asset_folder`. The charset restriction closes that categorically, before the
+value ever reaches `storage.js`.
+
+**`/api/chat` also gets `/api/knowledge`'s upload path (§6.12) applied to
+itself: a hard upper bound on input size, and the two-layer rate limit
+`rate-limit.js`'s own header comment already described but nothing called.**
+- `MAX_MESSAGE_CHARS = 4000` — generous for a typed question, but stops
+  "message" being used to smuggle a large document in outside the normal
+  upload path.
+- `TENANT_LIMIT` (60/min) and `CONVERSATION_LIMIT` (5/10s) — the tenant layer
+  is loose on purpose (a busy business has several conversations at once);
+  the conversation layer is tight, because no real person reads a reply and
+  replies again in under two seconds. Verified live with both layers
+  temporarily lowered (to keep the free-tier chat quota cheap to spend on
+  testing): the 3rd rapid message to ONE conversation tripped the
+  conversation limit, the 4th (a fresh conversation, same tenant) tripped the
+  tenant limit — each a `429` with a correct, distinct `Retry-After` header
+  and a translated JSON body, restored to their real values immediately
+  after. Both live inside `chat/route.js`, not `rate-limit.js` — the limiter
+  is a generic mechanism, the numbers are a decision specific to this traffic
+  shape and do not belong as a shared default (telephony will need its own).
+- `MAX_FILES_PER_UPLOAD = 20` on `/api/knowledge`'s multipart path — one job
+  per file all lands in the SAME queue (concurrency 1, §6.6), so an
+  unbounded file count in one request could queue hundreds of jobs ahead of
+  every other tenant's next upload.
+
+**Explicitly NOT built here: billing, plans or quotas.** That is the
+partner's, per §4. This is only the enforcement POINTS — the seam calling
+`assertTenantServiceable()`, and a mechanism protecting shared quota from
+abuse — not a metering system.
+
+### 6.19 A follow-up is searched as the question it really is — and only a rewrite can tell a follow-up from a new topic
+
+`respond()` used to retrieve with the raw latest message. "And the Growth
+one?" has no standalone meaning: embedded alone it lands on whatever chunk
+is nearest to nothing in particular — the support-hours doc at 0.395 — or
+clears no threshold at all, and the agent says "I don't know" about the thing
+it was literally just discussing. On a call most turns after the first are
+this shape. Measured (`eval:real`, 16 follow-ups each carrying the
+conversation before it, topK 5): **31% hit@1 (5 of 16)**; 8 of the 11 misses
+returned nothing at all and the other 3 the wrong document.
+
+**Three strategies were measured against the same 16 follow-ups plus 7
+off-topic questions asked mid-conversation** (`--strategy=raw|concat`, and the
+default `rewrite`; code in [`query.js`](src/lib/agent/query.js)):
+
+| Strategy | Follow-ups hit@1 | Off-topic mid-conversation rejected | Cost |
+| --- | --- | --- | --- |
+| `raw` (the old behaviour) | 31% | 7/7 (trivially — it never looks at the history) | none |
+| `concat` (previous question + this one) | 100% | **0/7 — every one leaked** | none |
+| `concat`, no empty-first-pass fallback (derived from the same run) | 94% (15/16) | 4/7 — the 3 SHORT ones still leaked | none |
+| **`rewrite` (LLM → standalone query)** | **100%** | **7/7** | one model call per triggered turn |
+
+**Why concat loses despite being free and 100% on follow-ups: it cannot tell a
+follow-up from a new topic.** "What about the weather?" after a pricing
+question becomes "How much is the Growth plan? What about the weather?", which
+retrieves the Growth FAQ at 0.386 and hands the model a price list to answer a
+weather question from — the exact failure §6.3's threshold exists to prevent,
+reintroduced through the front door. Dropping the fallback doesn't fix it: the
+cheap trigger fires on short messages, and short off-topic messages are what
+callers say. Only a step that can JUDGE "this is a new topic, leave it alone"
+is safe, which is what the rewrite prompt's "return it EXACTLY as written"
+clause is for — the model returns the four long off-topic questions and the
+three short ones unchanged, and nothing is retrieved. (The same check protects
+against the rewrite inventing facts: its instruction forbids adding any price,
+number or product the customer never mentioned, because a rewrite is a search
+key, not an answer, and a bent query is invisible to the grounding rule
+downstream. It must also keep the customer's language — Italian stays Italian;
+prompt text is in `prompt.js`.)
+
+**When a model call is spent (`retrieveForTurn` in `query.js`), in order:**
+1. No earlier turns → search the message as typed. A first message can't be a
+   follow-up.
+2. `needsContext(message)` → rewrite BEFORE searching: it opens with
+   "and/but/what about/e/ma/anche…", or points back with "that/it/them/the Pro
+   one/quello…", or is four words or fewer and not obviously complete (a short
+   message that addresses the business, names a brand or is "what does X do" is
+   not rewritten — see the latency list below) (English and Italian only; the two
+   active locales, §7). Pure regex, free.
+3. Otherwise search as typed, and only if that returns NOTHING (and the message
+   isn't a pleasantry like "thanks"/"grazie") rewrite and search again — the
+   net for follow-ups the cheap check missed. A message that already retrieves
+   fine never pays for a call.
+
+**The rewrite fails SOFT and is bounded.** It goes through `llm.js`
+(`generateReply`, same provider fallback) like every other model call, has a
+hard 3-second budget (`REWRITE_TIMEOUT_MS`), and on ANY error, timeout or
+unusable output searches the raw message — a reply is never lost to an
+optional search-quality step. Retrieval's gate is untouched: `MAX_DISTANCE`
+still alone decides what the model sees (§6.3); only the query changed.
+`respond()` returns `searchQuery` (when it differs from what was typed) and
+`rewriteStatus`; the test console shows "Searched for: …" and, if a rewrite
+failed, says so — so a silent fallback is visible to a human.
+
+**What it costs — be honest about this one, it collides with §9.2.** A rewrite
+call took ~0.85–1.0s when the provider was healthy, 1.3–1.5s on average across
+a paced 23-turn run (slowest ≈ 2.9s). In degraded stretches (the free-tier
+Gemini pool is flaky; seen several times while building this) it was far
+worse — **15 of 23 calls hit the 3s budget in one run, and in another, with
+the budget raised to 15s, two calls simply hung** — and those turns fell back to raw (accuracy back to the 31%
+baseline, replies unaffected — the fail-soft contract holding under real
+stress). That is added to EVERY triggered turn, before generation even starts,
+against a voice budget of ~800ms to first audio (§9.2). **Four things now cut it;
+none of them has been measured against a real provider** — everything below was
+verified with stubbed models and a fake clock, which proves the logic and the
+arithmetic, not the milliseconds.
+
+1. **Fewer needless calls — the trigger is more precise** (`npm run eval:trigger`,
+   regex only). It fired on 10 of 71 standalone questions (the "8 of 64" above, counted
+   before off-topic items were included); now 1 of 71, and it still fires on 15 of the
+   16 genuine follow-ups. Precision 60% → 94%, recall 94% → 94%. The rules, each a
+   fix for a specific false positive: a SHORT message (≤4 words) is a complete
+   question when it addresses the business ("who are you", "what's your ragù recipe"),
+   names a brand or carries a number ("Is Pro included?"), or is the "what does X
+   do/about" overview opener; "this" points back only as a pronoun or before a generic
+   noun (not "what's this new connect thing"); "there" only at the end of a message
+   (not "is my info still there"); "the pro one" only in a message of ≤10 words.
+   **Deliberately NOT done:** the business-noun exemption ("price", "refund",
+   "shipping" make a short message standalone). Measured: it removed no further false
+   positive and dropped a real follow-up ("Who pays for shipping?") — recall matters
+   more, because a missed follow-up is only rescued by the empty-first-pass net when
+   the raw search returns NOTHING, not when it returns something wrong. Still fires,
+   by design: "what do you guys charge for the pro one" (an ambiguous back-reference
+   that the set labels standalone) and 3 of 7 new-topic turns ("What about the
+   weather?" — no text rule separates it from "What about Sundays?"; the rewrite
+   returns it unchanged). **Caveat:** tuned on these 94 questions; read it as
+   "principled and fits the set", not as a live rate. Re-run it when questions are added.
+2. **A failing provider no longer costs 3s a turn — the circuit breaker**
+   (`breaker.js`, used by `generateRewrite` in `llm.js`). After
+   `REWRITE_BREAKER_THRESHOLD = 3` consecutive failures or timeouts the rewrite is
+   skipped for `REWRITE_BREAKER_COOLDOWN_MS = 60_000`: the call is refused instantly (0ms,
+   the provider is not called), `rewriteQuery` returns status `"skipped"`, the raw
+   message is searched, and the test console says rewriting is paused. After the
+   cool-down exactly ONE probe is let through (concurrent turns are refused while it is
+   in flight); success closes the circuit, failure re-opens it for a full new
+   cool-down. A 400/422 (our own bad request) neither opens it nor resets the streak;
+   a 429, 5xx, network error or timeout counts. In-process state (§8 limitation 9).
+   The 15-of-23-timeouts stretch above would have cost ~3 timeouts, then ~0.
+   A timed-out call is ABANDONED, not cancelled — it keeps running (and retrying inside
+   `withRetry`) and may still spend quota.
+3. **A dedicated, faster model for the rewrite** — `GEMINI_REWRITE_MODEL` (and
+   `OPENROUTER_REWRITE_MODEL`), documented in `.env.example`. Unset = the chat model,
+   so behaviour is unchanged. Read per call by provider (`rewriteModelFor`), so the
+   fallback provider uses its own. On the Gemini free tier a separate model also has
+   its own daily quota. **Nothing has been evaluated with a smaller model**: it must
+   follow the "ONE line, no explanation, keep the language, never add facts" prompt, and
+   the only way to know is `npm run eval:real` (followup 100% / followup_offtopic
+   rejected) with the variable set.
+4. **Speculative raw search — built, OFF** (`SPECULATIVE_RAW_SEARCH` in `query.js`).
+   Starts the raw-message retrieval together with the rewrite and uses it when the
+   rewrite comes back unchanged / failed / skipped, or does not answer within
+   `SPECULATIVE_REWRITE_BUDGET_MS = 1500` (the rewrite gets that budget instead of 3s,
+   since the raw result is already in hand). The trade, with the fake-clock test numbers
+   (rewrite 1000ms, search 400ms): rewrite UNCHANGED/FAILED → 1000ms instead of 1400
+   and no extra cost; rewrite CHANGED the query → still 1400ms (the rewritten query
+   must be searched after the rewrite returns) **plus one embedding text spent and
+   thrown away**. Every genuine follow-up is the second case (all 16 in eval:real), so
+   on the turns that need the rewrite it is a pure cost — 2 embedding texts instead of
+   1 against a ~1000/day quota (§6.20) — and a latency win only on turns that did not
+   need it, which the trigger work above already made rare. It is NOT the fix for real
+   follow-ups; a faster rewrite model is. Leave it off unless a measurement of real
+   rewrite latency says the unchanged/failed fraction is large.
+
+**Still needs a real measurement** (needs a working provider and, for `eval:real`,
+quota): the rewrite's latency with and without `GEMINI_REWRITE_MODEL`; what fraction of
+live triggered turns come back unchanged/failed (that decides whether speculation pays);
+the right `SPECULATIVE_REWRITE_BUDGET_MS`; whether a smaller model holds the 100% /
+7-of-7 follow-up numbers. The ~0.3–0.5s for one search is an estimate, not a timing.
+
+**Not fixed by this: generic overview openers still score 0% hit@1.** "Who
+are you" is not a follow-up — there is no earlier turn to rescue it. That is
+§6.20's problem and §9.1's open item.
+
+**Measuring it.** `eval:real` scores `followup` and `followup_offtopic` against
+the saved baseline like every other category. Three things about the harness
+exist because of how this went wrong: (1) rewrite turns are PACED at ~13 per
+minute — the free tier caps chat requests per MINUTE, a burst of 20 trips it,
+the provider's retry backoff pushes calls past the 3s budget, and the run
+measured the rate limiter instead of the strategy; (2) a turn whose rewrite
+FAILED is re-issued twice, and a run that still has failures is reported
+`INVALID` and never compared or saved — otherwise the fallback-to-raw turns
+read as "rewrite doesn't help" and silently poison the baseline; (3)
+`--strategy=` runs are exploratory and never read or write the baseline; (4) the eval gives
+the rewrite a 15s budget (`rewriteTimeoutMs`, debug route only — respond() never
+passes it) so it measures the strategy's QUALITY, and counts separately how
+many calls exceeded the production 3s budget, so latency can't masquerade as a
+quality result.
+
+**Honest state of the saved baseline.** It was captured on a clean run (0
+failed rewrites: follow-ups 16/16, off-topic 4/4). The three SHORT off-topic
+turns were added afterwards; they came back unchanged and un-leaked (7/7) in
+two later runs, but those runs also had unrelated rewrite timeouts, so the
+harness (correctly) refused to save them and the baseline still says
+`followup_offtopic` n=4. Re-run `npm run eval:real -- --update-baseline` when the
+provider is healthy to fold them in. The baseline gate is a rate, so it is
+not loosened in the meantime.
+
+### 6.20 "Who are you?" — the profile answers it; retrieval still cannot
+
+The most common opening question on a call ("tell me about your company",
+"what do you do") is declined (TEST-REPORT §4). Two separate things fail, and
+only one is fixed.
+
+**Measured cause — raw cosine distance to the nearest chunk, `__eval_real__`
+corpus, gate 0.43:**
+
+| Question | Nearest chunk | Best chunk of `01-company-overview.md` |
+| --- | --- | --- |
+| what type of services you provide | 0.432 · CSV fragment (untitled) | 0.487 |
+| give me overview about your company | 0.446 · CSV fragment | 0.484 |
+| tell me about your company | 0.468 · CSV fragment | 0.489 |
+| who are you and what do you sell | 0.442 · CSV fragment | 0.479 |
+| what do you do | 0.462 · recipe "Notes" | 0.504 |
+| who are you | 0.494 · refund "Support Contact" | 0.520 |
+| what products do you offer *(passes)* | 0.394 · the Products chunk | 0.394 |
+| what does nyron do *(passes, has the brand)* | 0.299 · refund policy | 0.306 |
+
+Three things this settles. (1) **Hypothesis (a) is only half right.** The
+untitled CSV fragment is the nearest chunk for 4 of the 6 failing phrasings, but
+the About/Products chunk itself sits at 0.48–0.52 — 0.05–0.09 OVER the gate — so
+re-ranking the CSV away would still return nothing. (2) **(b) is confirmed**: a
+generic question has no anchor, so every chunk is equally far (0.43–0.49); the
+nearest one is noise, not the answer. (3) **(c) was real but partial**: the
+purpose was already in the identity line, and a rich purpose let the old prompt
+answer most phrasings from it — but inconsistently (one phrasing, "give me
+overview about your company", was flatly declined), and with no purpose
+configured there was nothing to answer from. Raising `MAX_DISTANCE` is ruled
+out as always: the closest off-topic question is 0.397 (§6.3).
+
+**Fixed — an always-available business profile (`prompt.js`).** An `ABOUT THIS
+BUSINESS` block (name, purpose, hours — only what the owner typed; the old
+`BUSINESS HOURS` section is folded into it, same rule) sits in every prompt,
+and the grounding rule gets ONE narrow exception: answer who-you-are,
+what-the-business-does and hours from it, restate only what it says, never turn
+it into products/prices/locations, and don't guess a description from the
+business's name. Placeholder name + empty purpose → no block and no exception
+(`PLACEHOLDER_BUSINESS_NAME` in `tenant/config.js`). Checked against the real
+prompt and real model with retrieval results supplied directly (embedding quota
+was exhausted — see below), purpose = "We build business software for clinics
+and retailers…": flat declines of the 9 declined phrasings went from 1 to 0;
+"who are you / what do you do / tell me about your company" now answer. It does
+NOT enumerate products (the profile does not name any) — "what do you sell" /
+"what services" restate the purpose and offer a hand-off, which is correct.
+Invention checks: "How much does Nyron Connect cost?" with the real chunk →
+declines (unreleased, no pricing); "Platinum plan price", "what products and
+how much" with a thin profile and no chunks → decline; off-topic → no answer
+from the profile; hours → "closed Saturdays", "open Monday 09:00–18:00" as
+configured. One leak found and closed: with a name and NO purpose the model
+said "we provide software solutions", inferred from "Nyron Software
+**Solutions**" — hence the "don't guess from the name" clause.
+
+**Built, NOT adopted — document title in the embedding.** `chunkDocument(text,
+{title})` can prefix every chunk's `embedText` with the humanised document
+title ("12-storepulse-plans.csv" → "storepulse plans"), which also gives a
+heading-less file like a CSV a breadcrumb; `content` and `heading` are never
+touched. It is wired through `ingest.js` behind `EMBED_DOCUMENT_TITLE = false`
+in `embed-scheme.js` because it changes every vector it touches: it needs a
+re-embed of existing rows and a re-measured `MAX_DISTANCE`, and the evidence
+that it helps is NOT in yet. Honest expectation: it can help a file called
+`company-overview.md`, not one called `scan0042.pdf`, and given the About
+chunk is 0.05–0.09 over the gate it may not be enough alone. Do not flip it
+without the before/after `eval:real` run.
+
+**Not built — overview-intent retrieval.** The candidate with no second
+threshold: detect overview intent with a free regex (en+it, anchored so "what
+do you do with my data" doesn't match) and search `"<businessName>: <question>"`
+— queries containing the brand already land at ~0.30. It changes only the
+search key, so the gate is untouched, and a false positive costs a retrieval
+of the company's own overview. It was not built because it cannot be measured
+without embeddings; measure it (overview + off-topic categories, anchored vs
+plain) before shipping.
+
+**Still true after this: `generic_overview` is 0% hit@1** — retrieval is
+unchanged; only the answer is better. §8's limitation stays.
+
+**Embedding quota is counted per TEXT, not per request** (probed directly with
+the quota at ~13 left: batches of 2, 3 and 5 succeeded; a batch of 10 got a
+429; three single-text calls then succeeded before the next 429 — a
+per-request quota would have let the batch of 10 through). So batching embed
+calls saves latency, not quota — `embedTexts` and the batched ingest (16 per
+request) exist for that, and say so. Budget ~1000 TEXTS/day: a full 58-chunk
+corpus ingest is 58 of them and an `eval:real` run is ~90. A batch also fails
+whole, so near the cap a batch of 16 can 429 while single calls would still
+have succeeded. The window looks ROLLING rather than a single reset: a few texts
+trickled back within hours of exhaustion.
+
+**Also pending for that same pass — `CHUNK_LOSSLESS` (`embed-scheme.js`, built, OFF).**
+Found by tests/chunk.test.mjs, not by any eval: chunk.js silently DROPS text. (1) A
+section over 1,400 chars was split into "sentences" by a regex that only matched text
+ending in . ! ? or at the very end, so any fragment ending at a newline vanished —
+a hard-wrapped PDF section (exactly what `extractPdf` emits) kept 1 of 39 lines, a
+150-row CSV kept 1 row. (2) The LAST line of a document counted as "followed by a
+blank line", so a short title-cased final line was taken for a heading and dropped.
+Both are fixed in `chunkDocument(text, { lossless })`, default `CHUNK_LOSSLESS =
+false` because they change every vector they touch (§6.2) — existing rows were built
+from the lossy text. To adopt: set true, bump `EMBEDDING_SCHEME_VERSION`, then the
+sequence below; expect more/different chunks, so re-measure `MAX_DISTANCE` and
+re-run `eval:real`. **Until then, any PDF section over ~1.4k chars or CSV over that
+size already in a knowledge base is missing most of its text** — `reembed` re-chunks
+from stored `content`, which is complete, so the bundled re-embed repairs them.
+Both modes are pinned by tests (legacy mode included, so flipping the flag is a
+deliberate act). Still unfixed and by design: a title-cased line before a blank line
+anywhere is read as a heading and its text lives only in the breadcrumb.
+
+**The planned, once-only embedding pass** (whenever the quota allows ~800 texts):
+`npm run eval:embedding-variants -- --dry-run` says what it still needs (281 texts
+cached-aware for V0–V3); run it (resumable, cached in `node_modules/.cache`), adopt
+the winner in `embed-scheme.js` and bump the version, `npm run reembed:dry` (52
+documents, 227 chunks across the test tenants today — 23% of a day), `npm run
+reembed`, then the §6.3 re-measurement.
+
+### 6.21 A replace re-embeds only what changed
+
+`ingestDocument` — which every replace, edit and retry goes through — used to embed
+every chunk of a document even when one price changed. It now hashes each new
+chunk's `embedText` (SHA-256) and keeps the stored vector of any existing chunk
+with the same hash. Edit one price in a 40-chunk document: **1 text embedded, down
+from 40**. Unchanged re-upload or a retry of an already-embedded document: **0**.
+
+- **The hash is STORED (`knowledge_chunks.embed_hash`), not recomputed from heading +
+  content.** A rename rewrites `source_title` without re-embedding (§6.10); with the
+  title-prefix scheme on, a recomputed hash would describe the new title while the
+  vector describes the old one, and a vector would be reused for text it was never
+  computed from. Nullable, no backfill: every row written before the column existed
+  has NULL and is never reused, so the first ingest of each existing document is a
+  full embed and later ones are incremental. `reembed` writes hashes too.
+- **Never across scheme versions.** The lookup joins the source row and requires
+  `embedding_scheme = EMBEDDING_SCHEME_VERSION` in the same statement as the vectors
+  are read, so a re-embed finishing in between cannot leak an old vector in. A
+  scheme-mismatch ingest is a full embed (tested). `reembedSource` never reuses at
+  all: it only runs for documents behind the scheme, whose every vector is wrong.
+- **Vectors are copied as pgvector text, never parsed into JS numbers** — a reused
+  vector is byte-identical to the stored one. Distinct texts are embedded once even
+  if a document repeats a paragraph under one heading.
+- **Every §6.10/§6.14 guarantee is unchanged**: old chunks are only READ before the
+  swap; embed → one transaction (delete + insert + scheme) → rollback of the row on
+  failure; the cancel checkpoint is still BEFORE each batch (reused chunks cost no
+  batch), and a document with nothing to embed still passes the closing checkpoint
+  before it swaps. Loading vectors is best-effort: a read error means a full embed.
+- **Where the saving stops (measured, tests/test-reembed.mjs).** Reuse is by exact
+  text, so what matters is whether the edit moves chunk boundaries. A heading-per-
+  section document: an edit touches its own chunk. A heading-less document is split
+  greedily by size, so an edit that changes a paragraph's length across a boundary
+  re-flows every chunk after it: inserting one 400-char paragraph near the top of an
+  80-paragraph, 40-chunk document re-embedded 39 of 40. Same-size edits (a changed
+  price) cost 1. Sub-chunks of one section carry a 150-char overlap, so editing the
+  last 150 chars of a chunk also re-embeds the next.
+- The result now also returns `reusedChunks` and `embeddedTexts`.
+- `npm run db:check` asserts the column exists; `test:reembed` covers unchanged
+  re-upload, one edit, retry, scheme mismatch, NULL hashes, mid-way failure and
+  cancel, duplicate chunks, reordering, merge and split — and after each scenario
+  checks that every stored vector equals the vector of its own text.
+
+### 6.22 The OR keyword query — built, measured keyword-only, OFF
+
+`plainto_tsquery` ANDs every word (§6.3), so a sentence-length question needs a chunk
+holding ALL of them and the keyword half is silent. `src/lib/agent/keyword-query.js`
+(`buildKeywordQuery`, pure, unit-tested) builds the alternative: the question's content
+words — English + Italian stop words, question words and chat filler removed,
+apostrophes split, de-duplicated, max 12 — joined with `|`, run with `to_tsquery` per
+chunk config (the language-aware setup of §6.3 is unchanged) and `ts_rank_cd` with
+normalisation 1. Every term is letters/digits only, so no tsquery operator can be
+injected. A question that is ALL filler ("who are you") yields an empty query and falls
+back to AND. Behind `USE_OR_KEYWORD_QUERY` in `retrieve.js`, **false**.
+
+**Measured with `npm run eval:keyword`** — SQL over the 58 stored chunks of
+`__eval_real__`, no vectors, no model, 94 questions; a document's score is its best
+chunk, ties count AGAINST the expected document, documents with no signal are unranked.
+hit@1 / hit@3 / any-signal:
+
+| | AND (today) | OR | OR + norm 1 |
+| --- | --- | --- | --- |
+| factual (24) | 8 / 8 / 8 | 63 / 75 / 100 | **79 / 96 / 100** |
+| phrased_loosely (11) | 0 / 0 / 0 | 36 / 64 / 100 | **55 / 91 / 100** |
+| cross_language (10) | 0 / 0 / 0 | 50 / 60 / 90 | **60 / 70 / 90** |
+| generic_overview (8) | 0 / 0 / 25 | 13 / 38 / 63 | **38 / 38 / 63** |
+| report_phrasings (7) | 0 / 29 / 43 | 0 / 71 / 86 | **57 / 71 / 86** |
+| **overall (60)** | **3 / 7 / 12** | 42 / 65 / 92 | **63 / 80 / 92** |
+
+- **The problem is as bad as suspected:** today the keyword half has no signal at all
+  for 88% of questions. `websearch_to_tsquery` is identical to AND on a plain sentence
+  (it only ORs a literal "or"); it is not a candidate.
+- Normalisation 2 (divide by length) and 8 (unique words) got 50–52 / 82 overall — a
+  little better hit@3, clearly worse hit@1, because long chunks are over-penalised.
+- Italian questions: AND matched an Italian-config chunk for 2 of 10, OR for 8 of 10, and
+  the Italian document was the top keyword hit for 6 of 7 that had any signal. OR also
+  gives English chunks a hit for 8 of 10 Italian questions — through the language-neutral
+  terms (brands, plan names, numbers), exactly as §6.3 says.
+- Misses left are mostly shared brand words ("ClinicHMS" is in six documents) and
+  generic openers with no content word ("who are you": no signal) — vector search's job.
+  The conflict questions (both sources in the keyword top 3) are 0% in every variant; the
+  document round-robin (§6.3), not keyword score, is what surfaces both.
+- Off-topic: 5 of 8 off-topic questions get SOME keyword score under OR (0 of 8 under
+  AND). That cannot admit a chunk — membership is still `MAX_DISTANCE` alone and
+  test:reembed asserts OR admits exactly the same chunks as AND — but it can reorder a
+  leak that is already in the pool. Watch this one.
+
+**What this does NOT show:** nothing here has vector search in it. Keyword score only
+re-orders the vector-admitted pool, so whether OR helps or hurts the FUSED ranking is
+only knowable from the integrated eval. **Do not turn the flag on without it.**
+
+**Verified without quota** (`npm run test:reembed`, stubbed embedder, `maxDistance 2`):
+with the mode off — and with `keywordQuery: "and"` — the SQL returns exactly what the
+original query did (5 queries, same ids, same order); OR mode runs on questions,
+filler-only, punctuation-only and tsquery-operator input.
+
+**ADOPTION CHECKLIST (needs embedding + chat quota; ~94 embedding texts and ~23
+rewrite calls with `--skip-ingest`, ~150 without):**
+1. App running, provider healthy. Plain run FIRST, so the baseline gains the categories
+   it has never seen (`report_phrasings`, the 3 extra `followup_offtopic`) in shipped
+   mode: `npm run eval:real -- --skip-ingest` (a run with failed rewrites is INVALID and
+   saves nothing — retry later).
+2. Candidate run, read-only against that baseline:
+   `npm run eval:real -- --skip-ingest --keyword=or`
+   (`&keyword=or` / `keyword` in the POST body reach `retrieveRelevantChunks`; the
+   baseline is never written by a candidate run; exit 1 on a regression > 3 points.)
+3. Beyond the 3-point gate, read these by eye and do not adopt if any gets worse:
+   - **cross_language** (baseline 100% / 100%, MRR 1.0): Italian↔English is where a noisy
+     OR rank could do damage;
+   - **off_topic** (baseline 88%, one leak "flight change fees"): no NEW leak — and that
+     leak must not rank higher in the result list;
+   - **report_phrasings**: the 7 openers of TEST-REPORT §4 (three pass today); none that
+     passed may fail, and `generic_overview` must not drop from its 0%;
+   - **conflict**: still 100% both-sources-present; **followup / followup_offtopic**:
+     still 100% / 100% rejected.
+4. If it holds: set `USE_OR_KEYWORD_QUERY = true` in `retrieve.js`, put the integrated
+   numbers in its comment next to the keyword-only ones, run `npm run eval:real --
+   --update-baseline`, and tell `CLAUDE.md` §6.3's "ANDs every term" paragraph it is
+   history. No re-embed and no `EMBEDDING_SCHEME_VERSION` bump: this changes ranking,
+   not stored vectors.
+
+### 6.23 Tables keep their meaning — CSV and DOCX (built, OFF, part of the bundled re-embed)
+
+**The audit** (`npm run audit:chunks`, read-only and offline: real `extractText` + real
+chunking over every file in `test-docs/`; the scanned PDF's text comes from the stored OCR
+copy). 114 chunks over 15 files; the problem files, worst first:
+
+| File | What the pipeline did |
+| --- | --- |
+| `03-storepulse-pricing-plans.docx` | **Worst.** mammoth makes every table CELL a paragraph, and the chunker reads a short title-cased paragraph as a heading, so "Lite", "Pro" and "Unlimited" became headings and a heading with no body is dropped: "Email", "Email + Phone", "Enterprise", "Custom pricing" are **gone from the text**. The comparison table became 5 chunks of 14–44 chars, the header ("__Plan__ __Price__…") in one and each row's values scattered across the others. |
+| `12-storepulse-plans.csv` | One heading-less 130-char chunk: header glued to rows, no column meaning. And only 2 of its 3 data rows — the last line was read as a heading and dropped (the end-of-document bug of `CHUNK_LOSSLESS`, §6.20). |
+| `10-nyron-onboarding-scanned.pdf` | The only other heading-less chunk (536 chars): OCR returns text with no structure. Not a table problem; nothing built (title-in-embedding is the existing candidate). |
+| `02-clinichms-pricing.pdf` | **Checked and left alone.** Its table survives as one chunk with the header line and one line per row; columns run together ("Up to 2 Email") but nothing is lost and the header travels with the rows. Doing better needs x-coordinates from pdfjs and a column detector — a heuristic, not a fix, so not done. |
+
+Also visible: 34 of 114 chunks are under 180 chars (short sections, each under its own heading);
+none over the limit. Reports are saved by `--out=`; `--structured` shows the converted corpus
+(111 chunks, 1 heading-less, 29 under 180) and `--compare` prints before/after per file.
+
+**What it does now, behind `STRUCTURED_TABLES` in `embed-scheme.js` (false)** —
+`tables.js`, pure and unit-tested (tests/tables.test.mjs, 40 cases):
+- Rows become **self-describing**: `Plan: Pro; Monthly Price EUR: 149; Stores: 5; SKUs: Unlimited;
+  Support: Email + Phone`. Empty cells are omitted (an empty value would read as a fact); a
+  cell beyond the header's width is "Column N"; header text is used verbatim — no units are
+  invented ("Monthly Price EUR" already says EUR).
+- Each group of rows starts with a `Columns: Plan, Monthly Price EUR, …` line, so **the header
+  context is in every chunk**. Groups are ≤1,200 chars and each is its own same-level section,
+  so chunks split exactly on row boundaries (no overlap tail cutting a row in half) and never
+  reach the legacy sentence splitter.
+- A CSV gets a **heading from the file name** ("12-storepulse-plans.csv" → "storepulse plans"),
+  on every chunk. DOCX tables keep the heading already above them ("StorePulse Pricing Plans >
+  Plan Comparison").
+- Parsing: RFC-4180 quoting (commas, `""`, newlines inside quotes), CRLF/LF/CR, UTF-8 BOM,
+  delimiter detected from ",", ";", tab, "|" by per-line consistency (a ";" file with decimal
+  commas works), all-empty rows dropped, lenient on stray or unterminated quotes.
+- **Missing header:** the first row is a header only if it is words (≥ half filled, no purely
+  numeric cell, no repeats, nothing paragraph-sized). Otherwise columns are "Column 1…N" and
+  the first row stays DATA. The opposite error exists and is accepted: an all-text table with
+  no header looks like a header. No heuristic can tell the two files apart; a wrong "header"
+  mislabels cells, a wrong "no header" is merely less descriptive.
+- **Huge files:** a 20,000-row CSV converts in well under a second with no row dropped, and
+  produces far more than `MAX_CHUNKS_PER_DOCUMENT` (400, now exported from `ingest.js`), so
+  ingest refuses it with its existing "Document is too large: N sections" error. The converter
+  never truncates silently; the cap is ingest's decision. Roughly 400 chunks ≈ 400×1,200 chars
+  of rendered rows.
+
+**Two seams, because the two formats store different things:**
+- **CSV is converted at CHUNK time** (`prepare.js` → `chunksForDocument`, the one function
+  ingest, retry, re-embed and the audit scripts all call), from the stored ORIGINAL text. So
+  `npm run reembed` repairs CSV documents already in the knowledge base with no re-upload.
+  (extractText was not the place: stored `content` would then be our rewrite, not their file,
+  and re-embedding could not reach existing documents.)
+- **DOCX is converted at EXTRACTION time** (`extractText`, via mammoth's HTML), because only
+  the extracted text is stored and the table structure is already gone from every DOCX
+  ingested so far. **Re-embedding cannot recover it: a DOCX containing a table must be
+  RE-UPLOADED** after the flag is on. Find them:
+  `SELECT tenant_id, title FROM ai_engine.knowledge_sources WHERE kind = 'file' AND file_name ILIKE '%.docx';`
+  With the flag on, the whole DOCX goes through the HTML path (headings still "#", lists "•",
+  bold markers gone) — a small text change for every DOCX, not only those with tables.
+  Nested tables are left to the old behaviour.
+
+**Before → after** (`npm run audit:chunks -- --compare`):
+- `12-storepulse-plans.csv`: 1 chunk, no heading, 130 chars, 2 of 3 rows →
+  1 chunk, heading "storepulse plans", 352 chars, all 3 rows, e.g.
+  `Plan: Enterprise; Monthly Price EUR: Custom; Stores: Unlimited; SKUs: Unlimited; Support: 24/7 dedicated`.
+- `03-storepulse-pricing-plans.docx`: 10 chunks with the table in shreds and 4 values lost →
+  7 chunks; the table is one chunk under "StorePulse Pricing Plans > Plan Comparison" with all
+  3 rows intact.
+
+**BUNDLED RE-EMBED CHECKLIST — everything built, tested and OFF, to adopt in ONE pass** (the free
+embedding quota is ~1000 texts a day, §6.20; `npm run reembed:dry` prints the cost and now
+shows this flag):
+1. `CHUNK_LOSSLESS` (§6.20 note) — chunker stops dropping text.
+2. `STRUCTURED_TABLES` (this section) — self-describing CSV/DOCX tables.
+3. Optionally `EMBED_DOCUMENT_TITLE` and `USE_EMBEDDING_TASK_TYPES` — only if `eval:embedding-variants` favours them.
+4. Set the flags, bump `EMBEDDING_SCHEME_VERSION`, `npm run reembed:dry`, `npm run reembed`,
+   `npm run db:check`, **re-upload DOCX files that contain tables**, `npm run eval:sweep` +
+   `eval:real:sweep` → set `MAX_DISTANCE`, then `eval:real` against the baseline. A table
+   chunk now embeds "Columns: … Plan: Pro; …" instead of "Pro,149,5": expect its distances to
+   move — re-measure, do not assume.
+5. Already independent of the above and ready: the incremental re-embed on replace (§6.21), so
+   re-uploading a DOCX only pays for the chunks that changed.
 
 ---
 
@@ -601,7 +1570,12 @@ right language, with history persisted per tenant.
 
 | Area | State |
 | --- | --- |
-| RAG retrieval | ✅ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3); 100% hit@1, MRR 1.000, 100% off-topic rejection (`npm run eval:retrieval`) |
+| RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
+| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Retrieval of the About chunk for those openers is still 0% |
+| Keyword half | ✅ language-aware (`english`/`italian`/`simple` per document, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
+| Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
+| Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
+| **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -618,32 +1592,66 @@ right language, with history persisted per tenant.
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
 | Console UI | ✅ upload/write/crawl as three top-level actions; write/edit share one modal + CodeMirror editor; multi-select bulk delete; every action button disables while its own request is in flight |
+| **Tenant serviceability + abuse limits** | ✅ every serving/mutating route gates on `assertTenantServiceable()`; tenantId shape validated at the boundary; chat has a two-layer rate limit + message-length cap; uploads have a per-request file-count cap (§6.18) |
 
 ### Limitations — be honest about these
 
-1. **⚠️ NOTHING IS COMMITTED TO VERSION CONTROL.** Many phases of work exist only
-   on one disk. This is the single largest risk on the project.
-2. **No telephony yet.** The calling system — the actual product — is not built.
+1. **No telephony yet.** The calling system — the actual product — is not built.
    §9 is the plan.
-3. **No tool execution.** The agent collects booking details but cannot book.
+2. **No tool execution.** The agent collects booking details but cannot book.
    Guarded so it never claims otherwise (§6.11).
-4. **Free-tier model quotas — two SEPARATE daily caps, both hit in practice.**
+3. **Free-tier model quotas — two SEPARATE caps, both hit in practice.**
    Chat is ~20 requests/day *per model*; switching `GEMINI_CHAT_MODEL` moves to
    a fresh quota. Embeddings are a different cap
    (`EmbedContentRequestsPerDayPerProjectPerModel-FreeTier`, ~1000/day) — easy
    to exhaust during active testing (a few multi-chunk uploads plus eval runs
    in one session is enough), and every ingest and every chat reply needs at
    least one embedding call, so hitting it stops BOTH uploads and retrieval,
-   not just chat. `humanizeError` (§6.16) shows this as a friendly "usage
-   limit" message; the underlying error names which of the two quotas it is.
-   OpenRouter's free Gemma pool has never once responded. **A paid key is
-   required before any demo.**
-5. **No automated unit tests.** The retrieval eval and the OpenRouter test are
-   the only mechanical checks; everything else was verified by hand.
-6. **In-process state** — job queue and caches. Multi-instance needs Redis.
-7. **Italian is not native-reviewed.**
-8. **No per-tenant limits** on uploads, documents or storage. Planned.
-9. `README.md` is still the create-next-app default.
+   not just chat. **It is counted per TEXT, not per request** (probed: batching
+   saves latency, not quota — §6.20), and the window appears to roll rather than
+   reset once a day, so exhaustion can last a full day. `humanizeError` (§6.16)
+   shows it as a friendly "usage limit" message; the underlying error names
+   which of the two quotas it is. OpenRouter's free Gemma pool has never once
+   responded. **A paid key is required before any demo** — and before the
+   embedding work in the next item can finish.
+4. **Embedding-side work that is built but not measured, because of item 3.**
+   The document-title prefix and Gemini `taskType` are not adopted; no
+   re-embed has been run; `MAX_DISTANCE` is the 0.43 measured on the original
+   scheme (§6.2, §6.3); the saved `eval:real` baseline predates
+   `report_phrasings` and the last three short off-topic follow-ups (§6.19). The
+   once-only sequence is written down in §6.20.
+5. **Retrieval gaps, measured (§6.3, §6.20).** Generic overview openers retrieve
+   nothing (0% hit@1; the profile covers the answer, not the retrieval);
+   loosely-phrased questions are 64% hit@1; the keyword half is silent for 88% of
+   questions (AND query) — the OR fix is built and OFF, awaiting `eval:real` (§6.22); one off-topic question leaks
+   ("flight change fees" → the refund policy, 0.397).
+6. **Follow-up resolution costs ~1–1.5s a turn** (an extra model call), too slow
+   for the ~800ms voice budget (§6.19, §9.2). Mitigated, NOT measured: a precise trigger
+   (1 of 71 standalone questions now fires, was 10), a circuit breaker that stops paying
+   3s per turn when the provider is down, an optional faster `GEMINI_REWRITE_MODEL`, and an
+   OFF speculative-search flag. The remaining cost on a genuine follow-up is one rewrite
+   call; whether it fits the voice budget needs a real measurement.
+7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
+   capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
+   At today's few hundred chunks the planner does not even use HNSW.
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 265 cases) pins
+   chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
+   handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers and
+   `rankCandidates`. Not covered: anything that needs Postgres or a model — route
+   handlers, `ingestDocument`, retrieval SQL, `respond()`, `retrieveForTurn`'s
+   trigger flow, `rewriteQuery`. Those still rest on the evals, `test:reembed`,
+   `test:openrouter`, `db:check` and hand verification.
+9. **In-process state** — job queue, caches, and the rate limiter (§6.18).
+   Multi-instance needs Redis; N instances currently means N× the rate limit
+   (chat: 60/min per tenant, 5 per 10s per conversation), same caveat
+   `rate-limit.js`'s own header states.
+10. **Italian is not native-reviewed.**
+11. **No per-tenant BUSINESS limits** (max documents, storage quota, plan
+    tiers) — that is the partner's billing/plan system (§4), not built yet.
+    What DOES exist since §6.18: `assertTenantServiceable()` is actually wired
+    up and ready to enforce those the moment tenant_core defines them, plus
+    abuse-prevention limits that are not business quotas — a chat message
+    length cap, a two-layer chat rate limit, and a per-request upload-count cap.
 
 ---
 
@@ -651,17 +1659,70 @@ right language, with history persisted per tenant.
 
 ### 9.1 Next, in order
 
-1. **RAG optimisation** — retrieval quality is the product. Hybrid re-ranking
-   (vector + keyword RRF + heading diversity, §6.3) is done; still open: query
-   rewriting, evals on real (not fixture) business documents, and revisiting
-   `MAX_DISTANCE`/chunk sizing once real documents surface cases the fixture
-   doesn't.
-2. **Vector store scale** — HNSW parameter tuning, index maintenance, per-tenant
-   partitioning as chunk counts grow.
-3. **Multi-file handling at scale** — per-tenant limits, larger batches,
+1. **Finish the once-only embedding pass (§6.20), as soon as a paid key or the
+   quota allows ~800 texts:** `eval:embedding-variants` → adopt a scheme in
+   `embed-scheme.js` and bump the version → `reembed` → `db:check` → the two
+   sweeps and `MAX_DISTANCE` → `eval:real` before/after, including the
+   cross-language category after the language-aware keyword change. Then
+   `eval:real -- --update-baseline`. Everything below that touches retrieval is
+   judged by that run.
+2. **RAG optimisation** — retrieval quality is the product. Open, measured:
+   generic overview openers retrieve nothing (the profile now answers them,
+   §6.20, but the About chunk is still 0.05–0.09 over the gate: title-in-embedding
+   is built-but-off, overview-intent query anchoring is unbuilt); the keyword
+   half ANDs every term; the OR query is built, measured keyword-only (3% → 63%
+   hit@1) and OFF — adoption checklist in §6.22; follow-up rewrite is ~1–1.5s a turn and needs a faster path
+   before voice (§6.19); revisit `MAX_DISTANCE`/chunk sizing once real BUSINESS
+   documents (not this project's own fixtures) surface cases they don't.
+3. **Vector store scale** — the post-filter starvation is guarded by per-
+   transaction iterative scans (§6.1) but with a ceiling (`hnsw.max_scan_tuples`);
+   past it, per-tenant partitioning. Also HNSW parameter tuning, index maintenance.
+
+   **What was measured (synthetic 768-dim vectors, scratch table, zero API calls; the harness
+   script was REMOVED — see "uncertain" below) and what is trusted:**
+
+   | Measurement | Result | Trust |
+   | --- | --- | --- |
+   | Server defaults on the app's connection | `iterative_scan` off, `ef_search` 40, `max_scan_tuples` 20,000, `scan_mem_multiplier` 1, `work_mem` 4MB; no database/role overrides; pgvector 0.8.6 | **solid** (now asserted by `db:check`) |
+   | Smooth-geometry probe, small tenant owning 20 rows among N packed rows, unguarded | **1 of 20 returned at every N from 2,000 to 40,000** | **solid** (hand-run SQL, repeated) |
+   | Same, guarded (`strict_order`) | **20 of 20** at N = 2,000 / 8,000 / 20,000 (the scan visited every row, ≤ the 20,000 cap) | **solid** |
+   | Same at N = 40,000 (tenant share 1 in 2,000) | **10 of 20, 20,015 tuples visited** — `max_scan_tuples` IS the ceiling | **solid** |
+   | HNSW build, 200k × 768-d | 116–161 s serial, 781 MB; a PARALLEL build fails in Docker (`/dev/shm` is 64 MB — "could not resize shared memory segment") | solid |
+   | Planner's own choice with the `tenant_id` btree, tenants of 40 rows / 1% / 10% of the table, at 10k, 50k and 200k chunks | always **tenant btree + exact sort**, never HNSW (small tenant ≈ 0.2 ms; 10% tenant ≈ 75 ms at 200k) | fairly solid, but the scratch table has no JOIN to `knowledge_sources` and the real query may plan differently |
+   | Cost of the guard when the HNSW plan IS used and a tenant has fewer than 20 in-gate matches (the scan can never be "satisfied" and runs to its cap) | ≈ 90–105 ms at 200k chunks with the 20,000 cap, ≈ 200 ms at a 100,000 cap, ≈ 500 ms with `scan_mem_multiplier` 8 | plausible, same caveat |
+   | **Harness "recall" at 10k / 50k / 200k** (40-chunk, 1% and 10% tenants, clustered, interleaved, 10 / 3 topics, isotropic) | **100% in every configuration, including UNGUARDED** | **NOT trusted — see below** |
+
+   **Uncertain, stated plainly.** The benchmark harness reported 100% recall even with no guard, which
+   the hand-run SQL contradicts (unguarded returns 1 of 20). The last inspection showed the harness's
+   *exact* reference returning 1 row where the guarded scan returned 20 — so its recall scoring is
+   suspect — but that was not resolved and I cannot explain the mismatch in one sentence. **Open
+   question; every harness recall figure is unverified**, so there is no measured "recall at 10k /
+   50k / 200k" to report. (Also found along the way: rounding vectors to 4 decimals creates exact
+   duplicates on a tight curve, and a 1-D cosine curve ties below float32 resolution — both are
+   harness traps, not product behaviour.) The harness was removed rather than left to mislead.
+
+   **Decision rule (what the solid evidence supports):**
+   - The guard recovers ALL of a tenant's in-gate rows only while the rows of EVERY tenant that sit
+     closer to the query than that tenant's farthest wanted row number **≲ 20,000**. For a tenant with
+     ≥ 20 matches it needs ≈ 20 ÷ (its share of that neighbourhood) tuples, so the floor is a share of
+     **0.1%** of the neighbourhood. Neighbourhood size ≈ tenants × their chunks on the shared topic
+     (200 tenants × 100 chunks on the "pricing" topic ≈ 20,000).
+   - **Start per-tenant partial indexes / partitioning when a query's neighbourhood approaches ~20,000
+     rows AND the planner sends that tenant down the HNSW plan.** Today the planner sends tenants up to
+     10% of the table down the exact btree path (measured to 200k chunks), so the practical trigger is
+     not the HNSW ceiling but the planner's choice: re-check it with `EXPLAIN` on the real query.
+   - **Total-chunk / tenant-count number: unmeasured beyond 200,000 chunks and 203 tenants** (and
+     those runs' recall is the unverified part). Do not read "200k" as a safe limit; it is the largest
+     size tried. Raising `hnsw.max_scan_tuples` trades latency for recall (≈ 5 µs per tuple at 768-d);
+     it moves the ceiling, it does not remove it.
+   - `npm run db:check` now fails loudly if the guard is not in effect on the app's connection: the
+     `set_config` call is still in `retrieve.js`, `iterative_scan` reads `strict_order` after the
+     app's own statement, `max_scan_tuples` ≥ 20,000, `ef_search` ≥ 40, and a live temp-table probe
+     (20 rows among 8,000) recovers ≥ 18 rows guarded vs ~1 unguarded.
+4. **Multi-file handling at scale** — per-tenant limits, larger batches,
    deduplication, resumable imports.
-4. **Tool execution** (§6.11) — then flip `TOOL_EXECUTION_AVAILABLE`.
-5. **Telephony** — §9.2.
+5. **Tool execution** (§6.11) — then flip `TOOL_EXECUTION_AVAILABLE`.
+6. **Telephony** — §9.2.
 
 ### 9.2 Twilio — the destination, not yet started
 
@@ -703,41 +1764,87 @@ billing. Agree the event shape **early** — retrofitting metering is painful.
 ## 10. Local setup
 
 ```bash
-npm run db:up            # Postgres + pgvector
-npm run prisma:migrate   # apply migrations
+npm install
+cp .env.example .env     # then fill in DATABASE_URL (as shipped works with the compose file) and GEMINI_API_KEY
+npm run db:up            # Postgres 16 + pgvector (docker compose up -d)
+npm run prisma:migrate   # apply migrations (read any generated one — §6.1)
 npm run dev              # http://localhost:3000 → the test console
-
-npm run db:check         # verifies the HNSW index Prisma keeps dropping
-npm run i18n:check       # translation key + placeholder parity
-npm run eval:retrieval   # retrieval quality gate
-npm run eval:sweep       # threshold boundary — read before changing MAX_DISTANCE
-npm run test:openrouter  # OpenRouter integration vs. a local stand-in
-npm run lint
 npm run build            # runs i18n:check first
+npm run start            # serve the production build
+npm run lint
+npm run db:down          # stop Postgres
+
+# ── checks ──
+npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
+npm run i18n:check       # translation key + placeholder parity
+npm test                 # 265 unit tests: chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates. No DB, no Gemini, ~1s (§11)
+npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
+npm run test:openrouter  # OpenRouter integration vs. a local stand-in
+
+# ── retrieval evals (each query spends embedding quota — §8 limitation 3) ──
+npm run eval:retrieval   # fast fixture-only smoke check — NOT the hybrid pipeline (§6.3)
+npm run eval:sweep       # threshold boundary for that same small fixture
+npm run eval:real        # THE gate — real hybrid pipeline, full test-docs corpus, baseline diff (§6.3)
+npm run audit:chunks     # chunk stats per document (no-heading / runt / oversize); -- --structured, -- --compare, -- --out=FILE. No quota (§6.23)
+npm run eval:trigger     # does the cheap trigger spend a rewrite on standalone questions? precision/recall vs the labelled set. No quota (§6.19)
+npm run eval:keyword     # keyword half ALONE over the stored eval chunks: AND vs OR vs OR+norm, per category/language. No quota (§6.22)
+npm run eval:real:sweep  # per-category threshold boundary on the same labelled set
+#   eval:real flags (node scripts/eval-retrieval-real.mjs …):
+#     --skip-ingest            reuse the corpus already in the eval tenant (saves ~55 embedding calls)
+#     --strategy=raw|concat    follow-up query strategy to MEASURE (§6.19); exploratory, never touches the baseline
+#     --keyword=or             run the CANDIDATE OR keyword query, judged read-only against the baseline (§6.22)
+#     --update-baseline        accept this run's numbers (prints what got worse first)
+npm run eval:embedding-variants   # pick an embedding scheme in memory, before re-embedding anything (§6.2); -- --dry-run counts the texts it needs
+
+# ── maintenance ──
+npm run reembed:dry      # how many embedding texts a re-embed would spend; embeds nothing
+npm run reembed          # re-embed every document below the current scheme; RESUMABLE (exit 3 = daily quota stop, run again later)
+#   reembed flags: --tenant=ID  --max-texts=N (stop cleanly after ~N chunks)  --pace-ms=700
+npm run db:backfill-search  # label existing chunks with their document's language (§6.3); -- --dry-run first. No embeddings.
+node scripts/repro-tenant-recall.mjs [--interleaved] [--tenants=60]   # synthetic multi-tenant recall probe on a scratch table (§6.1)
 ```
 
-**Database is `caller-ai-agent`.** An older `nyron` database exists on the same
+**Windows gotcha:** `prisma generate` fails with `EPERM … rename … query_engine` while
+`next dev` is running (it holds the engine DLL), and a stopped-and-restarted dev server
+keeps the OLD client in memory. After any schema change: apply the migration, stop the
+dev server, `npx prisma generate`, start it again.
+
+**Database is `caller-ai-agent`.** An older `nyron` database may exist on the same
 Postgres as an untouched backup — if you see it in a connection string, it is
 stale.
 
-`.env` (see `.env.example`):
+`.env` (see `.env.example`, which documents every variable below):
 - `DATABASE_URL` (must include `?schema=ai_engine`), `GEMINI_API_KEY` — required.
 - `GEMINI_CHAT_MODEL` — each model has its **own** free daily quota, so switching
   model is the normal way to keep working. Verified free and working:
   `gemini-3.5-flash-lite` (~1s), `gemini-flash-lite-latest`, `gemini-3.1-flash-lite`.
-- `INTERNAL_API_KEY` — guards every route. **Fails closed in production**;
-  allowed with a warning in dev, which is what lets the test console work.
-- `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER`, `OPENROUTER_*`, `OPENROUTER_BASE_URL`
-  (any OpenAI-compatible endpoint — Ollama, Groq — with no code change).
+- `INTERNAL_API_KEY` — guards every route (header `x-internal-key`). **Fails closed
+  in production**; allowed with a warning in dev, which is what lets the test console
+  work.
+- `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`,
+  `OPENROUTER_BASE_URL` (any OpenAI-compatible endpoint — Ollama, Groq — with no code
+  change), `PUBLIC_APP_URL` (sent to OpenRouter as the referer header).
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` —
-  optional. Uploads work without them; `storage.js` just skips storing the
-  original file (§6.13) and logs a warning instead of failing the import.
+  optional, **all three or none**: `storage.js` treats them as configured when all
+  are non-empty, so a placeholder value counts as configured. Uploads work without
+  them; `storage.js` just skips storing the original file (§6.13) and logs a warning
+  instead of failing the import.
+- Script-only knobs (not read by the app): `APP_URL` (where the eval and OpenRouter
+  scripts find the running app, default `http://localhost:3000`), `EVAL_TENANT`,
+  `TEST_TENANT`, `FAKE_PORT`, `EMBED_VARIANTS_CACHE`.
 
 `.env*` is gitignored. Never commit keys; update `.env.example` instead.
 
 ---
 
 ## 11. Working conventions
+
+- **Tests: `npm test`** — node:test, no dependency, imports `src/` through the same
+  `scripts/alias-loader.mjs` the maintenance scripts use. Every file imports
+  `tests/helpers/no-db.mjs` first, which plants a trap on `globalThis.prisma` (db.js
+  reuses it), so a "pure" test that reaches the database fails loudly; `jobs.test.mjs`
+  plants an in-memory fake instead. Tests never call Gemini. A bug found by a test gets
+  its own named test; a fix that changes what is embedded stays behind `embed-scheme.js`.
 
 - **JavaScript, not TypeScript.** JSDoc on exported functions, as `lib/agent/*` does.
 - **Comments explain *why*, not *what*.** The existing files set the bar. Every
@@ -747,4 +1854,4 @@ stale.
 - **Gemini model names get retired.** A 404 names its replacement — put it in
   `GEMINI_CHAT_MODEL`.
 - **`AGENTS.md` is auto-generated** by `next dev`. Don't fight it; commit it.
-- Branch is `master`; PRs target `main`.
+- The default branch is `main`. Work on a feature branch and open a PR against it.

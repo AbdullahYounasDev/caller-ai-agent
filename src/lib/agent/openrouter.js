@@ -126,10 +126,13 @@ function baseHeaders(apiKey) {
  * @param {object} args
  * @param {string} args.systemInstruction
  * @param {Array<{role: "user"|"model", parts: Array<{text: string}>}>} args.history
+ * @param {string} [args.model] overrides OPENROUTER_MODEL for this one call (the
+ *   query-rewrite step, OPENROUTER_REWRITE_MODEL — see llm.js).
  * @returns {Promise<string>}
  */
-export async function generateReply({ systemInstruction, history }) {
-  const { apiKey, model } = getConfig();
+export async function generateReply({ systemInstruction, history, model: modelOverride }) {
+  const { apiKey, model: configuredModel } = getConfig();
+  const model = modelOverride || configuredModel;
 
   const data = await withRetry(async () => {
     const res = await fetch(ENDPOINT, {

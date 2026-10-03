@@ -1,0 +1,17 @@
+-- Incremental re-embed on replace/edit/retry (CLAUDE.md §6.10, §6.21).
+--
+-- Hand-written, not generated: `prisma migrate diff` also emits a DROP INDEX for the
+-- HNSW index Prisma cannot see (§6.1). This migration deliberately drops nothing.
+--
+-- embed_hash: SHA-256 (hex) of the EXACT text that was sent to the embedding model for
+-- this chunk (its `embedText`), written together with the vector in ingest.js. It is a
+-- column and not something recomputed from heading + content because a rename rewrites
+-- source_title without re-embedding (§6.10): with the title-prefix scheme on, the stored
+-- vector would describe the OLD title while a recomputed hash described the new one, and
+-- ingest would reuse a vector for text it was never computed from.
+--
+-- NULLABLE with no default on purpose: every existing row has NULL, which ingest treats
+-- as "cannot be reused", so applying this changes nothing until a document is next
+-- ingested or re-embedded. No backfill — the hash of an old chunk's embedText is not
+-- knowable after the fact.
+ALTER TABLE "knowledge_chunks" ADD COLUMN "embed_hash" text;

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { translator, resolveLocale } from "@/lib/i18n";
+import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { getSource, retrySource } from "@/lib/agent/ingest";
 import { enqueueJob } from "@/lib/agent/jobs";
 
@@ -48,6 +49,11 @@ export async function POST(request, context) {
     const tenantId = request.nextUrl.searchParams.get("tenantId");
     if (!tenantId) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
+    }
+
+    const serviceable = await requireServiceableTenant({ tenantId, tr });
+    if (!serviceable.ok) {
+      return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
     const id = await routeId(context);

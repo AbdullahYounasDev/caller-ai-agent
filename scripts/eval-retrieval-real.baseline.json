@@ -1,0 +1,144 @@
+{
+  "categories": {
+    "factual": {
+      "n": 24,
+      "hit1": 0.9166666666666666,
+      "hit3": 1,
+      "hit5": 1,
+      "mrr": 0.9583333333333334,
+      "misses": []
+    },
+    "phrased_loosely": {
+      "n": 11,
+      "hit1": 0.6363636363636364,
+      "hit3": 0.8181818181818182,
+      "hit5": 0.8181818181818182,
+      "mrr": 0.712121212121212,
+      "misses": [
+        {
+          "q": "what's this new connect thing you're building",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "what happens to my stuff if I stop paying",
+          "expect": [
+            "04-returns-and-refund-policy.txt",
+            "06-clinichms-faq.md"
+          ],
+          "best": "nothing"
+        }
+      ]
+    },
+    "cross_language": {
+      "n": 10,
+      "hit1": 1,
+      "hit3": 1,
+      "hit5": 1,
+      "mrr": 1,
+      "misses": []
+    },
+    "off_topic": {
+      "n": 8,
+      "rejectionRate": 0.875,
+      "leaked": [
+        {
+          "q": "What are your flight change fees?",
+          "top": "04-returns-and-refund-policy.txt @ 0.397"
+        }
+      ]
+    },
+    "generic_overview": {
+      "n": 8,
+      "hit1": 0,
+      "hit3": 0,
+      "hit5": 0,
+      "mrr": 0,
+      "misses": [
+        {
+          "q": "tell me about your company",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "what do you do",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "who are you",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "what services do you provide",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "give me an overview of your company",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "what type of services you provide",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "who are you and what do you sell",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        },
+        {
+          "q": "can you tell me what your business does",
+          "expect": [
+            "01-company-overview.md"
+          ],
+          "best": "nothing"
+        }
+      ]
+    },
+    "conflict": {
+      "n": 3,
+      "bothPresentRate": 1,
+      "failures": []
+    },
+    "followup": {
+      "n": 16,
+      "hit1": 1,
+      "hit3": 1,
+      "hit5": 1,
+      "mrr": 1,
+      "misses": []
+    },
+    "followup_offtopic": {
+      "n": 4,
+      "rejectionRate": 1,
+      "leaked": []
+    }
+  },
+  "overall": {
+    "n": 53,
+    "hit1": 0.7358490566037735,
+    "hit3": 0.8113207547169812,
+    "mrr": 0.770440251572327
+  },
+  "followupCount": 6
+}

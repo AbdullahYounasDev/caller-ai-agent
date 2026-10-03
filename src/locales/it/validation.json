@@ -1,5 +1,8 @@
 {
   "tenantId.required": "È necessario specificare un'attività.",
+  "tenantId.invalid": "Quell'identificativo dell'attività non è valido.",
+  "tenant.suspended": "Questo account è sospeso.",
+  "tenant.quotaExceeded": "Limite mensile di messaggi raggiunto.",
   "body.invalid": "La richiesta deve essere un oggetto JSON.",
   "businessName.required": "Inserisci il nome dell'attività.",
   "businessName.tooLong": "Il nome dell'attività non può superare {max} caratteri.",
@@ -39,5 +42,8 @@
   "url.noText": "Non abbiamo trovato testo leggibile su questo sito.",
   "file.scanned": "Sembra un documento scansionato. Stiamo leggendo il testo dalle immagini.",
   "document.notEditable": "I file caricati non si modificano qui. Carica una versione corretta per sostituirlo.",
-  "document.notFailed": "Solo un documento non importato correttamente può essere riprovato."
+  "document.notFailed": "Solo un documento non importato correttamente può essere riprovato.",
+  "chat.messageTooLong": "Il messaggio è troppo lungo. Il limite è {max} caratteri.",
+  "chat.rateLimited": "Stai inviando messaggi più velocemente di quanto riusciamo a elaborarli. Attendi un momento e riprova.",
+  "knowledge.tooManyFiles": "Troppi file in una volta sola. Carica fino a {max} alla volta."
 }

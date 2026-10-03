@@ -1,9 +1,10 @@
 /**
- * Sliding-window rate limiting for public channel endpoints.
+ * Sliding-window rate limiting.
  *
- * ⚠️ NOTHING CALLS THIS YET. It was written for the embeddable widget, which has
- * been removed; it is kept because TELEPHONY needs it and the reasoning below is
- * the expensive part, not the code. Its first caller will be the Twilio webhook.
+ * First wired up on `/api/chat` (§6.18) — a two-layer limit, exactly the
+ * shape described at the bottom of this file. TELEPHONY will be the next
+ * caller, at the Twilio webhook, for the same reason: every message costs a
+ * shared, scarce model quota.
  *
  * ⚠️ IN-PROCESS, AND THAT IS A REAL LIMITATION. Each Node instance keeps its own
  * counters, so N instances means a caller effectively gets N× the limit. That's
@@ -74,9 +75,12 @@ export function resetRateLimits() {
 /*
  * NO LIMIT CONSTANTS HERE ON PURPOSE. The previous set was named for the widget
  * and, once that channel went, was a dead export inviting reuse at numbers
- * measured for a completely different traffic shape.
+ * measured for a completely different traffic shape. `/api/chat`'s own
+ * constants (§6.18) are NOT reusable defaults either — telephony's traffic
+ * shape (one call = one long conversation, not a human clicking a browser
+ * button) will need its own numbers, measured against its own traffic.
  *
- * THE SHAPE THAT WORKED, for whoever wires telephony: TWO layers.
+ * THE SHAPE THAT WORKED, for whoever wires the next caller: TWO layers.
  *  - A LOOSE per-tenant limit catches "this account's traffic has gone wrong",
  *    but cannot be tight — a busy business legitimately has many callers at once.
  *  - A TIGHT per-conversation limit catches the actual abuse shape, one caller

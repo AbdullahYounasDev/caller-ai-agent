@@ -1,6 +1,9 @@
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
-import { embedText } from "./llm";
-import { chunkDocument } from "./chunk";
+import { embedTexts } from "./llm";
+import { chunksForDocument } from "./prepare";
+import { detectSearchConfig } from "./language";
+import { EMBEDDING_SCHEME_VERSION } from "./embed-scheme";
 import { deleteOriginalFile } from "./storage";
 import { JobCancelledError } from "./jobs";
 
@@ -21,7 +24,148 @@ import { JobCancelledError } from "./jobs";
 /** Chunks are embedded one at a time; this caps how many a single document may
  *  produce, so one enormous upload cannot spend a tenant's whole daily model
  *  quota in a single request. */
-const MAX_CHUNKS_PER_DOCUMENT = 400;
+export const MAX_CHUNKS_PER_DOCUMENT = 400;
+
+/** Chunks per embedding request. This buys LATENCY, not quota — the free tier
+ *  counts per text (§6.20) — and it sets how often a cancel can take effect
+ *  (once per batch, checked BEFORE the request is spent). 16 keeps a request
+ *  small enough to retry cheaply while cutting a 100-chunk document from 100
+ *  round trips to 7. */
+const EMBED_BATCH_SIZE = 16;
+
+/** Identity of "the text we sent to the embedding model" — see embed_hash in the schema. */
+function hashEmbedText(text) {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+/**
+ * The vectors a replace may keep instead of paying for again (§6.21).
+ *
+ * Returns hash → the vector as pgvector's own text ("[0.1,0.2,…]"), which is written
+ * straight back without being parsed into JS numbers, so a reused vector is
+ * bit-identical to the stored one by construction.
+ *
+ * A vector is only ever reused when BOTH hold, and both are enforced in this one
+ * statement rather than checked beforehand:
+ *   - the chunk's embed_hash equals the hash of the new chunk's embedText (same exact
+ *     text, same model — §6.2), and
+ *   - the document is on the CURRENT embedding scheme right now. A vector from another
+ *     scheme version lives in a different space (a taskType rescales distances, a title
+ *     prefix moves every vector), so it must never be mixed in. Joining the source row
+ *     reads the version in the same snapshot as the vectors — a re-embed finishing
+ *     between two separate reads cannot slip a stale one through.
+ * Rows with a NULL hash (everything written before the column existed) never match.
+ *
+ * Best-effort: reuse is an optimisation. If this read fails the document is simply
+ * embedded in full, exactly as before.
+ *
+ * @param {string} sourceId
+ * @param {string[]} hashes
+ * @returns {Promise<Map<string, string>>}
+ */
+async function loadReusableVectors(sourceId, hashes) {
+  try {
+    const rows = await prisma.$queryRaw`
+      SELECT c.embed_hash AS hash, c.embedding::text AS vec
+      FROM ai_engine.knowledge_chunks c
+      JOIN ai_engine.knowledge_sources s ON s.id = c.source_id
+      WHERE c.source_id = ${sourceId}
+        AND s.embedding_scheme = ${EMBEDDING_SCHEME_VERSION}
+        AND c.embed_hash = ANY(${hashes}::text[])
+    `;
+    return new Map(rows.map((r) => [r.hash, r.vec]));
+  } catch (err) {
+    console.warn("[ingest] could not read stored vectors for reuse, embedding everything:", err?.message ?? err);
+    return new Map();
+  }
+}
+
+/**
+ * Embed chunks in batches, in order, reporting progress in CHUNK units — skipping every
+ * chunk whose vector the caller already has (`reusable`, hash → vector text).
+ *
+ * Only DISTINCT texts that are not reusable are sent. Two chunks with identical
+ * embedText (a boilerplate paragraph repeated under the same heading) are one text to
+ * the model and one unit of quota, not two.
+ *
+ * `onProgress` doubles as the cooperative-cancellation checkpoint (§6.14 —
+ * JobContext.report throws JobCancelledError once a cancel is recorded), so it
+ * is called BEFORE every batch request: a cancelled job never spends another
+ * batch's quota. It is per batch rather than per chunk because the count it
+ * writes is a database row update — sixteen of them in a burst after the
+ * response would cost more time than the batching saved. A document with nothing to
+ * embed has no batches; the closing call below is then its only checkpoint, and it
+ * still runs before anything is swapped.
+ *
+ * Nothing is written anywhere here. Callers embed FIRST and swap chunks in
+ * afterwards, in one transaction (§6.10).
+ *
+ * @returns {Promise<{embedded: Array, reusedChunks: number, embeddedTexts: number}>}
+ *   each embedded chunk carries `embedHash` and either `vector` (fresh, number[]) or
+ *   `vectorText` (reused, pgvector text).
+ */
+async function embedChunks(chunks, onProgress, reusable = new Map()) {
+  const embedded = chunks.map((c) => {
+    const embedHash = hashEmbedText(c.embedText);
+    return { ...c, embedHash, vectorText: reusable.get(embedHash) ?? null };
+  });
+  const reusedChunks = embedded.filter((c) => c.vectorText).length;
+
+  // hash → indices still needing a vector, in first-seen order.
+  const pending = new Map();
+  embedded.forEach((c, i) => {
+    if (c.vectorText) return;
+    if (!pending.has(c.embedHash)) pending.set(c.embedHash, []);
+    pending.get(c.embedHash).push(i);
+  });
+  const groups = [...pending.values()];
+
+  let done = reusedChunks;
+  for (let i = 0; i < groups.length; i += EMBED_BATCH_SIZE) {
+    await onProgress?.("embedding", done, chunks.length);
+    const batch = groups.slice(i, i + EMBED_BATCH_SIZE);
+    const vectors = await embedTexts(
+      batch.map((indices) => embedded[indices[0]].embedText),
+      { role: "document" }
+    );
+    batch.forEach((indices, j) => {
+      for (const idx of indices) embedded[idx].vector = vectors[j];
+      done += indices.length;
+    });
+  }
+  await onProgress?.("embedding", done, chunks.length);
+  return { embedded, reusedChunks, embeddedTexts: groups.length };
+}
+
+/**
+ * The replace itself: delete a document's old chunks and insert the new ones.
+ * Always called inside the caller's transaction, so retrieval never sees a
+ * document that is half old and half new.
+ */
+async function writeChunks(tx, { tenantId, sourceId, title, embedded, searchConfig }) {
+  await tx.knowledgeChunk.deleteMany({ where: { sourceId } });
+
+  for (let i = 0; i < embedded.length; i++) {
+    const chunk = embedded[i];
+    // Raw SQL for the vector column — Prisma Client has no vector type.
+    await tx.$executeRaw`
+      INSERT INTO ai_engine.knowledge_chunks
+        (id, tenant_id, source_id, source_title, heading, ordinal, content, embedding, embed_hash, search_config, created_at)
+      VALUES (
+        gen_random_uuid(), ${tenantId}, ${sourceId}, ${title},
+        ${chunk.heading || null}, ${i}, ${chunk.content},
+        ${chunk.vectorText ?? `[${chunk.vector.join(",")}]`}::vector, ${chunk.embedHash}, ${searchConfig}::regconfig, now()
+      )
+    `;
+  }
+}
+
+/** The text-to-chunks step, shared by ingest, retry and re-embed so all of them always embed
+ *  the same way. Lives in prepare.js (title prefix, CSV conversion — embed-scheme.js); the file
+ *  name is what tells it a document is a CSV. */
+function chunksFor(text, title, fileName) {
+  return chunksForDocument({ text, title, fileName });
+}
 
 /**
  * Create a document, or replace it if one with the same title already exists.
@@ -41,8 +185,8 @@ export async function ingestDocument({
   kind = "text",
   file = {},
   // Optional, supplied when running inside a background job. Embedding is the
-  // long part — one network round trip per chunk — so it is reported per chunk
-  // rather than as a single opaque step.
+  // long part — one network round trip per BATCH of chunks — so it is reported
+  // as it goes (in chunk units) rather than as a single opaque step.
   onProgress,
   onSource,
 }) {
@@ -94,7 +238,7 @@ export async function ingestDocument({
 
   try {
     await onProgress?.("chunking", 0, 1);
-    const chunks = chunkDocument(text);
+    const chunks = chunksFor(text, cleanTitle, file.fileName);
     if (!chunks.length) throw new Error("Document produced no chunks");
     if (chunks.length > MAX_CHUNKS_PER_DOCUMENT) {
       throw new Error(
@@ -105,35 +249,36 @@ export async function ingestDocument({
     // Embed BEFORE touching the old chunks. If the model is down or out of
     // quota, the previous version of the document keeps answering questions
     // instead of the business being left with nothing.
-    const embedded = [];
-    for (const chunk of chunks) {
-      embedded.push({ ...chunk, vector: await embedText(chunk.embedText) });
-      await onProgress?.("embedding", embedded.length, chunks.length);
-    }
+    // INCREMENTAL: a chunk whose exact embedText is already stored under the current
+    // scheme keeps its vector (§6.21). A re-upload of an unchanged file, a retry, or an
+    // edit that touched one paragraph then pays only for what actually changed. The old
+    // chunks are only READ here; nothing is deleted until the swap below.
+    const hashes = [...new Set(chunks.map((c) => hashEmbedText(c.embedText)))];
+    const reusable =
+      existing && existing.embeddingScheme === EMBEDDING_SCHEME_VERSION
+        ? await loadReusableVectors(source.id, hashes)
+        : new Map();
+    const { embedded, reusedChunks, embeddedTexts } = await embedChunks(chunks, onProgress, reusable);
 
     await onProgress?.("saving", 1, 1);
     await prisma.$transaction(async (tx) => {
-      // The replace. Same transaction as the insert, so retrieval never sees a
-      // document that is half old and half new.
-      await tx.knowledgeChunk.deleteMany({ where: { sourceId: source.id } });
-
-      for (let i = 0; i < embedded.length; i++) {
-        const chunk = embedded[i];
-        // Raw SQL for the vector column — Prisma Client has no vector type.
-        await tx.$executeRaw`
-          INSERT INTO ai_engine.knowledge_chunks
-            (id, tenant_id, source_id, source_title, heading, ordinal, content, embedding, created_at)
-          VALUES (
-            gen_random_uuid(), ${tenantId}, ${source.id}, ${cleanTitle},
-            ${chunk.heading || null}, ${i}, ${chunk.content},
-            ${`[${chunk.vector.join(",")}]`}::vector, now()
-          )
-        `;
-      }
+      // The keyword index's language is a property of the DOCUMENT (language.js).
+      await writeChunks(tx, {
+        tenantId,
+        sourceId: source.id,
+        title: cleanTitle,
+        embedded,
+        searchConfig: detectSearchConfig(text),
+      });
 
       await tx.knowledgeSource.update({
         where: { id: source.id },
-        data: { status: "ready", chunkCount: embedded.length, error: null },
+        data: {
+          status: "ready",
+          chunkCount: embedded.length,
+          error: null,
+          embeddingScheme: EMBEDDING_SCHEME_VERSION,
+        },
       });
     });
 
@@ -150,6 +295,8 @@ export async function ingestDocument({
       title: cleanTitle,
       chunkCount: embedded.length,
       replaced: Boolean(existing),
+      reusedChunks,
+      embeddedTexts,
     };
   } catch (err) {
     // THIS CATCH MUST NEVER LEAVE THE ROW HALF-CHANGED. Whatever failed —
@@ -337,5 +484,78 @@ export async function retrySource({ tenantId, id, onProgress, onSource }) {
     },
     onProgress,
     onSource,
+  });
+}
+
+/**
+ * Re-embed ONE existing document under the current embedding scheme, from its
+ * stored `content` (§6.10 — content is the original text, so no re-upload and no
+ * Cloudinary). Used by `npm run reembed`.
+ *
+ * Same guarantees as an ordinary replace: it embeds EVERYTHING before touching
+ * a single old chunk, then swaps in one transaction — a quota stop or a crash
+ * mid-document leaves the old chunks fully in place, never a document with none.
+ * Unlike ingestDocument it never marks the row "processing": nothing about the
+ * document changed, and the agent keeps answering from the old chunks until the
+ * swap.
+ *
+ * ⚠️ It must NOT touch `updated_at`. That date is the recency signal the
+ * conflict rule uses to decide which of two disagreeing documents wins (§6.10);
+ * a re-embed is not an edit, and bumping it would quietly promote every
+ * re-embedded document over a newer one it contradicts. So the final write is
+ * raw SQL — Prisma's `@updatedAt` only fires through the client.
+ *
+ * Optimistic: if the document is edited or replaced while this embeds, its own
+ * ingest already used the current scheme, so the swap is skipped.
+ *
+ * @param {object} args
+ * @param {string} args.tenantId
+ * @param {string} args.id
+ * @param {(stage: string, done: number, total: number) => Promise<void>} [args.onProgress]
+ * @returns {Promise<{status: "reembedded", chunks: number}|{status: "skipped"|"superseded", reason: string}>}
+ */
+export async function reembedSource({ tenantId, id, onProgress }) {
+  const source = await getSource({ tenantId, id });
+  if (!source) return { status: "skipped", reason: "document no longer exists" };
+  if (source.status !== "ready") return { status: "skipped", reason: `status is "${source.status}"` };
+  if (source.embeddingScheme >= EMBEDDING_SCHEME_VERSION) {
+    return { status: "skipped", reason: "already on the current scheme" };
+  }
+
+  const chunks = chunksFor(source.content, source.title, source.fileName);
+  if (!chunks.length) return { status: "skipped", reason: "content produces no chunks" };
+  if (chunks.length > MAX_CHUNKS_PER_DOCUMENT) {
+    return { status: "skipped", reason: `${chunks.length} chunks, over the ${MAX_CHUNKS_PER_DOCUMENT} limit` };
+  }
+
+  // No `reusable` here, deliberately: this runs only for a document BEHIND the current
+  // scheme, and every one of its stored vectors is from the wrong one (§6.2).
+  const { embedded } = await embedChunks(chunks, onProgress);
+
+  return prisma.$transaction(async (tx) => {
+    const fresh = await tx.knowledgeSource.findUnique({
+      where: { id },
+      select: { updatedAt: true, embeddingScheme: true },
+    });
+    if (
+      !fresh ||
+      fresh.updatedAt.getTime() !== source.updatedAt.getTime() ||
+      fresh.embeddingScheme >= EMBEDDING_SCHEME_VERSION
+    ) {
+      return { status: "superseded", reason: "edited or re-ingested while it was being embedded" };
+    }
+    await writeChunks(tx, {
+      tenantId,
+      sourceId: id,
+      title: source.title,
+      embedded,
+      searchConfig: detectSearchConfig(source.content),
+    });
+    await tx.$executeRaw`
+      UPDATE ai_engine.knowledge_sources
+      SET chunk_count = ${embedded.length}, embedding_scheme = ${EMBEDDING_SCHEME_VERSION}
+      WHERE id = ${id}
+    `;
+    return { status: "reembedded", chunks: embedded.length };
   });
 }

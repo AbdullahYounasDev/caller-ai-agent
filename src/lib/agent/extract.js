@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 import { looksScanned } from "./ocr";
+import { STRUCTURED_TABLES } from "./embed-scheme";
 
 /**
  * Turn an uploaded file into plain text.
@@ -168,7 +169,10 @@ async function extractPdf(buffer) {
   });
   const doc = await loadingTask.promise;
 
-  const pages = [];
+  // Collect every page's lines WITH the font height each was rendered at,
+  // before deciding what counts as a heading — that decision needs the
+  // WHOLE document's typical body size, not just one page's.
+  const pageLines = [];
   for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber++) {
     const page = await doc.getPage(pageNumber);
     const content = await page.getTextContent();
@@ -176,6 +180,13 @@ async function extractPdf(buffer) {
     let line = "";
     const lines = [];
     let lastY = null;
+    let lineHeight = null;
+
+    const flushLine = () => {
+      const trimmed = line.trim();
+      line = "";
+      if (trimmed) lines.push({ text: trimmed, height: lineHeight });
+    };
 
     for (const item of content.items) {
       if (!("str" in item)) continue;
@@ -183,19 +194,16 @@ async function extractPdf(buffer) {
       // A vertical jump means a new line. Without this every page collapses
       // into a single run-on paragraph and the chunker has nothing to work with.
       if (lastY !== null && typeof y === "number" && Math.abs(y - lastY) > 2) {
-        lines.push(line.trim());
-        line = "";
+        flushLine();
       }
       line += item.str;
-      if (item.hasEOL) {
-        lines.push(line.trim());
-        line = "";
-      }
+      if (typeof item.height === "number" && item.height > 0) lineHeight = item.height;
+      if (item.hasEOL) flushLine();
       if (typeof y === "number") lastY = y;
     }
-    if (line.trim()) lines.push(line.trim());
+    flushLine();
 
-    pages.push(lines.filter(Boolean).join("\n"));
+    pageLines.push(lines);
     page.cleanup();
   }
 
@@ -206,6 +214,52 @@ async function extractPdf(buffer) {
   // "we couldn't read that file" for a file that was read perfectly.
   await loadingTask.destroy();
 
+  // HEADINGS, FROM FONT SIZE. pdfjs never tells us "this line is a heading",
+  // but it does tell us how tall each line was rendered — and a real
+  // document's headings are reliably set in a LARGER size than its own body
+  // text (verified against an actual business PDF: title 22pt, every
+  // numbered section heading 15pt, all body text 11pt, with no exceptions).
+  // A vertical-GAP heuristic was tried first and rejected: an ordinary
+  // wrapped line and a genuine section break rendered with near-identical
+  // gaps in that same PDF, so gap alone could not tell them apart and mostly
+  // just planted blank lines mid-sentence. Font size does not have that
+  // problem — it is closer to what a heading structurally IS. Lines from
+  // each larger-than-body size TIER are promoted to a markdown heading
+  // (largest tier "#", next "##", …), which chunk.js's toSections() already
+  // parses UNAMBIGUOUSLY — markdown syntax needs no blank-line-after check,
+  // unlike the plain-text heuristic that PDFs could never satisfy in the
+  // first place (see the old comment this replaced, and §6.4). A PDF with no
+  // distinct heading size at all (rare, but possible — e.g. headings that are
+  // only bolded, not enlarged) simply yields no detected headings, exactly as
+  // before: this is a best-effort structural read, not a guarantee.
+  const heightCounts = new Map();
+  for (const lines of pageLines) {
+    for (const { height } of lines) {
+      if (!height) continue;
+      heightCounts.set(height, (heightCounts.get(height) ?? 0) + 1);
+    }
+  }
+  let bodyHeight = 0;
+  let bodyCount = -1;
+  for (const [height, count] of heightCounts) {
+    if (count > bodyCount) {
+      bodyHeight = height;
+      bodyCount = count;
+    }
+  }
+  const headingTiers = [...heightCounts.keys()]
+    .filter((h) => h > bodyHeight * 1.15)
+    .sort((a, b) => b - a);
+
+  const pages = pageLines.map((lines) =>
+    lines
+      .map(({ text, height }) => {
+        const tier = headingTiers.indexOf(height);
+        return tier === -1 ? text : `${"#".repeat(Math.min(tier + 1, 6))} ${text}`;
+      })
+      .join("\n")
+  );
+
   // The page count travels WITH the text. "Is this scanned?" is a question
   // about characters PER PAGE — a 40-page scan with a stray header is not
   // empty, it is empty-per-page — and the caller cannot judge that without it.
@@ -214,8 +268,9 @@ async function extractPdf(buffer) {
 
 /** DOCX via mammoth, which understands the OpenXML structure rather than
  *  scraping the zip — so headings survive as headings for the chunker. */
-async function extractDocx(buffer) {
+async function extractDocx(buffer, structuredTables) {
   const mammoth = (await import("mammoth")).default ?? (await import("mammoth"));
+  if (structuredTables) return extractDocxStructured(mammoth, buffer);
   // Markdown rather than raw text: it preserves heading levels as `#`, which
   // the heading-aware chunker then splits on. Raw text would throw that away.
   const result = await mammoth.convertToMarkdown({ buffer: Buffer.from(buffer) });
@@ -229,14 +284,31 @@ async function extractDocx(buffer) {
 }
 
 /**
+ * DOCX with its tables kept as tables (STRUCTURED_TABLES, §6.23). mammoth's markdown output has
+ * no table syntax — every cell becomes a paragraph — so this reads its HTML instead: tables are
+ * pulled out and rendered as self-describing rows, and everything around them (headings, lists)
+ * goes through the same HTML → text step the website crawler uses, so a heading is still a "#".
+ * Imported lazily, like every heavy dependency here, so a tenant who never uploads a DOCX
+ * never loads any of it.
+ */
+async function extractDocxStructured(mammoth, buffer) {
+  const { extractHtmlTables } = await import("./tables");
+  const { htmlToText } = await import("./crawl");
+  const { value } = await mammoth.convertToHtml({ buffer: Buffer.from(buffer) });
+  const { html, blocks } = extractHtmlTables(value);
+  return htmlToText(html).replace(/@@TABLE_(\d+)@@/g, (_m, i) => blocks[Number(i)] ?? "");
+}
+
+/**
  * Extract text from an uploaded file.
  *
  * @param {object} args
  * @param {ArrayBuffer} args.buffer
  * @param {string} args.fileName
+ * @param {boolean} [args.structuredTables] override of STRUCTURED_TABLES — tests and audits only
  * @returns {Promise<{ok: true, text: string} | {ok: false, reason: string}>}
  */
-export async function extractText({ buffer, fileName }) {
+export async function extractText({ buffer, fileName, structuredTables = STRUCTURED_TABLES }) {
   const ext = extensionOf(fileName);
 
   try {
@@ -247,7 +319,7 @@ export async function extractText({ buffer, fileName }) {
       text = pdf.text;
       pageCount = pdf.pageCount;
     } else if (ext === ".docx") {
-      text = await extractDocx(buffer);
+      text = await extractDocx(buffer, structuredTables);
     } else {
       // txt / md / csv — decoded as UTF-8. `fatal: false` so a file with a
       // stray byte still yields its readable text instead of failing entirely.
@@ -278,7 +350,8 @@ export async function extractText({ buffer, fileName }) {
  * Blank lines are load-bearing here — they are what the chunker uses to find
  * paragraph boundaries — so runs of them are collapsed to two, never removed.
  */
-function normalize(text) {
+// Exported for tests/extract.test.js (pure string -> string).
+export function normalize(text) {
   return String(text ?? "")
     .replace(/\r\n?/g, "\n")
     .replace(/ /g, "")
