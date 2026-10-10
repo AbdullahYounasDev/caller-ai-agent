@@ -1,0 +1,33 @@
+Nyron Software Solutions
+
+Returns, Refunds and Cancellation Policy
+
+Free Trial
+
+Every ClinicHMS and StorePulse plan includes a 14 day free trial. No credit card is required to start a trial, and canceling before the trial ends does not create any charge.
+
+Monthly Subscriptions
+
+Monthly subscriptions can be canceled at any time from the account settings page. Canceling stops future billing, but Nyron does not refund the current billing period once it has started.
+
+Annual Subscriptions
+
+Customers who pay annually have a 30 day money back guarantee starting from the purchase date. Requests made after day 30 are not refunded, although the subscription can still be canceled to stop the next renewal.
+
+Plan Changes
+
+Upgrading a plan takes effect immediately and the difference is charged on a pro rated basis for the remainder of the current cycle. Downgrading a plan takes effect at the start of the next billing cycle, so the customer keeps the higher tier features until then.
+
+Hardware Returns
+
+Barcode scanner bundles and other hardware add ons purchased through Nyron can be returned within 30 days of delivery if they are unused and in their original packaging. Return shipping is paid by the customer unless the item arrived defective, in which case Nyron covers the cost.
+
+Data After Cancellation
+
+Exported account data remains available for download for 90 days after a subscription is canceled. After 90 days the data is permanently deleted in line with GDPR requirements.
+
+Support Contact
+
+Email: support@nyronsoftware.com
+Phone: +39 02 1234 5678
+Website: www.nyronsoftware.com

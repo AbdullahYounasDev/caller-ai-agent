@@ -47,21 +47,50 @@ const MIN_PAGE_CHARS = 200;
 const USER_AGENT =
   "CallerAIAgent/1.0 (+website knowledge indexing; contact the site owner who enabled this)";
 
+/** An IPv6 address as eight 16-bit groups, or null. Handles "::", a trailing dotted
+ *  IPv4 and a %zone suffix. */
+function expandV6(ip) {
+  let s = ip.toLowerCase().split("%")[0];
+  const dotted = /(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(s);
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(1).map(Number);
+    if ([a, b, c, d].some((n) => n > 255)) return null;
+    s = s.slice(0, dotted.index) + ((a << 8) | b).toString(16) + ":" + ((c << 8) | d).toString(16);
+  }
+  const halves = s.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(":") : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  const groups = [...head, ...Array(Math.max(fill, 0)).fill("0"), ...tail].map((h) => parseInt(h, 16));
+  return groups.length === 8 && groups.every((n) => Number.isInteger(n) && n >= 0 && n <= 0xffff) ? groups : null;
+}
+
 /**
  * Private, loopback, link-local and reserved ranges. The link-local block in
  * particular (169.254.0.0/16) is where every major cloud puts its instance
  * metadata service — the highest-value target for an SSRF and the reason this
  * list is not optional.
  */
-function isBlockedAddress(ip) {
+// Exported for tests/crawl.test.js: the SSRF verdict is testable on bare addresses,
+// with no DNS and no network.
+export function isBlockedAddress(ip) {
   if (isIP(ip) === 6) {
-    const v6 = ip.toLowerCase();
-    if (v6 === "::1" || v6 === "::") return true;
-    if (v6.startsWith("fc") || v6.startsWith("fd")) return true; // unique local
-    if (v6.startsWith("fe80")) return true; // link-local
-    // IPv4-mapped (::ffff:127.0.0.1) — check the embedded v4 address.
-    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(v6);
-    if (mapped) return isBlockedAddress(mapped[1]);
+    // Judged on the 8 numeric groups, not on spellings of the text: the same address
+    // is "::ffff:127.0.0.1", "::ffff:7f00:1" and "0:0:0:0:0:ffff:7f00:1", and URL
+    // parsing hands us the HEX form, which a dotted-only pattern let straight through.
+    const g = expandV6(ip);
+    if (!g) return true; // unparseable → fail closed
+    const v4 = (hi, lo) => `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    if (g.every((n) => n === 0)) return true; // ::
+    if (g.slice(0, 5).every((n) => n === 0) && g[5] === 0xffff) return isBlockedAddress(v4(g[6], g[7])); // IPv4-mapped
+    if (g.slice(0, 6).every((n) => n === 0)) return isBlockedAddress(v4(g[6], g[7])); // ::1, IPv4-compatible
+    if (g[0] === 0x64 && g[1] === 0xff9b && g.slice(2, 6).every((n) => n === 0)) return isBlockedAddress(v4(g[6], g[7])); // NAT64
+    if (g[0] === 0x2002) return isBlockedAddress(v4(g[1], g[2])); // 6to4
+    if ((g[0] & 0xfe00) === 0xfc00) return true; // unique local
+    if ((g[0] & 0xffc0) === 0xfe80) return true; // link-local fe80::/10
+    if ((g[0] & 0xffc0) === 0xfec0) return true; // site-local (deprecated, still routed internally)
+    if ((g[0] & 0xff00) === 0xff00) return true; // multicast
     return false;
   }
 
@@ -109,7 +138,11 @@ export async function checkUrl(raw) {
   // on a name that could be anything. A literal IP is checked directly.
   let address;
   try {
-    address = isIP(url.hostname) ? url.hostname : (await lookup(url.hostname)).address;
+    // new URL() keeps the brackets on an IPv6 literal ("[::1]"), and isIP("[::1]") is 0 —
+    // so a literal used to fall through to a DNS lookup of the string "[::1]". Strip them
+    // so the verdict is made on the address itself.
+    const host = url.hostname.replace(/^\[|\]$/g, "");
+    address = isIP(host) ? host : (await lookup(host)).address;
     if (isBlockedAddress(address)) return { ok: false, reason: "blockedAddress" };
   } catch {
     return { ok: false, reason: "unreachable" };
@@ -297,19 +330,28 @@ export function htmlToText(html) {
   return normalizeText(stripTags(text));
 }
 
-function stripTags(value) {
+// Exported for tables.js (DOCX tables are HTML cells too).
+export function stripTags(value) {
   return String(value).replace(/<[^>]+>/g, " ");
 }
 
-function decodeEntities(value) {
+// String.fromCodePoint THROWS on anything above 0x10FFFF, and a hostile page can say
+// "&#99999999999;". One bad page must not abort a crawl, so an invalid reference (or a
+// lone surrogate) is left as written, like an unknown named entity.
+function codePointOrSelf(match, code) {
+  if (!Number.isInteger(code) || code > 0x10ffff || (code >= 0xd800 && code <= 0xdfff)) return match;
+  return String.fromCodePoint(code);
+}
+
+export function decodeEntities(value) {
   const named = {
     amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " ",
     eacute: "é", egrave: "è", agrave: "à", ograve: "ò", ugrave: "ù",
     hellip: "…", mdash: "—", ndash: "–", euro: "€", pound: "£", deg: "°",
   };
   return value
-    .replace(/&#(\d+);/g, (_m, code) => String.fromCodePoint(Number(code)))
-    .replace(/&#x([0-9a-f]+);/gi, (_m, code) => String.fromCodePoint(parseInt(code, 16)))
+    .replace(/&#(\d+);/g, (m, code) => codePointOrSelf(m, Number(code)))
+    .replace(/&#x([0-9a-f]+);/gi, (m, code) => codePointOrSelf(m, parseInt(code, 16)))
     .replace(/&([a-z]+);/gi, (m, name) => named[name.toLowerCase()] ?? m);
 }
 

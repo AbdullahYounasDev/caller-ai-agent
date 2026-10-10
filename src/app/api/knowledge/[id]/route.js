@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { translator, resolveLocale } from "@/lib/i18n";
+import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { isEditable } from "@/lib/agent/extract";
 import {
   getSource,
@@ -73,6 +74,13 @@ export async function PUT(request, context) {
     const tenantId = request.nextUrl.searchParams.get("tenantId");
     if (!tenantId) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
+    }
+
+    // Mutates the tenant's knowledge — see the shared check's doc comment
+    // (registry.js) for why this lives here instead of a bespoke branch.
+    const serviceable = await requireServiceableTenant({ tenantId, tr });
+    if (!serviceable.ok) {
+      return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
     const id = await routeId(context);
@@ -168,6 +176,11 @@ export async function DELETE(request, context) {
     const tenantId = request.nextUrl.searchParams.get("tenantId");
     if (!tenantId) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
+    }
+
+    const serviceable = await requireServiceableTenant({ tenantId, tr });
+    if (!serviceable.ok) {
+      return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
     const removed = await deleteSource({ tenantId, id: await routeId(context) });

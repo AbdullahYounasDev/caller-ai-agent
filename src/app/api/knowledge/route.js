@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { translator, resolveLocale } from "@/lib/i18n";
+import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { ingestDocument, listSources } from "@/lib/agent/ingest";
 import { crawlSite, pagesToDocument } from "@/lib/agent/crawl";
 import { enqueueJob } from "@/lib/agent/jobs";
@@ -90,6 +91,17 @@ export async function POST(request) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
     }
 
+    // One check here covers all three POST shapes below (upload/crawl/typed
+    // text) — §4 says tenant-state logic belongs in exactly one place, not
+    // once per shape. Also enforces tenantId's SHAPE, closing the path this
+    // handler is the only route that can actually reach: uploads flow through
+    // handleUploads into storage.js's Cloudinary folder, built by string
+    // interpolation (`caller-ai-agent/${tenantId}`) rather than a safe join.
+    const serviceable = await requireServiceableTenant({ tenantId, tr });
+    if (!serviceable.ok) {
+      return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
+    }
+
     const contentType = request.headers.get("content-type") ?? "";
 
     // AWAITED, not just returned: `return handleTypedText(...)` inside a try
@@ -119,6 +131,12 @@ export async function POST(request) {
   }
 }
 
+/** Concurrency is 1 (§6.6) — one job per file all lands in the SAME queue, so
+ *  an unbounded file count in a single request could queue hundreds of jobs
+ *  ahead of every other tenant's next upload. 20 covers "upload a folder of
+ *  documents" comfortably without letting one request monopolize the queue. */
+const MAX_FILES_PER_UPLOAD = 20;
+
 /**
  * MANY FILES AT ONCE.
  *
@@ -136,6 +154,12 @@ async function handleUploads({ request, tenantId, tr }) {
 
   if (!files.length) {
     return NextResponse.json({ error: tr("validation:file.required") }, { status: 400 });
+  }
+  if (files.length > MAX_FILES_PER_UPLOAD) {
+    return NextResponse.json(
+      { error: tr("validation:knowledge.tooManyFiles", { vars: { max: MAX_FILES_PER_UPLOAD } }) },
+      { status: 400 }
+    );
   }
 
   const accepted = [];

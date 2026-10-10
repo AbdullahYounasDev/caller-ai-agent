@@ -1,6 +1,7 @@
 import * as gemini from "./gemini";
 import * as openrouter from "./openrouter";
 import { isProviderFailure } from "./retry";
+import { createCircuitBreaker, runGuarded } from "./breaker";
 
 /**
  * ███ THE LLM SEAM ███
@@ -25,7 +26,8 @@ import { isProviderFailure } from "./retry";
  * moves.
  *
  * Changing the embedding model means changing the column AND re-embedding every
- * existing row in the same migration. See §5.5 of CLAUDE.md.
+ * existing row in the same migration. See §6.2 of CLAUDE.md (which also covers the
+ * smaller changes — title prefix, taskType — that need a re-embed and a re-measured threshold).
  * ─────────────────────────────────────────────────────────────────────────
  *
  * CONFIG
@@ -118,11 +120,29 @@ async function withProviderFallback(call, label, onProvider) {
 
 /**
  * Embed text for the RAG pipeline. ALWAYS Gemini — see the rule above.
+ *
+ * `role` is REQUIRED and says which side of retrieval the text is on:
+ * "document" for a chunk being stored, "query" for a question being searched.
+ * It is not a provider argument — there is still only one provider. Whether it
+ * reaches the API as a Gemini taskType is decided in embed-scheme.js.
+ *
  * @param {string} text
+ * @param {{role: "document"|"query"}} options
  * @returns {Promise<number[]>} a 768-dimension vector
  */
-export function embedText(text) {
-  return gemini.embedText(text);
+export function embedText(text, options) {
+  return gemini.embedText(text, options);
+}
+
+/**
+ * Embed many texts in one request (see gemini.embedTexts: faster, NOT cheaper —
+ * the free quota is per text).
+ * @param {string[]} texts
+ * @param {{role: "document"|"query"}} options
+ * @returns {Promise<number[][]>}
+ */
+export function embedTexts(texts, options) {
+  return gemini.embedTexts(texts, options);
 }
 
 export const EMBEDDING_DIMENSIONS = gemini.EMBEDDING_DIMENSIONS;
@@ -164,6 +184,78 @@ export function generateReplyStream({ onProvider, ...args }) {
     onProvider
   );
 }
+
+// ── THE QUERY-REWRITE CALL (§6.19) ──────────────────────────────────────────
+// An optional, latency-sensitive model call that is not the customer's reply. It gets
+// its own budget, its own (optional) model and a circuit breaker, because a degraded
+// provider must cost it nothing rather than 3 seconds a turn.
+
+/**
+ * Consecutive rewrite failures or timeouts before the rewrite stops being attempted.
+ * Three, not one: withRetry already absorbs the odd 503 (about one call in five during
+ * live runs), so a single failure says nothing; three in a row means the provider is
+ * actually down or out of quota, and each further attempt would just burn 3s.
+ */
+export const REWRITE_BREAKER_THRESHOLD = 3;
+
+/**
+ * How long the rewrite is skipped once the breaker opens. A minute is long enough for a
+ * per-MINUTE free-tier rate limit to clear and short enough that a recovered provider
+ * is back in use quickly. A daily quota that stays exhausted costs one probe (one turn
+ * waiting up to the rewrite budget) per minute — vs. every triggered turn before.
+ */
+export const REWRITE_BREAKER_COOLDOWN_MS = 60_000;
+
+const rewriteBreaker = createCircuitBreaker({
+  threshold: REWRITE_BREAKER_THRESHOLD,
+  cooldownMs: REWRITE_BREAKER_COOLDOWN_MS,
+});
+
+/**
+ * The model the rewrite should use on one provider, or undefined for "the same model the
+ * chat uses" — which is what happens unless an operator sets GEMINI_REWRITE_MODEL /
+ * OPENROUTER_REWRITE_MODEL, so behaviour is unchanged by default. A smaller, faster
+ * model is the point; on the Gemini free tier a separate model also has its OWN daily
+ * quota, so rewrites stop competing with replies for it.
+ *
+ * @param {string} providerName "gemini" | "openrouter"
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {string|undefined}
+ */
+export function rewriteModelFor(providerName, env = process.env) {
+  const value = providerName === "openrouter" ? env.OPENROUTER_REWRITE_MODEL : env.GEMINI_REWRITE_MODEL;
+  return value?.trim() || undefined;
+}
+
+/**
+ * Generate the rewrite: same provider chain and fallback as every other call, but under
+ * a hard timeout and the circuit breaker above. Throws CircuitOpenError instantly while
+ * the circuit is open, CallTimeoutError after `timeoutMs`, otherwise whatever the
+ * provider threw. Callers fail soft on all three (query.js).
+ *
+ * NOTE a timed-out call is abandoned, not cancelled: it keeps running (and keeps
+ * retrying inside withRetry) in the background and may still spend its quota.
+ *
+ * @param {object} args
+ * @param {string} args.systemInstruction
+ * @param {Array<{role: "user"|"model", parts: Array<{text: string}>}>} args.history
+ * @param {number} args.timeoutMs
+ * @returns {Promise<string>}
+ */
+export function generateRewrite({ systemInstruction, history, timeoutMs }) {
+  return runGuarded(
+    rewriteBreaker,
+    () =>
+      withProviderFallback(
+        (provider, name) => provider.generateReply({ systemInstruction, history, model: rewriteModelFor(name) }),
+        "rewrite"
+      ),
+    { timeoutMs }
+  );
+}
+
+/** For logs and the debug route: the rewrite breaker's current state. */
+export const rewriteBreakerState = () => rewriteBreaker.snapshot();
 
 /** For logging and the admin harness — the whole configured chain, regardless
  *  of which link actually answers any given request (see the per-call

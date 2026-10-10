@@ -4,7 +4,8 @@ import { prisma } from "@/lib/db";
  * BACKGROUND INGEST QUEUE.
  *
  * Importing a document is not a request-response operation. A 40-page PDF is
- * thirty-odd embedding calls; a scanned one adds OCR on top, which is seconds
+ * thirty-odd chunks to embed (batched 16 to a request, still seconds of waiting);
+ * a scanned one adds OCR on top, which is seconds
  * per page. Done inline that is an HTTP request held open for minutes, a
  * business watching a spinner with no idea whether anything is happening, and a
  * proxy timeout that kills the upload halfway with no way to tell.
@@ -48,8 +49,8 @@ const STALE_AFTER_MS = 5 * 60 * 1000;
  * bar only ever moves forward — a bar that jumps backwards reads as a bug even
  * when the work is fine.
  *
- * Embedding dominates because it genuinely does: one network round trip per
- * chunk. OCR, when it happens, is slower still and gets its own span.
+ * Embedding dominates because it genuinely does: one embedding per chunk, sent
+ * 16 to a request. OCR, when it happens, is slower still and gets its own span.
  */
 const STAGES = {
   queued: { start: 0, end: 2 },
@@ -73,6 +74,16 @@ let draining = false;
  * threaded through crawl/OCR/embedding separately.
  */
 const cancelledJobIds = new Set();
+
+/**
+ * Lets cancelJob() learn, near-instantly, that a job it just asked to stop
+ * has instead already finished on its own — see the race explained at
+ * cancelJob() below. Keyed by job id; drain() creates the entry the moment a
+ * job starts, resolves it with that job's OWN final row the moment drain()
+ * reaches a terminal state for it, and always removes it afterward.
+ * @type {Map<string, Promise<object|null>>}
+ */
+const jobSettlers = new Map();
 
 /** Thrown from `JobContext.report()` when its job has been cancelled, and left
  *  to propagate out of whatever loop was mid-page or mid-chunk. Callers that
@@ -176,6 +187,8 @@ async function drain() {
     while (queue.length) {
       const item = queue.shift();
       const ctx = new JobContext(item.id);
+      let resolveSettled;
+      jobSettlers.set(item.id, new Promise((resolve) => { resolveSettled = resolve; }));
 
       try {
         await prisma.ingestJob.update({
@@ -190,7 +203,7 @@ async function drain() {
 
         const result = await item.run(ctx);
 
-        await prisma.ingestJob.update({
+        const finalRow = await prisma.ingestJob.update({
           where: { id: item.id },
           data: {
             status: "done",
@@ -203,6 +216,11 @@ async function drain() {
             error: null,
           },
         });
+        // Tells a cancelJob() call that raced against this exact completion
+        // what actually happened, instead of it confidently reporting
+        // "cancelled" for an import that, in fact, fully succeeded a moment
+        // later (see cancelJob()).
+        resolveSettled(finalRow);
       } catch (err) {
         if (err instanceof JobCancelledError) {
           // cancelJob() already set this job's row to "cancelled" and
@@ -210,13 +228,14 @@ async function drain() {
           // partial row, chunks or Cloudinary upload this attempt produced —
           // there is nothing left to record here.
           cancelledJobIds.delete(item.id);
+          resolveSettled(null);
           continue;
         }
 
         console.error(`[jobs] ${item.id} failed:`, err);
         // The failure is recorded ON the job. A business needs to see which
         // file failed and why, not a toast that vanished while they were away.
-        await prisma.ingestJob
+        const finalRow = await prisma.ingestJob
           .update({
             where: { id: item.id },
             data: {
@@ -225,7 +244,10 @@ async function drain() {
               finishedAt: new Date(),
             },
           })
-          .catch(() => {});
+          .catch(() => null);
+        resolveSettled(finalRow);
+      } finally {
+        jobSettlers.delete(item.id);
       }
     }
   } finally {
@@ -261,20 +283,56 @@ export async function cancelJob(tenantId, jobId) {
   if (!job || job.tenantId !== tenantId) return null;
   if (["done", "failed", "cancelled"].includes(job.status)) return job;
 
-  cancelledJobIds.add(jobId);
-
   const idx = queue.findIndex((q) => q.id === jobId);
   if (idx !== -1) {
     // Still queued — it will never run, so nothing will ever throw
-    // JobCancelledError for it and clear this entry. Do it here instead.
+    // JobCancelledError for it, and nothing is racing to finish it either.
+    // Safe to mark cancelled immediately.
     queue.splice(idx, 1);
-    cancelledJobIds.delete(jobId);
+    return prisma.ingestJob.update({
+      where: { id: jobId },
+      data: { status: "cancelled", error: "Cancelled by user", finishedAt: new Date() },
+    });
   }
 
-  return prisma.ingestJob.update({
-    where: { id: jobId },
+  // Already PROCESSING. Record the request so the job's own next progress
+  // checkpoint (JobContext.report, above) can notice and unwind cooperatively
+  // — but a job can be moments from finishing successfully with no checkpoint
+  // left ahead of it to catch the request at all. Writing "cancelled" here
+  // unconditionally used to let drain() silently overwrite this exact row to
+  // "done" a beat later once item.run() returned — so a caller of this
+  // function got told "cancelled" for an import that, in fact, fully
+  // completed, with no way to tell from the response alone. `jobSettlers`
+  // resolves the INSTANT drain() reaches a terminal state for this job, so
+  // racing against it (bounded, so a genuinely still-running job is not kept
+  // waiting) reports whichever actually happened instead of guessing.
+  cancelledJobIds.add(jobId);
+  const settler = jobSettlers.get(jobId);
+  if (settler) {
+    const settledRow = await Promise.race([
+      settler,
+      new Promise((resolve) => setTimeout(() => resolve(undefined), 300)),
+    ]);
+    if (settledRow) {
+      // drain() already won the race and recorded the real outcome.
+      cancelledJobIds.delete(jobId);
+      return settledRow;
+    }
+  }
+
+  // The write is CONDITIONAL on the job still being unfinished. The row read at the top
+  // of this function can be stale by now: a job that completes during that read (or
+  // during the settler wait above, when no settler existed yet) has already been written
+  // "done" by drain(), and an unconditional update here used to overwrite it with
+  // "cancelled" — the same lie the settler exists to prevent, one round trip earlier.
+  const { count } = await prisma.ingestJob.updateMany({
+    where: { id: jobId, status: { in: ["queued", "processing"] } },
     data: { status: "cancelled", error: "Cancelled by user", finishedAt: new Date() },
   });
+  // Nothing left to cancel: drain() finished first, so no checkpoint will ever clear the
+  // request — clear it here rather than leave the id in the set forever.
+  if (!count) cancelledJobIds.delete(jobId);
+  return prisma.ingestJob.findUnique({ where: { id: jobId } });
 }
 
 /**

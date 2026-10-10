@@ -1,0 +1,21 @@
+-- Language-aware keyword search (CLAUDE.md §6.3).
+--
+-- Hand-written, not generated: `prisma migrate diff` also emits a DROP INDEX for the
+-- HNSW index Prisma cannot see (§6.1), and does not understand a generated column.
+-- This migration deliberately drops nothing.
+--
+-- search_config: the Postgres text-search config this chunk is indexed with, decided
+-- per DOCUMENT at ingest (src/lib/agent/language.js). DEFAULT 'english' is what every
+-- existing row was effectively using, so applying this changes no ranking until
+-- `npm run db:backfill-search` re-labels the Italian documents.
+--
+-- The column is of type regconfig (not text) because a GENERATED column's expression
+-- must be IMMUTABLE and to_tsvector(regconfig, text) is; to_tsvector(text::regconfig, …)
+-- is only STABLE and Postgres refuses it.
+--
+-- content_tsv: precomputed, so a query no longer runs to_tsvector over every
+-- candidate chunk. NO GIN index on purpose: retrieve.js only ever RANKS chunks that
+-- vector search already admitted (§6.3: keyword score must never admit a chunk), it
+-- never filters with `@@`, so nothing would ever use the index — it would only slow writes.
+ALTER TABLE "knowledge_chunks" ADD COLUMN "search_config" regconfig NOT NULL DEFAULT 'english'::regconfig;
+ALTER TABLE "knowledge_chunks" ADD COLUMN "content_tsv" tsvector GENERATED ALWAYS AS (to_tsvector("search_config", "content")) STORED;

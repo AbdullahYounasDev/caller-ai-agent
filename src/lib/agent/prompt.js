@@ -1,5 +1,7 @@
 import { resolveCapabilities } from "./capabilities/catalog";
 import { t, DEFAULT_LOCALE } from "@/lib/i18n";
+import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
+import { humanizeTitle } from "./chunk";
 
 /**
  * Builds the system instruction. This is where a tenant's configuration stops
@@ -70,10 +72,9 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   // --- 1. Who the agent is -------------------------------------------------
   // Identity goes first: it's what the model leans on hardest, and it's the
   // difference between "a generic assistant" and "this business's agent".
+  // What the business DOES lives in the ABOUT THIS BUSINESS block (section 4),
+  // not here — one labelled place the grounding rule can point at (§6.20).
   const identity = [`You are the AI assistant for ${config.businessName}.`];
-  if (config.purpose?.trim()) {
-    identity.push(`What you are here to do, in the business's own words: ${config.purpose.trim()}`);
-  }
   identity.push("Speak as part of the business — say 'we' and 'our', never refer to it in the third person.");
   identity.push("Never state or imply that you are a generic AI model, and never name the technology behind you.");
   sections.push(identity.join(" "));
@@ -110,13 +111,31 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
     );
   }
 
-  // --- 4. Business hours ---------------------------------------------------
+  // --- 4. About this business ----------------------------------------------
+  // The business profile: name + purpose + hours, always in the prompt, whether
+  // or not retrieval found anything. It exists because the most common opening
+  // question on a call — "who are you / what do you do" — often retrieves
+  // NOTHING (§6.20): it has no keyword to match, so it embeds too far from every
+  // chunk to clear MAX_DISTANCE, and that distance cannot be loosened without
+  // letting off-topic questions through (§6.3). Before this block the model HAD
+  // the name and purpose in its identity line, but the grounding rule told it to
+  // answer only from reference material, so it declined.
+  //
+  // Every line is something the owner typed into the config — nothing is
+  // inferred — and the grounding rule below limits the model to restating it.
+  const hasName = config.businessName && config.businessName !== PLACEHOLDER_BUSINESS_NAME;
+  const purpose = config.purpose?.trim();
+  const profile = [];
+  if (hasName) profile.push(`Name: ${config.businessName}`);
+  if (purpose) profile.push(`What we do, in the business's own words: ${purpose}`);
   if (config.hours) {
-    sections.push(
-      `BUSINESS HOURS (timezone ${config.timezone}): ${formatHours(config.hours)}. ` +
+    profile.push(
+      `Business hours (timezone ${config.timezone}): ${formatHours(config.hours)}. ` +
         `Use these when the customer asks when you're open, and never offer a time outside them.`
     );
   }
+  const hasProfile = profile.length > 0;
+  if (hasProfile) sections.push(`ABOUT THIS BUSINESS:\n${profile.join("\n")}`);
 
   // --- 5. What the agent can actually DO -----------------------------------
   const active = resolveCapabilities({
@@ -163,15 +182,32 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   // Citing the document title AND the heading gives the model something
   // specific to name — "our price list says" beats "our records show" — and
   // makes a wrong answer traceable back to the document that caused it.
+  //
+  // THE LABEL SAYS "document", and when more than one document is present a
+  // line above the passages says so out loud. The conflict rule below only works if
+  // the model registers that [1] and [2] are DIFFERENT documents rather than two
+  // paragraphs of one: with the old "(source: …)" label and no such line, a model
+  // shown 179 once and 149 twice tended to treat it as a majority vote and
+  // answer with one number (§6.10).
+  const documents = new Set(chunks.map((c) => c.sourceTitle));
+  const manyDocuments = documents.size > 1;
+  // The label shows a document as a person would say it ("storepulse price list"), not as a
+  // file name ("08-storepulse-price-list-conflict.txt"): the model repeats what it is shown,
+  // and a first live run read the whole file name and its number prefix out to the customer —
+  // unspeakable on a call. If two different documents would humanise to the SAME name
+  // (01-plans.md and 02-plans.md), the raw titles are kept so they stay distinguishable.
+  const spoken = new Map([...documents].map((t) => [t, humanizeTitle(t) || t]));
+  const nameOf = new Set(spoken.values()).size === spoken.size ? spoken : new Map([...documents].map((t) => [t, t]));
   const contextBlock = chunks.length
-    ? chunks
+    ? (manyDocuments
+        ? `NOTE: these passages come from ${documents.size} DIFFERENT documents, named in each label. Different documents can state different values for the same thing.\n\n`
+        : "") +
+      chunks
         .map((c, i) => {
-          const where = c.heading ? `${c.sourceTitle} › ${c.heading}` : c.sourceTitle;
-          // The date is here for the conflict rule below, not for the customer.
-          const updated = c.sourceUpdatedAt
-            ? `, updated ${new Date(c.sourceUpdatedAt).toISOString().slice(0, 10)}`
-            : "";
-          return `[${i + 1}] (source: ${where}${updated})\n${c.content}`;
+          const section = c.heading ? `, section: ${c.heading}` : "";
+          // The date is here for the conflict rule below, written the way it would be said.
+          const updated = c.sourceUpdatedAt ? `, updated ${readableDate(c.sourceUpdatedAt)}` : "";
+          return `[${i + 1}] (document: "${nameOf.get(c.sourceTitle)}"${section}${updated})\n${c.content}`;
         })
         .join("\n\n")
     : // Retrieval returned nothing ABOVE THE RELEVANCE THRESHOLD — which is
@@ -191,25 +227,136 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
       "answer you made up — a wrong answer here becomes the business's problem, not yours."
   );
 
-  // CONFLICTING SOURCES. Businesses keep the same fact in two documents and
-  // correct only one — a price list and an FAQ that disagree. Both retrieve,
-  // both look authoritative, and without a rule the model picks whichever reads
-  // better. Observed in testing: a corrected price lost to a stale one.
-  //
-  // Recency is the only signal that distinguishes them, so it is stated as a
-  // rule rather than left to chance. Saying so out loud also matters: a
-  // customer told "our price list says X, though another document says Y" can
-  // ask, where a silently-picked wrong number just becomes a bad quote.
-  if (chunks.length > 1) {
+  // The ONE exception to "reference material only", and deliberately narrow.
+  // Without it a caller's first question ("who are you?") is declined by an
+  // agent whose own prompt names the business (§6.20). The limits matter as much
+  // as the permission: the profile is a short description, not a catalogue, and
+  // a model allowed to "elaborate" on it produces plausible products and prices
+  // the business never listed — the §6.11 failure through a different door.
+  if (hasProfile) {
     sections.push(
-      "IF TWO SOURCES DISAGREE: prefer the one updated most recently — each is " +
-        "labelled with its date above. Mention that there is a discrepancy rather " +
-        "than quietly choosing, and offer to confirm with the team. Never average " +
-        "two numbers or present a range you were not given."
+      "ABOUT THIS BUSINESS above is always available to you, even when the reference " +
+        "material has nothing relevant. Use it to answer who you are, what the business " +
+        "does and, if given, when it is open. Restate only what it says: never turn it into " +
+        "specific products, services, prices, features, locations or claims it does not " +
+        "name. If it gives no description of what the business does, do not guess one from " +
+        "the business's name. If the customer wants more detail than it gives — what exactly is sold, what " +
+        "it costs — that comes from the reference material only, and if that does not " +
+        "have it, say you don't have it."
+    );
+  }
+
+  // CONFLICTING DOCUMENTS. Businesses keep the same fact in two documents and
+  // correct only one — a price list and a pricing sheet that disagree. Both retrieve,
+  // both look authoritative, and a model left to choose picks whichever reads better
+  // or simply the one that appears more often. Observed in testing: a corrected price
+  // lost to a stale one, and a reply that gave one price and never said another
+  // document existed.
+  //
+  // The rule used to be "prefer the most recently updated one, and mention it", which
+  // has two flaws: it invites the model to resolve the conflict itself (so the
+  // customer is told one number with false confidence), and recency cannot decide
+  // when both documents carry the same date. So it now asks for BOTH values, each
+  // with the document and the date it came from, and a team confirmation: a
+  // customer told "the price list says X, dated A; the pricing sheet says Y, dated B"
+  // can act on it, a silently-picked number just becomes a bad quote.
+  //
+  // WHEN IT IS INCLUDED. Only when the passages come from two or more DIFFERENT
+  // documents — two paragraphs of one document are not a disagreement between
+  // sources — and the last clause tells the model to stay silent when the documents
+  // merely repeat the same value, which is the common case and must not turn every
+  // answer into a discrepancy warning.
+  //
+  // It sits LAST, after the reference block and the grounding rule, where recency
+  // helps it survive the length of the passages. Three sentences, no markdown, no
+  // digits and no file names to read aloud: it is voice-safe (§9.2), which is why the
+  // model is told to say each document by its plain name.
+  if (manyDocuments) {
+    sections.push(
+      "IF DOCUMENTS DISAGREE: when two different documents above give different values for the same " +
+        "thing — a price, a limit, a date — do not pick one: give both values, say which document each " +
+        "came from by its plain name without the file extension and the date it was updated, then offer " +
+        "to have the team confirm. You may say which is newer, but still give both and never average them. " +
+        "If the documents give the same value, just answer normally and say nothing about documents or any discrepancy."
     );
   }
 
   return sections.join("\n\n");
+}
+
+/**
+ * SYSTEM INSTRUCTION for the query-rewrite step (lib/agent/query.js) — NOT the
+ * customer-facing agent prompt. This model call never speaks to a customer; its
+ * only output is a search string handed to retrieval.
+ *
+ * Two rules carry the weight and both exist because of a specific way this goes
+ * wrong, so neither should be softened:
+ *
+ *  - KEEP THE CUSTOMER'S LANGUAGE. The embedding model is multilingual and an
+ *    Italian question already retrieves English documents well (eval:real,
+ *    cross_language, 100% hit@1). A rewrite that quietly translated "E il
+ *    Growth?" into English would not improve that, and would break the one
+ *    thing — mirroring the speaker (§7) — that every downstream step assumes.
+ *  - NEVER ADD FACTS. A rewrite is a search key, not an answer. If the model
+ *    "helpfully" adds a price or a plan name the customer never mentioned, the
+ *    search is steered toward whatever it invented and the grounding rule
+ *    downstream has no way to know the question was bent on the way in.
+ *
+ * The "return it unchanged" clause matters just as much: most messages in a
+ * call are NOT follow-ups, and a new, unrelated question must not be glued onto
+ * the previous topic — that is how an off-topic question starts retrieving a
+ * price list.
+ */
+export function buildQueryRewriteInstruction() {
+  return [
+    "You turn the LATEST customer message of a conversation into ONE standalone search query for a business's knowledge base.",
+    "RULES:",
+    "- Output ONLY the search query: a single line, no quotes, no label, no explanation.",
+    "- Resolve pronouns and elliptical phrasing (\"and the Pro one?\", \"what about Sundays?\", \"is that included?\", \"E il Growth?\") using the earlier conversation, so the query makes sense with no context at all.",
+    "- Use ONLY words, names and facts that already appear in the conversation. Do NOT answer the question. Do NOT add prices, numbers, policies or product details that are not already there. Do NOT guess a product or plan the customer never mentioned.",
+    "- Write the query in THE SAME LANGUAGE as the customer's latest message. Italian stays Italian. Never translate it.",
+    "- If the latest message is already complete and clear on its own, OR it starts a new topic unrelated to the earlier conversation, OR it is only a greeting, thanks or acknowledgement, return it EXACTLY as written.",
+  ].join("\n");
+}
+
+/**
+ * The single user turn sent with the instruction above: the recent conversation
+ * plus the message to rewrite. Each prior turn is truncated — the rewrite only
+ * needs the entities and the topic, and a long assistant answer would just
+ * spend tokens (and latency, on a phone call) re-reading itself.
+ *
+ * @param {object} args
+ * @param {Array<{role: string, content: string}>} args.history prior turns, oldest first
+ * @param {string} args.message the latest customer message
+ */
+export function buildQueryRewriteInput({ history, message }) {
+  const clip = (text) => {
+    const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+    return flat.length > 400 ? `${flat.slice(0, 400)}…` : flat;
+  };
+  const transcript = history
+    .map((m) => `${m.role === "assistant" ? "Assistant" : "Customer"}: ${clip(m.content)}`)
+    .join("\n");
+
+  return (
+    `CONVERSATION SO FAR:\n${transcript}\n\n` +
+    `LATEST CUSTOMER MESSAGE:\n${clip(message)}\n\n` +
+    "STANDALONE SEARCH QUERY:"
+  );
+}
+
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+/**
+ * 2026-09-29T02:58:57Z -> "29 September 2026". Fixed English month names and UTC on purpose:
+ * the prompt is addressed to the model, which translates it into the customer's language,
+ * and the output must not depend on the server's locale or time zone. An ISO date in the
+ * label gets read aloud as "two thousand twenty-six dash zero nine…".
+ */
+function readableDate(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return "an unknown date";
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
 /**

@@ -20,11 +20,15 @@ import {
  * one-file change instead of a grep-and-pray.
  */
 
+/** What a business is called until it names itself. prompt.js compares against
+ *  this so a placeholder is never presented to the model as a real name. */
+export const PLACEHOLDER_BUSINESS_NAME = "this business";
+
 // Shape returned when a tenant has no agent_configs row yet. An un-onboarded
 // tenant must still get a working (if generic) agent rather than a 500 — a
 // number can be pointed at us before anyone finishes the setup wizard.
 const DEFAULTS = {
-  businessName: "this business",
+  businessName: PLACEHOLDER_BUSINESS_NAME,
   purpose: "",
   tone: "professional",
   timezone: "UTC",

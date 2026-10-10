@@ -1,0 +1,13 @@
+StorePulse Pricing
+
+Lite Plan
+
+59 euro per month. One store, up to 500 SKUs, point of sale integration, basic reporting, email support.
+
+Pro Plan
+
+179 euro per month. Up to 5 stores, unlimited SKUs, multi branch sync, advanced analytics, low stock alerts, email and phone support.
+
+Enterprise Plan
+
+Custom pricing. Unlimited stores, full API access, a dedicated integration engineer, 24 by 7 support.

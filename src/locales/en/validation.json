@@ -1,5 +1,8 @@
 {
   "tenantId.required": "A business must be specified.",
+  "tenantId.invalid": "That business identifier isn't valid.",
+  "tenant.suspended": "This account is suspended.",
+  "tenant.quotaExceeded": "Monthly message limit reached.",
   "body.invalid": "The request must be a JSON object.",
   "businessName.required": "Enter a business name.",
   "businessName.tooLong": "Business name must be {max} characters or fewer.",
@@ -39,5 +42,8 @@
   "url.noText": "We could not find any readable text on that website.",
   "file.scanned": "This looks like a scanned document. We are reading the text from the images.",
   "document.notEditable": "Uploaded files cannot be edited here. Upload a corrected version to replace it.",
-  "document.notFailed": "Only a document that failed to import can be retried."
+  "document.notFailed": "Only a document that failed to import can be retried.",
+  "chat.messageTooLong": "That message is too long. The limit is {max} characters.",
+  "chat.rateLimited": "You're sending messages faster than we can process them. Please wait a moment and try again.",
+  "knowledge.tooManyFiles": "Too many files at once. Upload up to {max} at a time."
 }

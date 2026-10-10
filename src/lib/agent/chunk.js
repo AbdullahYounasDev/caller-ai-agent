@@ -1,3 +1,5 @@
+import { CHUNK_LOSSLESS } from "./embed-scheme";
+
 /**
  * HEADING-AWARE CHUNKING.
  *
@@ -26,14 +28,14 @@
 /** Target size in characters. Chosen to sit well inside the embedding model's
  *  window while leaving room for the heading prefix, and small enough that five
  *  retrieved chunks don't crowd out the conversation in the prompt. */
-const TARGET_CHARS = 1400;
+export const TARGET_CHARS = 1400;
 /** A chunk below this is usually a stray heading or a one-line fragment; it is
  *  merged into its neighbour rather than embedded on its own, because tiny
  *  chunks match everything weakly and crowd out real answers. */
-const MIN_CHARS = 180;
+export const MIN_CHARS = 180;
 /** Overlap carried between sub-chunks of the SAME section, so a sentence split
  *  across two chunks is still complete in one of them. */
-const OVERLAP_CHARS = 150;
+export const OVERLAP_CHARS = 150;
 
 // A "label: value" line — "Phone: 123", "Email: info@...", "Source: https://…"
 // — reads as short, title-cased and unpunctuated, which is exactly what the
@@ -62,14 +64,19 @@ const URL_OR_EMAIL = /https?:\/\/\S+|www\.\S+|\S+@\S+\.\S+/i;
  * strands it as an unquoted breadcrumb or, if nothing follows before the next
  * real heading, drops it from the document entirely.
  */
-function detectHeading(line, nextLine) {
+// Exported (with hardSplit and mergeRunts) only so tests/chunk.test.js can pin each
+// §6.4 rule on its own; nothing outside this file calls them.
+export function detectHeading(line, nextLine, { endIsBlank = true } = {}) {
   const trimmed = line.trim();
   if (!trimmed) return null;
 
   const md = /^(#{1,6})\s+(.+)$/.exec(trimmed);
   if (md) return { level: md[1].length, text: md[2].trim() };
 
-  const nextIsBlank = nextLine === undefined || nextLine.trim() === "";
+  // `endIsBlank` false (CHUNK_LOSSLESS): nothing after the LAST line is not a blank
+  // line — a "heading" with no body is dropped from the text, so the final line of
+  // a document must stay content (embed-scheme.js, bug 2).
+  const nextIsBlank = nextLine === undefined ? endIsBlank : nextLine.trim() === "";
   if (!nextIsBlank) return null;
 
   // "PRICING", "Opening Hours", "3. Refunds" — but not a sentence, and not a
@@ -98,7 +105,7 @@ function detectHeading(line, nextLine) {
 }
 
 /** Split into sections, each carrying the heading path above it. */
-function toSections(text) {
+function toSections(text, lossless) {
   const lines = text.split(/\r?\n/);
   const sections = [];
   /** @type {{level:number,text:string}[]} */
@@ -113,7 +120,7 @@ function toSections(text) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const heading = detectHeading(line, lines[i + 1]);
+    const heading = detectHeading(line, lines[i + 1], { endIsBlank: !lossless });
     if (heading) {
       flush();
       // Pop headings at the same or deeper level, so "Pricing > Whitening"
@@ -142,7 +149,7 @@ function toSections(text) {
  * piece so a phrase landing right on the cut point isn't orphaned in only one
  * of them.
  */
-function hardSplit(text) {
+export function hardSplit(text) {
   const pieces = [];
   let start = 0;
   while (start < text.length) {
@@ -155,7 +162,7 @@ function hardSplit(text) {
 }
 
 /** Split a too-large body at the cleanest boundary available. */
-function splitBody(body) {
+function splitBody(body, lossless) {
   if (body.length <= TARGET_CHARS) return [body];
 
   const paragraphs = body.split(/\n\s*\n/).filter((p) => p.trim());
@@ -172,7 +179,14 @@ function splitBody(body) {
     // gets split at sentence ends, and only mid-sentence if even that fails.
     if (paragraph.length > TARGET_CHARS) {
       push();
-      const sentences = paragraph.match(/[^.!?\n]+[.!?]+[\s]*|[^.!?\n]+$/g) ?? [paragraph];
+      // The legacy pattern matches only text that ends in . ! ? or at the very end,
+      // so a fragment ending at a newline (hard-wrapped PDF lines, CSV rows) matched
+      // nothing and was DROPPED. The lossless pattern also ends a piece at a newline,
+      // so every character lands in exactly one sentence (embed-scheme.js, bug 1).
+      const sentences =
+        (lossless
+          ? paragraph.match(/[^.!?\n]*(?:[.!?]+\s*|\n+|$)/g)?.filter(Boolean)
+          : paragraph.match(/[^.!?\n]+[.!?]+[\s]*|[^.!?\n]+$/g)) ?? [paragraph];
       let sentenceBuffer = "";
       for (const sentence of sentences) {
         // A SINGLE sentence bigger than the target — a run-on sentence, or a
@@ -230,7 +244,7 @@ function splitBody(body) {
  * means it always lands somewhere instead of becoming a fragment that matches
  * everything weakly.
  */
-function mergeRunts(pieces) {
+export function mergeRunts(pieces) {
   const merged = [];
   for (const piece of pieces) {
     if (piece.length < MIN_CHARS && merged.length) {
@@ -246,18 +260,60 @@ function mergeRunts(pieces) {
   return merged;
 }
 
+const KNOWN_EXTENSION = /\.(md|markdown|txt|pdf|docx?|csv|xlsx?|rtf|html?)$/i;
+
+/**
+ * A title as a person would say it: "12-storepulse-plans.csv" → "storepulse
+ * plans". File names are what most titles are, and an ordering prefix, an
+ * extension and hyphens are noise in an embedding — the numeric prefix worst of
+ * all, being the first thing the vector sees. Only a SHORT number glued on with
+ * a separator is treated as an ordering prefix: "2024 report" keeps its year.
+ *
+ * @param {string} title
+ */
+export function humanizeTitle(title) {
+  return String(title ?? "")
+    .replace(KNOWN_EXTENSION, "")
+    .replace(/^\d{1,3}[-_.](?=\D)/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * The text that gets embedded for one chunk: breadcrumb, blank line, body.
+ * With a `title`, the breadcrumb starts with the document's own name — which
+ * also GIVES A HEADING-LESS DOCUMENT ONE. A CSV has no headings at all, so its
+ * chunks used to be embedded as a bare table fragment ("Plan,Monthly Price…")
+ * that matched generic questions about "services" better than the real About
+ * chunk did (TEST-REPORT §4); the title says what the table IS.
+ */
+function embedTextFor({ title, heading, body }) {
+  const context = title ? humanizeTitle(title) : "";
+  // An H1 that repeats the title ("Nyron Software Solutions" in a file called
+  // nyron-software-solutions.md) would otherwise be said twice.
+  const repeats = context && heading && heading.toLowerCase().startsWith(context.toLowerCase());
+  const breadcrumb = [repeats ? "" : context, heading].filter(Boolean).join(" > ");
+  return breadcrumb ? `${breadcrumb}\n\n${body}` : body;
+}
+
 /**
  * Chunk a document.
  *
  * @param {string} text
+ * @param {{title?: string, lossless?: boolean}} [options] pass the document's title
+ *   to carry it into `embedText` (ingest does so only while EMBED_DOCUMENT_TITLE is
+ *   on, see embed-scheme.js). Omitted → heading path only. `lossless` defaults to
+ *   CHUNK_LOSSLESS; only tests pass it explicitly, to pin both modes.
  * @returns {Array<{heading: string, content: string, embedText: string}>}
  *   `content` is what a human reads back; `embedText` is what gets embedded —
  *   the same text with its heading path prepended. They differ on purpose: the
  *   heading helps the vector match, but repeating it in the prompt would waste
- *   context and read oddly when the agent quotes the passage.
+ *   context and read oddly when the agent quotes the passage. `heading` and
+ *   `content` never include the title — only `embedText` does.
  */
-export function chunkDocument(text) {
-  const sections = toSections(String(text ?? ""));
+export function chunkDocument(text, { title, lossless = CHUNK_LOSSLESS } = {}) {
+  const sections = toSections(String(text ?? ""), lossless);
   const out = [];
 
   for (const section of sections) {
@@ -265,7 +321,7 @@ export function chunkDocument(text) {
     // backward for any other) — see mergeRunts. Only a section that is
     // NOTHING BUT a single runt piece can still reach the loop below still
     // under MIN_CHARS, which is what the cross-section fallback handles.
-    const pieces = mergeRunts(splitBody(section.body));
+    const pieces = mergeRunts(splitBody(section.body, lossless));
 
     for (let i = 0; i < pieces.length; i++) {
       const piece = pieces[i];
@@ -278,16 +334,14 @@ export function chunkDocument(text) {
       const previous = out[out.length - 1];
       if (i === 0 && piece.length < MIN_CHARS && previous && previous.heading === section.heading) {
         previous.content += `\n\n${piece}`;
-        previous.embedText = section.heading
-          ? `${section.heading}\n\n${previous.content}`
-          : previous.content;
+        previous.embedText = embedTextFor({ title, heading: section.heading, body: previous.content });
         continue;
       }
 
       out.push({
         heading: section.heading,
         content: piece,
-        embedText: section.heading ? `${section.heading}\n\n${piece}` : piece,
+        embedText: embedTextFor({ title, heading: section.heading, body: piece }),
       });
     }
   }

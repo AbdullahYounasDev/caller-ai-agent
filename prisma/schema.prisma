@@ -111,6 +111,13 @@ model KnowledgeSource {
   /// Denormalised so the list screen doesn't COUNT chunks per row.
   chunkCount Int @default(0) @map("chunk_count")
 
+  /// The embedding scheme this document's chunks were embedded under — see
+  /// src/lib/agent/embed-scheme.js. 0 is the original scheme. `npm run reembed`
+  /// rebuilds every document below the current version, which is what makes it
+  /// resumable after a quota stop, and `npm run db:check` fails while any
+  /// ready document is behind. Rows embedded before this column existed read 0.
+  embeddingScheme Int @default(0) @map("embedding_scheme")
+
   /// "ready" | "processing" | "failed" — embedding a large PDF is not a
   /// request-response operation, and a business needs to see which it is.
   status String  @default("ready")
@@ -150,6 +157,21 @@ model KnowledgeChunk {
 
   content   String
   embedding Unsupported("vector(768)")
+
+  /// SHA-256 (hex) of the exact embedText this row's vector was computed from. Lets a
+  /// replace re-use the vector of any chunk whose text did not change (ingest.js, §6.21).
+  /// NULL = unknown, never reusable. See the migration for why it is stored, not derived.
+  embedHash String? @map("embed_hash")
+
+  /// Text-search config this chunk's keyword index uses — "english" | "italian" |
+  /// "simple" — chosen per DOCUMENT at ingest (src/lib/agent/language.js).
+  /// regconfig, not text: a generated column needs an IMMUTABLE expression.
+  searchConfig Unsupported("regconfig") @default(dbgenerated("'english'::regconfig")) @map("search_config")
+
+  /// GENERATED ALWAYS AS (to_tsvector(search_config, content)) STORED — precomputed so
+  /// retrieval does not tokenise every candidate per query. Written by Postgres, never
+  /// by us. Deliberately NO GIN index: we only rank vector-admitted rows (§6.3).
+  contentTsv Unsupported("tsvector")? @default(dbgenerated()) @map("content_tsv")
   createdAt DateTime @default(now()) @map("created_at")
 
   @@index([tenantId])
