@@ -3,6 +3,7 @@ import { getAgentConfig, saveAgentConfig } from "@/lib/tenant/config";
 import { getCapability } from "@/lib/agent/capabilities/catalog";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
 import {
   translator,
   resolveLocale,
@@ -194,6 +195,23 @@ function validatePatch(patch, tr) {
   // REPLY_LANGUAGES rather than SUPPORTED_LOCALES.
   if (patch.replyLanguage !== undefined && !REPLY_LANGUAGES.includes(patch.replyLanguage)) {
     errors.push(tr("validation:replyLanguage.invalid", { vars: { allowed: list(REPLY_LANGUAGES) } }));
+  }
+
+  // The agent's voice per spoken language. Only voices the speech models actually have,
+  // and only for the language they speak — an English voice for Urdu would be gibberish
+  // to the caller, so it is refused here rather than discovered on a call.
+  if (patch.voices !== undefined) {
+    for (const problem of voiceSelectionProblems(patch.voices)) {
+      // Split on the FIRST colon only — voice ids contain one ("kokoro:af_heart").
+      const at = problem.indexOf(":");
+      const kind = at === -1 ? problem : problem.slice(0, at);
+      const detail = at === -1 ? "" : problem.slice(at + 1);
+      errors.push(
+        kind === "invalid"
+          ? tr("validation:voices.invalid")
+          : tr(`validation:voices.${kind === "language" ? "unknownLanguage" : "unknownVoice"}`, { vars: { value: detail } })
+      );
+    }
   }
 
   if (patch.capabilities !== undefined) {

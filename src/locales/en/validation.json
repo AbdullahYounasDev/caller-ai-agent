@@ -45,5 +45,9 @@
   "document.notFailed": "Only a document that failed to import can be retried.",
   "chat.messageTooLong": "That message is too long. The limit is {max} characters.",
   "chat.rateLimited": "You're sending messages faster than we can process them. Please wait a moment and try again.",
-  "knowledge.tooManyFiles": "Too many files at once. Upload up to {max} at a time."
+  "knowledge.tooManyFiles": "Too many files at once. Upload up to {max} at a time.",
+  "voice.rateLimited": "Too many calls started in a short time. Please wait a minute and try again.",
+  "voices.invalid": "The voice settings must be a list of one voice per language.",
+  "voices.unknownLanguage": "“{value}” is not a language your agent can speak.",
+  "voices.unknownVoice": "“{value}” is not a voice for that language."
 }

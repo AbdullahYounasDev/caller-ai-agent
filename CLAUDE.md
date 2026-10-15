@@ -22,7 +22,7 @@ The product is a **calling system**. Everything else exists to serve that.
 | | |
 | --- | --- |
 | **The channel we are building** | Voice, over real phone numbers (Twilio — §9) |
-| **What exists today** | The RAG engine underneath it, plus a test chat to exercise it |
+| **What exists today** | The RAG engine underneath it; **voice calls from the browser** (local STT/TTS, a separate voice gateway, full call logging — §6.24); a test chat to exercise the same brain |
 | **What was removed** | An embeddable website chat widget. Deliberately, permanently. See §2. |
 
 ### The one-brain rule
@@ -121,7 +121,12 @@ docker-compose.yml             # Postgres 16 + pgvector — `npm run db:up`
 tests/                         # `npm test` — node:test, no deps, NO database/network/quota (§8, §11)
 test-docs/                     # the 12-file fixture corpus `eval:real` ingests (+ TESTING-GUIDE, TEST-REPORT, RETEST-REPORT)
 eng.traineddata, ita.traineddata   # Tesseract language data for OCR (§6.5)
+models/voice/                  # local speech models, ~1.3 GB — GITIGNORED; `npm run voice:models` fetches them (§6.24)
+public/voice/mic-worklet.js    # browser mic capture → 16 kHz PCM16 frames (AudioWorklet; loaded by URL, cannot be bundled)
 scripts/
+  voice-gateway.mjs            # `npm run voice` — starts the voice gateway process (§6.24)
+  voice-models.mjs             # `npm run voice:models` — resumable download of the speech models
+  voice-smoke.mjs              # `npm run voice:smoke` — speech benchmark, ZERO quota; `-- --call` = a real call with a synthetic caller
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
   eval-retrieval.mjs           # fast fixture-only smoke check — not the hybrid pipeline (§6.3)
@@ -140,9 +145,13 @@ scripts/
   alias-loader.mjs / alias-register.mjs  # lets plain-node scripts import src/ (the "@/" alias) so they run the app's own code
   test-openrouter.mjs          # OpenRouter integration vs. a local stand-in
 src/app/
-  page.js                      # THE TEST CONSOLE — config, knowledge, chat
+  page.js                      # THE TEST CONSOLE — config, knowledge, voice call, chat
+  voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
+    voice/session/route.js     # checks the tenant, issues a one-minute ticket for the gateway's WebSocket (§6.24)
+    voice/gateway/route.js     # where the gateway is (health + voice preview URLs) — for the voice picker
+    voice/calls/route.js       # recent calls (summary); voice/calls/[id] = one call's turns + timeline
     agent-config/route.js      # GET/PUT — partner's dashboard contract
     agent-config/catalog/      # capability list, translated, for his UI
     knowledge/route.js         # list + add/replace: typed text, uploads, URL crawl
@@ -155,7 +164,8 @@ src/app/
 src/lib/
   agent/
     llm.js                     # ★ LLM SEAM — chat swappable, embeddings are not
-    gemini.js / openrouter.js  # providers; import ONLY from llm.js
+    gemini.js / groq.js / openrouter.js  # providers; import ONLY from llm.js. groq = the fast one (§6.24)
+    openai-compatible.js       # the OpenAI chat dialect, shared by groq.js and openrouter.js
     language.js                # per-document text-search language: english | italian | simple (§6.3)
     embed-scheme.js            # ★ everything that changes a stored vector + the scheme VERSION (§6.2)
     retry.js                   # shared backoff; quota vs. rate-limit
@@ -175,6 +185,17 @@ src/lib/
     jobs.js                    # background import queue + cancellation (§6.6, §6.14)
     storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
     capabilities/catalog.js    # what the agent can DO, per channel
+  voice/                       # ★ THE VOICE CHANNEL (§6.24) — runs in the gateway process, never in Next
+    gateway.js                 # HTTP /health + WebSocket /call; ticket check, call limits, heartbeat
+    session.js                 # ★ CallSession — one live call: greet, VAD → STT → respond() → TTS, barge-in
+    recorder.js                # every DB write of a call: call_logs, call_turns, call_events (batched, off the hot path)
+    speech/                    # models.js (manifest) · voices.js (THE voice catalog, pure) · engine.js (loads once)
+                               #   · vad.js · stt.js ★ SEAM (Parakeet / Groq Whisper, routed per call) · tts.js ★ SEAM (Kokoro / Piper, cache)
+    gateway-url.js             # where the browser reaches the gateway — shared by the session and gateway routes
+    transports/browser.js      # the console's WebSocket protocol; Twilio will be a sibling
+    protocol.js                # message types shared by gateway and browser
+    config.js                  # every tunable: VAD silence, barge-in, filler, limits
+    sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
   tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18)
   i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
@@ -1527,21 +1548,211 @@ shows this flag):
 5. Already independent of the above and ready: the incremental re-embed on replace (§6.21), so
    re-uploading a DOCX only pays for the chunks that changed.
 
+### 6.24 Voice calls — a separate gateway, local speech, the same brain
+
+**What exists:** the test console has a Call button. Press it, allow the microphone, and the
+agent greets you and answers out loud from the tenant's knowledge. Each call is stored as a
+`call_logs` row, a `call_turns` row per exchange (transcript, intent, outcome, sources, per-stage
+timings) and a `call_events` timeline. Twilio is **not** built; the design keeps it a transport
+swap (below).
+
+```
+browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ──────────────────────────────┐
+  16 kHz PCM16     VAD (Silero) → STT (Parakeet) → respond(channel:"voice") → sentences →  │
+◄─ PCM16 audio ─   TTS (Piper, per sentence) ─────────────────────────────────────────────┘
+```
+
+**Rules that must not drift:**
+
+- **The gateway is a separate process, deliberately.** Next.js route handlers cannot hold a
+  WebSocket open; the native speech runtime (~1 GB of loaded models) stays out of the web app;
+  and it is the box that moves to its own CPU server later (§9.2). It imports the SAME `respond()`
+  through the `@/` alias loader — it is an adapter over the one brain (§1), not a second brain.
+  `session.js` builds no prompt, does no retrieval and calls no model. Every spoken word that is
+  not generated (greeting, "one moment", the failure apology) lives in `prompt.js`
+  (`buildVoiceGreeting`, `voiceLine`).
+- **`respond()` gained two OBSERVATION-only additions:** `onStage(stage, data)` ("retrieved",
+  "first_token") and a returned `timings` object (+ `searchTrigger`). They change nothing about a
+  turn, a throwing callback is swallowed, and the chat route ignores them.
+- **Trust: a one-minute, single-use ticket** (`lib/voice/ticket.js`). The browser cannot hold
+  `INTERNAL_API_KEY`, so `POST /api/voice/session` (internal-auth guarded, `requireServiceableTenant`,
+  10/min per tenant) signs `{tenantId, expiry, nonce}` with HMAC (`VOICE_SESSION_SECRET`, else
+  `INTERNAL_API_KEY`, else a dev-only secret; NULL in production = every call refused). The
+  gateway verifies it, refuses a replay, and re-checks `assertTenantServiceable` because it serves
+  the tenant. Not the removed widget tokens (§2): those were long-lived public credentials.
+- **Speech is behind seams.** `speech/stt.js` and `speech/tts.js` are the only entry points the
+  session uses — the same pattern as `llm.js`. Models load ONCE at gateway start (`engine.js`:
+  Parakeet, Silero, and the DEFAULT voices; other voices on first use, then kept);
+  `decodeAsync` / `generateAsync` run on native threads, and each engine instance is used one
+  call at a time (`serial.js`), so concurrent calls queue instead of oversubscribing the CPU.
+- **Speech recognition is routed PER CALL** (`stt.forCall({replyLanguage})`,
+  `VOICE_STT_PROVIDER=auto` by default): local **Parakeet** (fast, en/it, 25 European languages,
+  **no Urdu**) for English/Italian lines; **Groq Whisper large-v3** (hosted, free tier,
+  `GROQ_API_KEY`) for lines that can be in Urdu (`ur` or `auto`) — it also handles Urdu/English
+  code-switching, which is how Pakistani callers actually speak. There is NO local Urdu model good
+  enough to ship (best open CPU models: 27–34% word error on Urdu). A fixed reply language is
+  passed to Whisper as a hint (stops it writing short Urdu in Devanagari). A Groq failure or 6 s
+  timeout falls back to Parakeet for that utterance and is logged (`stt.completed.fallback`). A
+  call that may be Urdu on a recogniser that cannot understand it logs `stt.urdu_unavailable`, and
+  the console's voice picker says so where Urdu is chosen.
+- **Voices — a catalog of only real voices** (`speech/voices.js`, pure, imported by the gateway,
+  `PUT /api/agent-config` and the console). Two engines:
+  - **Natural — Kokoro-82M v1.0, fp32** (Apache-2.0): US/UK English, Italian and Urdu, male and
+    female. **fp32, not int8**: measured, int8 ran at 1.3–1.6× real time on this CPU (slower than
+    speech — unusable live), fp32 at ~0.57×. One engine instance per language (the phonemizer
+    language is per instance).
+  - **Fast — Piper** (US English Lessac/Ryan, Italian Paola/Riccardo): ~0.13× real time, more
+    synthetic.
+  - **Urdu = Kokoro's Hindi speakers + espeak-ng's Urdu phonemizer** (engine language `ur`) —
+    spoken Urdu and Hindi are one language at the sound level and the phonemizer reads Urdu script.
+    Checked by transcribing the output with an independent model: word-for-word correct, rated
+    5/5, identified as Pakistani Urdu. Meta's MMS Urdu voice is **CC-BY-NC (non-commercial) — never
+    use it**.
+  - `agent_configs.voices` = `{ [language]: voiceId }` (migration `20261010180000_agent_voices`,
+    hand-written, HNSW line removed). `voiceFor()` never returns a voice of the wrong language — a
+    bad id degrades to that language's default. Defaults: `kokoro:af_heart`, `kokoro:if_sara`,
+    `kokoro:hf_alpha`.
+  - The gateway serves `GET /voices/preview?voice=` (a fixed sample line per language, synthesised
+    once per voice, 30/min per client) for the console's ▶ Listen; `/health` lists installed voices.
+- **The recogniser is taught the business's name** (`lib/voice/vocabulary.js`, applied inside
+  `stt.forCall({replyLanguage, vocabulary})` so every engine gets it). Neither engine has heard
+  of the business: Parakeet writes "Nyron" as "NIRON"/"NIRN" even for clean synthetic speech, and
+  one real call produced "Nairan", "Niron", "Nairawan" — 4 of 5 turns then answered "I don't have
+  that information" (the search embedded the wrong word and found nothing; the empty result cost a
+  rewrite and a second search; gpt-oss, handed "Niron", declined even with the overview
+  retrieved). A capitalised word with the name's first letter and consonant skeleton (y/w/h count
+  as vowels) is replaced; at a sentence start it must also be within one letter, so "Small" never
+  becomes "Smile". Whisper also gets the vocabulary as its `prompt`. Corrections are logged on
+  `stt.completed` (`corrected`). Backstop in the prompt: `voiceHearingInstruction` tells the model
+  the customer's words are a transcript and sound-alike names mean that name. Product names are not
+  in the vocabulary yet — same matcher, a new source.
+- **The agent's gender is the voice's gender.** On the voice channel the prompt states it
+  (`voiceGenderInstruction`), so Urdu and Italian self-references agree with what the caller hears
+  ("میں کر سکتی ہوں" for a female voice); the Urdu greeting picks سکتی / سکتا the same way.
+- **Turn flow:** VAD finds the utterance (after `VAD.minSilenceSeconds` = 0.5 s of silence — the
+  biggest fixed latency, paid on every turn) → STT → `respond()` streams → `SentenceChunker` →
+  each chunk is synthesised and sent while the next one is still being generated. Turns are
+  strictly serial per call. An STT result with no letters is noise: no turn, no brain call.
+- **Progressive chunking** (`sentences.js`) — the fix for silence in the middle of a reply.
+  Kokoro synthesises at r ≈ 0.57×, so chunk k is ready in time only if
+  `Lk ≤ L1 + ((1−r)/r)·(L1+…+Lk−1)`; with r = 0.67 for headroom that is **L1 + 0.5 × everything
+  already sent**. First chunk ≤ 48 chars (may run to a comma within 25% more), later chunks
+  40–240 and the cap is STRICT. Breaks: comma → strong joiner ("which", "because", "according
+  to", "کیونکہ"…) → weak joiner ("and", "اور") → space; never mid-word. A tiny first sentence
+  ("Sure!") waits and goes out with the next. Measured: a 230-char second sentence left ~6 s of
+  silence; a fixed per-index schedule still left 810 ms (comma slack on chunk 2); the derived rule
+  measured **0 gaps on four real calls** (`voice:smoke -- --call` reports gaps).
+- **Fixed lines are synthesised once** (`tts.js` cache, `cache: true`): greeting, fillers and the
+  apology are the same words call after call, and Kokoro needs ~2.5 s for a greeting. The fillers
+  are pre-warmed after the greeting. A reply is never cached. The greeting is spoken sentence by
+  sentence, like a reply: a voice's FIRST greeting (nothing cached) was 5.5 s of silence after
+  pick-up when spoken whole.
+- **Query embeddings are cached** (`retrieve.js embedQuery`, exact text + scheme version): a
+  repeated question skips the ~1 s embedding round trip — measured 1020 ms → 50 ms — and spends
+  no quota.
+- **Spoken style** (`CHANNEL_STYLE.voice`): times and prices as people say them ("nine in the
+  morning", never "09:00" or "zero nine hundred"), no document names or dates unless documents
+  disagree, Urdu in Urdu script (never Roman Urdu — the voice could not read it). Gemini Flash-Lite
+  does not always obey the document-name rule.
+- **Barge-in:** caller speech while the agent is thinking or audible, sustained for
+  `BARGE_IN.minSpeechMs` (350 ms, so "mm-hm" does not cut the agent off) → `audio_clear` to the
+  client, the rest of the reply is never synthesised, the turn is logged `interrupted` with
+  `spokenText` = what was actually heard. "Audible" is the client's playback report OR the
+  gateway's own estimate from the audio it sent — the second does not depend on the transport, so
+  Twilio inherits it. **Known limit:** the full reply is still persisted to `messages`, so on the
+  next turn the model believes the caller heard all of it.
+- **Filler:** no reply audio `FILLER.afterMs` (2.5 s) after the caller stopped AND the model has
+  produced nothing yet → a short holding line, rotated ("Let me check that for you.", "Sure, just
+  a moment."…). It used to fire on every turn — even "what are your hours?" — 0.9 s before the
+  answer started; callers heard the agent stalling on simple questions. It is a symptom
+  detector for a stuck LLM, not a feature.
+- **A failed turn does not end the call:** the caller hears `voiceLine("fallback")`, the turn is
+  logged `outcome: failed` with the error, and the call keeps listening.
+- **Intent is rule-based, never a model call** (`intent.js`): question | followup (the rewrite
+  actually changed the search) | greeting | acknowledgement | goodbye | human_request; outcome
+  answered (has sources) | no_knowledge | conversational | handoff_requested | failed. A model
+  classifier would spend the scarce chat quota (§8 limitation 3) on every turn for something no
+  caller hears; a semantic taxonomy belongs in an offline job over `call_turns`.
+- **Logging never slows a turn:** `recorder.js` tracks every write and `close()` awaits them, but
+  no turn awaits one; timeline events are batched (one INSERT per 400 ms). A failed log write is
+  logged and dropped. `call_events.seq` carries the order explicitly.
+- **Which language a sentence is spoken in:** a fixed `replyLanguage` decides; for `auto`,
+  `spoken-language.js` recognises Urdu by its script (mostly Arabic-script letters) and English vs
+  Italian by stop words (`stopWordCounts`, extracted from `language.js` with no behaviour change),
+  and stays sticky when a sentence has no evidence. The greeting is in the fixed reply language,
+  or English for `auto` — the UI language is never consulted (§7).
+- **Limits** (`config.js`): 15 min per call, 90 s of caller silence ends it, 3 concurrent calls per
+  tenant, 6 per gateway (a CPU budget for this machine, not a business rule), 20 s max utterance.
+- **Wire protocol** (`protocol.js`, imported by both sides): binary frames are PCM16 audio, text
+  frames are `{type, …}` JSON. **A payload must never carry its own `type`** — a timeline event is
+  sent NESTED as `{type:"event", event}`. Found live: spread, the event's `type` overwrote the
+  message type and the console never showed the timeline; the transport now throws on it and a
+  test pins it.
+- **Migrations** `20261010120000_voice_calls` and `20261010180000_agent_voices` are hand-written;
+  each generated diff's first line was the HNSW `DROP INDEX` (§6.1) and was removed.
+
+**THE LLM IS THE LATENCY PROBLEM — measured, not assumed.** The real voice prompt (708 input
+tokens) sent to Gemini's free tier: **thinking tokens 0, and the whole reply arrives ~240 ms after
+the first token — but the first token takes 3.5–10 s, on every model tried**
+(`gemini-3.5-flash-lite` 6.5 s, `gemini-3.1-flash-lite` 10.3 / 4.8 / 3.5 s on consecutive calls,
+`gemini-flash-latest` 6.5 s; two older models 404, one 503). That is free-tier queueing; no request
+setting changes it (`thinkingBudget: 0` is even rejected). Occasionally it answers in ~0.6 s. Hence
+`groq.js` (`LLM_PROVIDER=groq`, Gemini as fallback): Groq's free tier publishes ~0.7–1 s to first
+token. **Measured since (one real call, 5 turns, laptop on battery): Groq first token 0.43–1.12 s**
+— the LLM is no longer the bottleneck. That call still took 6–7 s to first word, and where the
+time went: STT 1.0–1.7 s (4.0 s for a 10.7 s utterance — Parakeet's cost grows faster than the
+audio: 3.7 s → 0.5 s, 8.75 s → 2.7 s; 2 vs 4 threads made no difference), search 1.2–2 s
+(Gemini query embedding, plus a rewrite and second search whenever the misheard name made the
+first search empty — fixed above), first chunk of Kokoro 2.9–3.1 s (1.8 s for the same sentence
+with the machine otherwise idle: on battery, with Chrome and the dev server busy, Kokoro ran at
+~1.2× real time, not 0.57×). The rewrite on gpt-oss-120b: median 0.59 s, p90 0.98 s over the 23
+conversation items of the eval set, outputs correct; gpt-oss-20b was only ~0.15 s faster and
+translated three English follow-ups into Italian, so it is NOT a rewrite model. Benchmark the
+speech stages on mains power; the dedicated speech server (§9.2) is the real fix for CPU contention.
+
+**Measured on this repo's dev machine (i7-1185G7, 4 cores / 8 threads, CPU only)** —
+`npm run voice:smoke`, zero quota, synthetic speech (cleaner than a human — real accuracy will be
+lower):
+
+| | Kokoro (natural) | Piper (fast) |
+| --- | --- | --- |
+| TTS per sentence | 1.3–2.1 s (0.57× real time, 4 threads); first chunk 0.86 s at 8 threads | 0.26–0.56 s (0.13×) |
+| Word error after STT round trip, 16 kHz / simulated 8 kHz phone | 0% / 0% (en and it) | 0% / 0% |
+| Urdu | 3.1–3.2 s per 5.5 s sentence (0.56×) | — |
+
+STT (Parakeet) 0.2–0.5 s per utterance. Model load ~10 s at gateway start (three Kokoro languages).
+Real calls with the natural voice on the free Gemini tier: STT 0.2–0.4 s, retrieval 0.9–1.1 s
+(0.05 s when cached), LLM first token 0.6–1.5 s on lucky calls, first chunk 1.2–1.6 s →
+**~3.1–3.8 s end-of-speech → first word**, no mid-reply gaps. Remaining levers, in order: a fast
+LLM (Groq), Kokoro at 8 threads (now the default), the fast voice tier for latency-critical lines,
+the 0.5 s VAD window.
+
+**Not built:** Twilio transport (μ-law 8 kHz ⇄ PCM 16 kHz at the edge, Media Streams `mark` events
+for playback, webhook signature → dialled number → tenant in `registry.js`); call recording
+(`recording_url` stays null); auto-hang-up after a goodbye; merging an utterance that was cut by
+a mid-sentence pause with the one after it; a per-tenant greeting; a local Urdu recogniser.
+
 ---
 
 ## 7. Languages
 
-Active: **English (default) and Italian**. Nothing user-facing is a hardcoded
-string — not a heading, not a button, not a validation message.
+Active INTERFACE languages: **English (default) and Italian**. Active AGENT languages:
+**English, Italian and Urdu** — the main market is Pakistan plus English-speaking countries.
+Nothing user-facing is a hardcoded string — not a heading, not a button, not a validation message.
 
 **⚠️ TWO SETTINGS. They answer different questions — never merge them.**
 
 | Setting | Values | Controls |
 | --- | --- | --- |
 | `agent_configs.uiLocale` | `en` \| `it` | The **interface** — every dashboard screen |
-| `agent_configs.replyLanguage` | `en` \| `it` \| `auto` | What the **agent says**; `auto` mirrors whoever is speaking |
+| `agent_configs.replyLanguage` | `en` \| `it` \| `ur` \| `auto` | What the **agent says**; `auto` mirrors whoever is speaking |
 
-A clinic can run an Italian dashboard while its agent mirrors each caller.
+A clinic can run an Italian dashboard while its agent mirrors each caller — and a Karachi
+business can run an English dashboard while its agent answers in Urdu. **Urdu is a reply
+language, not an interface locale**: the dormant `ur` UI catalog is untouched. Spoken Urdu needs
+§6.24's voice stack (Kokoro Urdu voices locally; Urdu speech recognition via Groq Whisper).
+Retrieval needs nothing new: Urdu documents get the `simple` text-search config (non-Latin script,
+§6.3) and the embedding model is multilingual.
 
 - **`auto` IS NOT A LOCALE.** There is no `auto` catalog; it never reaches `t()`.
   It becomes an instruction in `prompt.js`. `isReplyLanguage()` keeps them apart.
@@ -1576,6 +1787,7 @@ right language, with history persisted per tenant.
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English, Italian, **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking: no mid-reply gaps on real calls. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY`. Twilio not built |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -1596,8 +1808,12 @@ right language, with history persisted per tenant.
 
 ### Limitations — be honest about these
 
-1. **No telephony yet.** The calling system — the actual product — is not built.
-   §9 is the plan.
+1. **No telephony yet.** Voice calls work from the browser (§6.24), but no phone number
+   reaches the agent. The gateway was built transport-agnostic so Twilio is a new transport
+   adapter, not a redesign — §9.2. **Voice latency is ~3–4 s to first word on a good free-tier
+   call and up to ~10 s on a bad one**, because Gemini's free tier takes 3.5–10 s to its first
+   token (§6.24). The ~800 ms target needs a fast LLM (Groq — built, needs a key) and probably
+   the fast voice tier.
 2. **No tool execution.** The agent collects booking details but cannot book.
    Guarded so it never claims otherwise (§6.11).
 3. **Free-tier model quotas — two SEPARATE caps, both hit in practice.**
@@ -1634,17 +1850,21 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 265 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 327 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
-   handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers and
-   `rankCandidates`. Not covered: anything that needs Postgres or a model — route
+   handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
+   `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
+   speech/brain/recorder (greeting, turns, barge-in, failures, ordering, hang-up), sentence
+   chunking, intent, tickets, PCM and the wire format. The real speech models are covered by
+   `npm run voice:smoke`, not by `npm test`. Not covered: anything that needs Postgres or a model — route
    handlers, `ingestDocument`, retrieval SQL, `respond()`, `retrieveForTurn`'s
    trigger flow, `rewriteQuery`. Those still rest on the evals, `test:reembed`,
    `test:openrouter`, `db:check` and hand verification.
 9. **In-process state** — job queue, caches, and the rate limiter (§6.18).
    Multi-instance needs Redis; N instances currently means N× the rate limit
    (chat: 60/min per tenant, 5 per 10s per conversation), same caveat
-   `rate-limit.js`'s own header states.
+   `rate-limit.js`'s own header states. The voice gateway's call limits and used-ticket
+   set are per gateway process too (§6.24).
 10. **Italian is not native-reviewed.**
 11. **No per-tenant BUSINESS limits** (max documents, storage quota, plan
     tiers) — that is the partner's billing/plan system (§4), not built yet.
@@ -1722,7 +1942,15 @@ right language, with history persisted per tenant.
 4. **Multi-file handling at scale** — per-tenant limits, larger batches,
    deduplication, resumable imports.
 5. **Tool execution** (§6.11) — then flip `TOOL_EXECUTION_AVAILABLE`.
-6. **Telephony** — §9.2.
+6. **Voice latency** — DIAGNOSED (§6.24): free-tier Gemini queueing, 3.5–10 s to first token,
+   not thinking and not prompt size. Next: add `GROQ_API_KEY`, set `LLM_PROVIDER=groq`
+   (`LLM_FALLBACK_PROVIDER=gemini`), run `voice:smoke -- --call` and record the numbers; check
+   Groq's answer quality in Urdu and Italian; then the follow-up rewrite on voice (§6.19) and
+   whether the fast voice tier should be the default for latency-sensitive businesses.
+7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
+   (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
+   included. Record a handful of real calls before promising it.
+8. **Telephony** — §9.2.
 
 ### 9.2 Twilio — the destination, not yet started
 
@@ -1741,17 +1969,27 @@ What it will need:
   **the number that was dialled**. That lookup belongs in
   [`registry.js`](src/lib/tenant/registry.js), from a **verified Twilio webhook
   signature** — never from anything the caller supplies.
-- **Realtime voice.** Decision still open: a speech-to-speech model
-  (e.g. Gemini Live) versus an STT → LLM → TTS pipeline. Speech-to-speech is
-  likely better — a pipeline stacks three latencies. **Budget under ~800ms to
-  first audio**, or a call feels broken.
-- **Barge-in and turn detection.** Callers interrupt; an agent that talks over
-  them is unusable.
+- **Realtime voice — DECIDED (§6.24): an STT → `respond()` → TTS pipeline**, not
+  speech-to-speech. A speech-to-speech model (e.g. Gemini Live) brings its own prompt and
+  session and turns retrieval into a tool call — a second brain beside `respond()`, which §1
+  forbids. Measured, the speech stages are not the latency problem (STT and first TTS ≈ 0.2–0.5 s
+  each, locally); the LLM's first token is. **Budget under ~800 ms to first audio** still stands.
+- **Barge-in and turn detection — BUILT** (§6.24): Silero VAD end-of-turn, 350 ms barge-in,
+  playback cleared, interrupted turns logged.
+- **What Twilio adds on top of the gateway:** a `transports/twilio.js` beside
+  `transports/browser.js` (Media Streams JSON, μ-law 8 kHz ⇄ PCM 16 kHz at the edge — the speech
+  benchmark already showed no accuracy loss on simulated 8 kHz audio; `clear` for barge-in;
+  `mark` events for playback), a webhook route that verifies the signature and maps the dialled
+  number to the tenant in `registry.js`, and `CallRecorder.open({ transport: "twilio",
+  fromNumber, toNumber })` — the columns already exist. `CallSession` does not change.
+- **Speech engines may move to their own servers** (a VPS or cloud instance near the callers):
+  `speech/stt.js` and `speech/tts.js` are the seams — a remote implementation behind the same
+  interface, chosen by `VOICE_STT_PROVIDER` / `VOICE_TTS_PROVIDER`.
 - **`CHANNEL_STYLE.voice` in `prompt.js` already exists** and forbids markdown,
   lists, emoji and URLs, because every token is read aloud. It was written for
   this and should not be softened.
-- **`call_logs` already exists** — duration and a recording URL, with audio in
-  object storage (not yet chosen).
+- **`call_logs` / `call_turns` / `call_events` exist and are written** (§6.24); the recording URL
+  column is still unused — audio storage is not yet chosen.
 - **Compliance is not optional:** recording disclosure, consent, DNC lists,
   permitted calling hours. Italy and the Gulf have real constraints. Budget time.
 
@@ -1769,6 +2007,8 @@ cp .env.example .env     # then fill in DATABASE_URL (as shipped works with the 
 npm run db:up            # Postgres 16 + pgvector (docker compose up -d)
 npm run prisma:migrate   # apply migrations (read any generated one — §6.1)
 npm run dev              # http://localhost:3000 → the test console
+npm run voice:models     # once: download the local speech models (~1.3 GB, resumable) — §6.24
+npm run voice            # the voice gateway, :3001 — needed for the console's Call button (a SECOND terminal)
 npm run build            # runs i18n:check first
 npm run start            # serve the production build
 npm run lint
@@ -1777,7 +2017,9 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 265 unit tests: chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates. No DB, no Gemini, ~1s (§11)
+npm test                 # 327 unit tests: chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
+#   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
 npm run test:openrouter  # OpenRouter integration vs. a local stand-in
 
@@ -1807,7 +2049,8 @@ node scripts/repro-tenant-recall.mjs [--interleaved] [--tenants=60]   # syntheti
 **Windows gotcha:** `prisma generate` fails with `EPERM … rename … query_engine` while
 `next dev` is running (it holds the engine DLL), and a stopped-and-restarted dev server
 keeps the OLD client in memory. After any schema change: apply the migration, stop the
-dev server, `npx prisma generate`, start it again.
+dev server **and the voice gateway** (it loads the same engine DLL), `npx prisma generate`,
+start both again.
 
 **Database is `caller-ai-agent`.** An older `nyron` database may exist on the same
 Postgres as an untouched backup — if you see it in a connection string, it is
@@ -1821,14 +2064,23 @@ stale.
 - `INTERNAL_API_KEY` — guards every route (header `x-internal-key`). **Fails closed
   in production**; allowed with a warning in dev, which is what lets the test console
   work.
-- `LLM_PROVIDER`, `LLM_FALLBACK_PROVIDER`, `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`,
-  `OPENROUTER_BASE_URL` (any OpenAI-compatible endpoint — Ollama, Groq — with no code
-  change), `PUBLIC_APP_URL` (sent to OpenRouter as the referer header).
+- `LLM_PROVIDER` / `LLM_FALLBACK_PROVIDER` (`gemini` | `groq` | `openrouter`),
+  `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_BASE_URL` (any OpenAI-compatible
+  endpoint — Ollama — with no code change), `PUBLIC_APP_URL` (sent to OpenRouter as the referer
+  header).
+- **Groq** (§6.24): `GROQ_API_KEY` — one free key for the fast chat model AND Urdu speech
+  recognition; `GROQ_MODEL` (default `openai/gpt-oss-120b`), `GROQ_REASONING_EFFORT` (`low` for
+  gpt-oss), `GROQ_REWRITE_MODEL`, `GROQ_STT_MODEL` (default `whisper-large-v3`).
 - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` —
   optional, **all three or none**: `storage.js` treats them as configured when all
   are non-empty, so a placeholder value counts as configured. Uploads work without
   them; `storage.js` just skips storing the original file (§6.13) and logs a warning
   instead of failing the import.
+- Voice (§6.24, all optional): `VOICE_GATEWAY_PORT` (3001), `VOICE_GATEWAY_PUBLIC_URL` (when the
+  browser reaches the gateway somewhere other than this host on that port), `VOICE_SESSION_SECRET`
+  (signs session tickets — both processes must share it; falls back to `INTERNAL_API_KEY`),
+  `VOICE_MODELS_DIR`, `VOICE_STT_THREADS` (2) / `VOICE_TTS_THREADS` (every logical core),
+  `VOICE_STT_PROVIDER` (`auto` | `local` | `groq`), `VOICE_TTS_PROVIDER` (only `local`).
 - Script-only knobs (not read by the app): `APP_URL` (where the eval and OpenRouter
   scripts find the running app, default `http://localhost:3000`), `EVAL_TENANT`,
   `TEST_TENANT`, `FAKE_PORT`, `EMBED_VARIANTS_CACHE`.

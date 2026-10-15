@@ -45,5 +45,9 @@
   "document.notFailed": "Solo un documento non importato correttamente può essere riprovato.",
   "chat.messageTooLong": "Il messaggio è troppo lungo. Il limite è {max} caratteri.",
   "chat.rateLimited": "Stai inviando messaggi più velocemente di quanto riusciamo a elaborarli. Attendi un momento e riprova.",
-  "knowledge.tooManyFiles": "Troppi file in una volta sola. Carica fino a {max} alla volta."
+  "knowledge.tooManyFiles": "Troppi file in una volta sola. Carica fino a {max} alla volta.",
+  "voice.rateLimited": "Troppe chiamate avviate in poco tempo. Attendi un minuto e riprova.",
+  "voices.invalid": "Le impostazioni della voce devono indicare una voce per lingua.",
+  "voices.unknownLanguage": "“{value}” non è una lingua che il tuo agente può parlare.",
+  "voices.unknownVoice": "“{value}” non è una voce per quella lingua."
 }

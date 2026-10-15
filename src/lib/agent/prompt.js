@@ -2,6 +2,7 @@ import { resolveCapabilities } from "./capabilities/catalog";
 import { t, DEFAULT_LOCALE } from "@/lib/i18n";
 import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { humanizeTitle } from "./chunk";
+import { SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
 
 /**
  * Builds the system instruction. This is where a tenant's configuration stops
@@ -53,15 +54,65 @@ const CHANNEL_STYLE = {
     "Never output markdown, asterisks, bullet points, numbered lists, emoji or URLs — " +
     "they are unspeakable. Say 'first… then…' instead of listing. Use short sentences. " +
     "Spell out abbreviations. Keep each turn under about three sentences: the caller " +
-    "cannot skim, and they will interrupt a monologue.",
+    "cannot skim, and they will interrupt a monologue. Open with a short first sentence — " +
+    "the caller hears it while the rest is still being prepared. Say times, dates and " +
+    "prices the way a person says them out loud ('nine in the morning to six in the " +
+    "evening', not '09:00–18:00' or 'zero nine hundred'). Do not mention which document or " +
+    "update date an answer comes from unless two documents disagree. If you reply in Urdu, " +
+    "write it in Urdu script, never in Roman (Latin-letter) Urdu: an Urdu voice reads it aloud.",
 };
+
+const GENDER_WORDS = { female: "feminine", male: "masculine" };
+
+/**
+ * ON A CALL, THE AGENT HAS A GENDER — the voice the business picked. In languages where
+ * the speaker's gender changes the words (Urdu "میں کر سکتی ہوں" vs "کر سکتا ہوں", Italian
+ * "sono lieta" vs "sono lieto"), a female voice speaking masculine forms is immediately
+ * wrong to a native caller. Only the languages this call can actually be spoken in are
+ * described, and the voice per language comes from the same voiceFor() the gateway
+ * speaks with, so the grammar always matches the voice the caller hears.
+ */
+function voiceGenderInstruction(config) {
+  const languages = config.replyLanguage === "auto" ? SPOKEN_LANGUAGES : [config.replyLanguage];
+  const genders = languages.map((lang) => [lang, voiceFor(config.voices, lang).gender]);
+  const distinct = new Set(genders.map(([, g]) => g));
+  const rule =
+    distinct.size === 1
+      ? `Your voice on this call is ${[...distinct][0]}.`
+      : `Your voice on this call is ${genders.map(([lang, g]) => `${g} in ${LANGUAGE_NAMES[lang]}`).join(", ")}.`;
+  const forms = distinct.size === 1 ? `the ${GENDER_WORDS[[...distinct][0]]} forms` : "the forms that match that voice";
+  return (
+    `VOICE: ${rule} In languages where words change with the speaker's gender (such as Urdu ` +
+    `and Italian), always use ${forms} when you speak about yourself.`
+  );
+}
+
+/**
+ * ON A CALL, THE CUSTOMER'S WORDS ARE A TRANSCRIPT. The speech recogniser has never heard
+ * the business's names and spells them as it hears them: one real call produced "Nairan",
+ * "Niron" and "Nairawan" for "Nyron". The gateway corrects the business name itself
+ * (lib/voice/vocabulary.js), but not product names or what it fails to match — and,
+ * measured on that call, the model then answered "I don't have that information" even with
+ * the company overview retrieved, because the caller seemed to ask about something else.
+ */
+function voiceHearingInstruction(config) {
+  const name =
+    config.businessName && config.businessName !== PLACEHOLDER_BUSINESS_NAME ? ` (${config.businessName})` : "";
+  return (
+    "HEARING: the customer's words reach you through automatic speech recognition, which often " +
+    `misspells names. A word that sounds like the business's name${name} or like a name in the ` +
+    "reference material means that name: answer about it, and never say you have no information " +
+    "only because the spelling differs. If you genuinely cannot tell what was said, ask the " +
+    "customer to repeat it."
+  );
+}
 
 /**
  * @param {object} args
  * @param {object} args.config   from lib/tenant/config.js getAgentConfig()
  * @param {string} args.channel  "chat" | "voice"
  *   NOTE: there is no `locale` parameter. The reply language comes from
- *   `config.replyLanguage` ("en" | "it" | "auto"); the INTERFACE language is a
+ *   `config.replyLanguage` ("en" | "it" | "ur" | "auto"); the INTERFACE language is a
  *   presentation concern and must never leak into the prompt.
  * @param {Array<{source: string, content: string}>} args.chunks retrieved knowledge
  * @returns {string}
@@ -82,6 +133,10 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   // --- 2. Tone + channel style --------------------------------------------
   sections.push(`TONE: ${TONE_GUIDANCE[config.tone] ?? TONE_GUIDANCE.professional}`);
   sections.push(`CHANNEL: ${CHANNEL_STYLE[channel] ?? CHANNEL_STYLE.chat}`);
+  if (channel === "voice") {
+    sections.push(voiceGenderInstruction(config));
+    sections.push(voiceHearingInstruction(config));
+  }
 
   // --- 3. Language ---------------------------------------------------------
   // Always explicit, in both modes. Retrieved context is very often in a
@@ -282,6 +337,86 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   }
 
   return sections.join("\n\n");
+}
+
+/**
+ * THE AGENT'S OPENING LINE ON A CALL — spoken the instant the call connects, before the
+ * caller says anything (§6.24).
+ *
+ * A fixed template, NOT a model call, on purpose: it is the one moment of the call where
+ * latency is pure dead air (the caller is waiting to hear someone pick up), it costs no
+ * quota, and there is nothing to retrieve yet. It lives here because every word the agent
+ * says that is not generated is still agent wording, and prompt.js is where that is
+ * reviewed — not in the voice code.
+ *
+ * Its language: the business's fixed reply language, or English when the reply language
+ * is "auto" — before the caller has said a word there is nothing to mirror. The INTERFACE
+ * language is deliberately not consulted (§7: it must never leak into what the agent
+ * says). From the caller's first sentence on, "auto" mirrors them as usual.
+ *
+ * Voice-safe (no markdown, digits or URLs), and a question, so the caller knows it is
+ * their turn. In Urdu the closing verb agrees with the VOICE's gender ("سکتی" / "سکتا") —
+ * the same rule voiceGenderInstruction gives the model for everything after.
+ *
+ * @param {object} config from getAgentConfig()
+ * @returns {{text: string, language: "en"|"it"|"ur"}}
+ */
+export function buildVoiceGreeting(config) {
+  const language = ["it", "ur"].includes(config?.replyLanguage) ? config.replyLanguage : "en";
+  const name =
+    config?.businessName && config.businessName !== PLACEHOLDER_BUSINESS_NAME ? config.businessName : null;
+
+  let text;
+  if (language === "ur") {
+    const can = voiceFor(config?.voices, "ur").gender === "female" ? "سکتی" : "سکتا";
+    text = `السلام علیکم، ${name ? `${name} کو ` : ""}کال کرنے کا شکریہ۔ میں آپ کی کیا مدد کر ${can} ہوں؟`;
+  } else if (language === "it") {
+    text = name
+      ? `Buongiorno, grazie per aver chiamato ${name}. Come posso aiutarla?`
+      : "Buongiorno, grazie per la chiamata. Come posso aiutarla?";
+  } else {
+    text = name
+      ? `Hello, thanks for calling ${name}. How can I help you today?`
+      : "Hello, thanks for calling. How can I help you today?";
+  }
+
+  return { text, language };
+}
+
+/**
+ * The other fixed things the agent may SAY on a call, in each spoken language (§6.24):
+ *
+ *   filler    spoken when a turn has been silent for VOICE_FILLER.afterMs with no reply
+ *             audio yet — a slow provider or a follow-up rewrite (§6.19). Dead air on a
+ *             phone line reads as a dropped call; a short "one moment" does not.
+ *   fallback  spoken when a turn FAILED (quota, outage). The caller must hear something
+ *             true and short, never silence and never an error code (§6.16).
+ *
+ * Fixed text for the same reasons as the greeting: no model call, no quota, no latency.
+ * Fillers come in a few phrasings, rotated by `variant`, because the same words at the
+ * start of every slow turn is exactly what makes an agent sound like a machine. Every
+ * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
+ *
+ * @param {"filler"|"fallback"} kind
+ * @param {"en"|"it"|"ur"} language
+ * @param {number} [variant]  any integer; picks one of the phrasings
+ * @returns {string}
+ */
+export function voiceLine(kind, language, variant = 0) {
+  const lines = {
+    filler: {
+      en: ["Let me check that for you.", "Sure, just a moment.", "One second, please."],
+      it: ["Controllo subito.", "Un attimo, per favore.", "Un momento, verifico."],
+      ur: ["جی، ایک لمحہ۔", "جی، ذرا ایک لمحہ دیجیے۔"],
+    },
+    fallback: {
+      en: ["Sorry, I'm having trouble answering right now. Could you try again in a moment?"],
+      it: ["Mi scusi, in questo momento ho difficoltà a rispondere. Può riprovare tra poco?"],
+      ur: ["معذرت، اس وقت جواب دینے میں دشواری ہو رہی ہے۔ کیا آپ تھوڑی دیر میں دوبارہ پوچھ سکتے ہیں؟"],
+    },
+  };
+  const options = lines[kind][["it", "ur"].includes(language) ? language : "en"];
+  return options[Math.abs(Math.trunc(variant)) % options.length];
 }
 
 /**

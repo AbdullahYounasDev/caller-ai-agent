@@ -1,5 +1,6 @@
 import * as gemini from "./gemini";
 import * as openrouter from "./openrouter";
+import * as groq from "./groq";
 import { isProviderFailure } from "./retry";
 import { createCircuitBreaker, runGuarded } from "./breaker";
 
@@ -31,16 +32,20 @@ import { createCircuitBreaker, runGuarded } from "./breaker";
  * ─────────────────────────────────────────────────────────────────────────
  *
  * CONFIG
- *   LLM_PROVIDER           "openrouter" | "gemini"   (default: gemini)
+ *   LLM_PROVIDER           "gemini" | "groq" | "openrouter"   (default: gemini)
  *   LLM_FALLBACK_PROVIDER  same values, or unset to disable fallback
  *
- * The fallback exists because both providers' free tiers fail often and for
- * different reasons — Gemini on a daily quota, OpenRouter's free pool on
- * upstream congestion. When one is down the other usually is not, and a
- * business's customer should not see an error because a shared pool was busy.
+ * The fallback exists because free tiers fail often and for different reasons —
+ * Gemini on a daily quota, OpenRouter's free pool on upstream congestion. When one is
+ * down the other usually is not, and a business's customer should not see an error
+ * because a shared pool was busy.
+ *
+ * FOR VOICE, USE GROQ AS PRIMARY (LLM_PROVIDER=groq, LLM_FALLBACK_PROVIDER=gemini):
+ * Gemini's free tier takes 3.5–10 s to its first token on every model (measured,
+ * §6.24) — on a call that is silence. groq.js has the numbers and the settings.
  */
 
-const PROVIDERS = { gemini, openrouter };
+const PROVIDERS = { gemini, groq, openrouter };
 
 function resolveProvider(name) {
   const provider = PROVIDERS[name];
@@ -69,9 +74,9 @@ function providerChain() {
  *  configured chain) and the per-call onProvider callback below (which one
  *  actually answered, after any fallback). */
 function describeProvider(name) {
-  return name === "openrouter"
-    ? `openrouter:${process.env.OPENROUTER_MODEL || "google/gemma-4-31b-it:free"}`
-    : `gemini:${gemini.CHAT_MODEL}`;
+  if (name === "openrouter") return `openrouter:${openrouter.MODEL()}`;
+  if (name === "groq") return `groq:${groq.MODEL()}`;
+  return `gemini:${gemini.CHAT_MODEL}`;
 }
 
 /**
@@ -218,12 +223,16 @@ const rewriteBreaker = createCircuitBreaker({
  * model is the point; on the Gemini free tier a separate model also has its OWN daily
  * quota, so rewrites stop competing with replies for it.
  *
- * @param {string} providerName "gemini" | "openrouter"
+ * @param {string} providerName "gemini" | "groq" | "openrouter"
  * @param {Record<string, string|undefined>} [env]
  * @returns {string|undefined}
  */
 export function rewriteModelFor(providerName, env = process.env) {
-  const value = providerName === "openrouter" ? env.OPENROUTER_REWRITE_MODEL : env.GEMINI_REWRITE_MODEL;
+  const value = {
+    openrouter: env.OPENROUTER_REWRITE_MODEL,
+    groq: env.GROQ_REWRITE_MODEL,
+    gemini: env.GEMINI_REWRITE_MODEL,
+  }[providerName];
   return value?.trim() || undefined;
 }
 

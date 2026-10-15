@@ -1,0 +1,606 @@
+import { createSerialQueue } from "./serial";
+import { SentenceChunker } from "./sentences";
+import { chooseSpokenLanguage } from "./spoken-language";
+import { classifyTurn, OUTCOMES } from "./intent";
+import { median } from "./recorder";
+import { BARGE_IN, FILLER, LIMITS } from "./config";
+import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
+import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
+import { callVocabulary } from "./vocabulary";
+import { buildVoiceGreeting, voiceLine } from "@/lib/agent/prompt";
+
+/** Allowance for the client's audio buffering and network jitter when estimating when
+ *  playback ends. */
+const PLAYBACK_SLACK_MS = 250;
+
+/**
+ * ONE LIVE CALL — the voice channel adapter of §1, and the only place that knows how a
+ * spoken conversation flows:
+ *
+ *   answer → greet → listen ─► caller speaks ─► caller stops (VAD)
+ *                      ▲                              │
+ *                      │                     transcribe (STT seam)
+ *                      │                              │
+ *                      │        respond() — THE SAME BRAIN as the test chat: history,
+ *                      │        conversation-aware retrieval, grounding, persistence
+ *                      │                              │ streamed tokens
+ *                      │                     sentence by sentence
+ *                      │                              │
+ *                      └──── playback ends ◄── speak (TTS seam)
+ *
+ * and, at any moment while the agent is thinking or speaking, BARGE-IN: the caller
+ * talks over it for BARGE_IN.minSpeechMs → playback is cleared, the rest of the reply is
+ * not spoken, and the turn is logged as interrupted.
+ *
+ * ── THE ONE-BRAIN RULE HOLDS ─────────────────────────────────────────────
+ * This class does no retrieval, builds no prompt and calls no model. It turns audio into
+ * a userMessage, hands it to respond() with channel "voice" (which selects the
+ * voice-safe CHANNEL_STYLE in prompt.js), and turns the streamed reply back into audio.
+ * A prompt or retrieval change shows up identically on a call and in the test chat.
+ * ─────────────────────────────────────────────────────────────────────────
+ *
+ * TRANSPORT-AGNOSTIC. It talks to its caller only through a `transport`:
+ *     transport.audio(samples: Float32Array, sampleRate)   play this
+ *     transport.clear()                                     stop playback now
+ *     transport.notify(type, payload)                       live UI/telemetry (SERVER.*)
+ *     transport.close(reason)                               hang up the connection
+ * and is driven by it through onAudio(16 kHz float32), onPlayback(playing) and hangup().
+ * The browser test console is one transport; Twilio will be another (§9.2).
+ *
+ * Every dependency is injected (speech engines, the brain, the recorder) so the whole
+ * flow — barge-in, sentence pipelining, failures — is tested without models, a database
+ * or a network (tests/voice-session.test.mjs).
+ */
+export class CallSession {
+  /**
+   * @param {object} args
+   * @param {string} args.tenantId
+   * @param {"browser"|"twilio"} args.transportName
+   * @param {object} args.transport            see above
+   * @param {{forCall(call: {replyLanguage: string}): import("./speech/stt").Transcriber}} args.stt
+   *   the STT seam; it picks the recogniser for this call (speech/stt.js)
+   * @param {import("./speech/tts").TextToSpeech} args.tts
+   * @param {() => {push: Function, reset: Function}} args.createVad
+   * @param {object} args.engineInfo           stored on the call row
+   * @param {object} args.brain                { respond, getAgentConfig, invalidateAgentConfig }
+   * @param {(args: object) => Promise<object>} args.openRecorder   CallRecorder.open
+   * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
+   */
+  constructor({ tenantId, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
+    this.tenantId = tenantId;
+    this.transportName = transportName;
+    this.transport = transport;
+    this.stt = stt;
+    this.tts = tts;
+    this.createVad = createVad;
+    this.engineInfo = engineInfo;
+    this.brain = brain;
+    this.openRecorder = openRecorder;
+    this.now = clock.now ?? (() => performance.now());
+    this.setTimer = clock.setTimeout ?? setTimeout;
+    this.clearTimer = clock.clearTimeout ?? clearTimeout;
+
+    this.state = CALL_STATES.CONNECTING;
+    this.ended = false;
+    this.turnQueue = createSerialQueue();
+    this.turnIndex = 0;
+    this.currentTurn = null;
+    this.clientPlaying = false;
+    this.bargedThisSpeech = false;
+    this.interruptions = 0;
+    this.responseTimes = [];
+    this.lastLanguage = null;
+    this.timers = {};
+  }
+
+  // ── lifecycle ────────────────────────────────────────────────────────────
+
+  /** Answer the call: load the business's config, open the record, greet. */
+  async start() {
+    try {
+      // A call always starts on the business's CURRENT settings: the config cache is per
+      // process (lib/tenant/config.js), and this process is not the one the dashboard
+      // saved through.
+      this.brain.invalidateAgentConfig(this.tenantId);
+      this.config = await this.brain.getAgentConfig(this.tenantId);
+
+      // The engines THIS call uses, decided once: the speech recogniser follows the
+      // languages the call can be in (Urdu needs the hosted one — speech/stt.js), and
+      // each spoken language has the voice the business picked (or its default). The
+      // business's own name is taught to the recogniser, which has never heard it
+      // (vocabulary.js).
+      this.transcriber = this.stt.forCall({
+        replyLanguage: this.config.replyLanguage,
+        vocabulary: callVocabulary(this.config),
+      });
+      this.voices = Object.fromEntries(SPOKEN_LANGUAGES.map((lang) => [lang, voiceFor(this.config.voices, lang).id]));
+      this.callEngine = { ...this.engineInfo, stt: this.transcriber.id, voices: this.voices };
+
+      this.recorder = await this.openRecorder({
+        tenantId: this.tenantId,
+        transport: this.transportName,
+        engine: this.callEngine,
+      });
+      this.vad = this.createVad();
+    } catch (err) {
+      console.error("[voice] call setup failed:", err);
+      this.transport.notify(SERVER.ERROR, { code: ERROR_CODES.INTERNAL, message: "Call setup failed" });
+      this.transport.close(END_REASONS.SETUP_FAILED);
+      this.ended = true;
+      return false;
+    }
+
+    this.transport.notify(SERVER.READY, {
+      callId: this.recorder.callId,
+      conversationId: this.recorder.conversationId,
+      engine: this.callEngine,
+    });
+    this.log("call.started", {
+      transport: this.transportName,
+      replyLanguage: this.config.replyLanguage,
+      stt: this.transcriber.id,
+    });
+    // A call that may be in Urdu, on a recogniser that cannot understand Urdu (no
+    // GROQ_API_KEY — speech/stt.js). The call still works in English; it is logged so the
+    // first garbled Urdu transcript has its explanation right above it in the timeline.
+    if (["ur", "auto"].includes(this.config.replyLanguage) && !this.transcriber.understandsUrdu) {
+      this.log("stt.urdu_unavailable", { stt: this.transcriber.id });
+    }
+
+    this.timers.max = this.setTimer(() => this.end(END_REASONS.MAX_DURATION), LIMITS.maxCallMs);
+    this.armIdleTimer();
+
+    // The agent speaks first. A fixed line (prompt.js) — no model call, so the caller
+    // hears someone pick up immediately. Its voice is loaded first (a no-op for the
+    // default voices, which the gateway loads at start-up); the others load in the
+    // background while the greeting plays.
+    const greeting = buildVoiceGreeting(this.config);
+    await this.tts.prepare([this.voices[greeting.language]]).catch(() => {});
+    void this.tts.prepare(Object.values(this.voices)).catch(() => {});
+    this.recorder.agentLine(greeting.text);
+    this.lastLanguage = greeting.language;
+    const turn = this.newTurn(0);
+    this.currentTurn = turn;
+    this.transport.notify(SERVER.AGENT_TEXT, { turn: 0, text: greeting.text });
+    // Sentence by sentence, like a reply: the caller hears "Hello, thanks for calling
+    // Nyron." while "How can I help you today?" is still being synthesised. Spoken whole,
+    // a voice's first greeting (nothing cached yet) was 5.5 s of silence after pick-up.
+    const pieces = new SentenceChunker();
+    for (const piece of [...pieces.push(greeting.text), ...pieces.flush()]) {
+      await this.speak(turn, piece, { language: greeting.language, cache: true });
+    }
+    this.log("greeting.spoken", { ms: turn.firstAudioSynthMs, language: greeting.language });
+    this.currentTurn = null;
+    this.settleState();
+
+    // Have the holding lines ready before they are needed: synthesised once per voice for
+    // the gateway's lifetime (tts.js cache), so a slow turn's "one moment" plays at once.
+    for (const variant of [0, 1, 2]) {
+      void this.tts
+        .synthesize({ text: voiceLine("filler", greeting.language, variant), voiceId: this.voices[greeting.language], cache: true })
+        .catch(() => {});
+    }
+    return true;
+  }
+
+  /**
+   * End the call, once. Waits (bounded) for a turn still in flight so its record is
+   * written before the call is summarised.
+   *
+   * @param {string} reason END_REASONS value
+   */
+  async end(reason) {
+    if (this.ended) return;
+    this.ended = true;
+    for (const timer of Object.values(this.timers)) this.clearTimer(timer);
+    if (this.currentTurn) this.currentTurn.cancelled = true;
+    this.vad?.reset();
+
+    this.setState(CALL_STATES.ENDED);
+    this.log("call.ended", { reason, turns: this.turnIndex, interruptions: this.interruptions });
+    this.transport.notify(SERVER.ENDED, { reason });
+    this.transport.close(reason);
+
+    let guard;
+    await Promise.race([
+      this.turnQueue(async () => {}),
+      new Promise((resolve) => {
+        guard = setTimeout(resolve, 10_000);
+      }),
+    ]);
+    clearTimeout(guard);
+    await this.recorder?.close({
+      status: reason === END_REASONS.ERROR ? "failed" : "completed",
+      reason,
+      turnCount: this.turnIndex,
+      interruptions: this.interruptions,
+      responseTimes: this.responseTimes,
+    });
+  }
+
+  /** The caller hung up. */
+  hangup() {
+    return this.end(END_REASONS.CALLER_HANGUP);
+  }
+
+  // ── inputs from the transport ────────────────────────────────────────────
+
+  /**
+   * Caller audio: 16 kHz mono float32.
+   * @param {Float32Array} samples
+   */
+  onAudio(samples) {
+    if (this.ended || !this.vad) return;
+    let events;
+    try {
+      events = this.vad.push(samples);
+    } catch (err) {
+      console.error("[voice] VAD failed:", err);
+      return;
+    }
+
+    for (const event of events) {
+      if (event.type === "start") {
+        this.bargedThisSpeech = false;
+        this.armIdleTimer();
+        this.log("speech.started");
+        if (!this.agentBusy()) this.setState(CALL_STATES.HEARING);
+      } else if (event.type === "ongoing") {
+        if (!this.bargedThisSpeech && this.agentBusy() && event.speechMs >= BARGE_IN.minSpeechMs) {
+          this.bargedThisSpeech = true;
+          this.bargeIn(event.speechMs);
+        }
+      } else if (event.type === "utterance") {
+        this.onUtterance(event.samples, event.durationMs);
+      }
+    }
+  }
+
+  /**
+   * The transport's playback state: the agent is audible until the CLIENT says the audio
+   * finished playing — not when the gateway finished sending it.
+   * @param {boolean} playing
+   */
+  onPlayback(playing) {
+    this.clientPlaying = Boolean(playing);
+    if (!this.clientPlaying) this.settleState();
+  }
+
+  // ── turns ────────────────────────────────────────────────────────────────
+
+  onUtterance(samples, durationMs) {
+    const speechEndedAt = this.now();
+    this.log("speech.ended", { durationMs });
+    this.armIdleTimer();
+    // Turns run strictly one after another: the brain persists each user/assistant pair
+    // in order, and a reply must never be spoken over the next question's reply.
+    this.turnQueue(() => this.runTurn({ samples, durationMs, speechEndedAt }));
+  }
+
+  async runTurn({ samples, durationMs, speechEndedAt }) {
+    if (this.ended) return;
+    this.setState(CALL_STATES.THINKING);
+
+    let transcript;
+    try {
+      transcript = await this.transcriber.transcribe(samples);
+    } catch (err) {
+      console.error("[voice] STT failed:", err);
+      this.log("stt.failed", { message: String(err?.message ?? err).slice(0, 200) });
+      this.settleState();
+      return;
+    }
+    const text = transcript.text;
+    if (!/\p{L}/u.test(text) || text.length < LIMITS.minTranscriptChars) {
+      // The VAD let a noise through. Not a turn: nothing is persisted, nothing answered.
+      this.log("stt.empty", { ms: transcript.ms, durationMs });
+      this.settleState();
+      return;
+    }
+    if (this.ended) return;
+
+    const index = ++this.turnIndex;
+    const turn = this.newTurn(index);
+    turn.speechEndedAt = speechEndedAt;
+    this.currentTurn = turn;
+    this.log("stt.completed", {
+      turn: index,
+      ms: transcript.ms,
+      chars: text.length,
+      engine: transcript.engine,
+      // The hosted recogniser failed and the local one answered instead (speech/stt.js) —
+      // logged, because an Urdu caller transcribed by an English model is the likely cause
+      // of whatever went wrong next.
+      fallback: transcript.fallbackReason,
+      // Names the recogniser misheard and vocabulary.js put right ("Nairan→Nyron").
+      corrected: transcript.corrections,
+    });
+    this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms });
+
+    const filler = this.scheduleFiller(turn);
+    const chunker = new SentenceChunker();
+    const say = (sentence) => {
+      turn.sentences.push(sentence);
+      turn.speaking = turn.speaking.then(() => this.speak(turn, sentence));
+    };
+
+    let result = null;
+    let error = null;
+    try {
+      result = await this.brain.respond({
+        tenantId: this.tenantId,
+        conversationId: this.recorder.conversationId,
+        channel: "voice",
+        userMessage: text,
+        onChunk: (delta) => chunker.push(delta).forEach(say),
+        onStage: (stage, data) => {
+          if (stage === "retrieved") {
+            this.log("retrieval.completed", {
+              turn: index,
+              ms: data.ms,
+              sources: data.sources,
+              searchQuery: data.searchQuery !== text ? data.searchQuery : null,
+              rewrite: data.rewriteStatus,
+              rewriteMs: data.rewriteMs,
+            });
+          } else if (stage === "first_token") {
+            this.log("llm.first_token", { turn: index, ms: data.ms });
+          }
+        },
+      });
+      chunker.flush().forEach(say);
+    } catch (err) {
+      error = String(err?.message ?? err).slice(0, 500);
+      console.error(`[voice] turn ${index} failed:`, err);
+      this.log("turn.failed", { turn: index, message: error.slice(0, 200) });
+      this.transport.notify(SERVER.ERROR, { code: ERROR_CODES.TURN_FAILED, message: error.slice(0, 200) });
+      // Whatever was already said stays said; the caller then hears a short, true
+      // apology instead of silence (prompt.js voiceLine).
+      say(voiceLine("fallback", this.lastLanguage ?? "en"));
+    }
+
+    await turn.speaking;
+    this.clearTimer(filler);
+
+    const classification = classifyTurn({
+      callerText: text,
+      sources: result?.sources ?? [],
+      trigger: result?.searchTrigger ?? null,
+      rewriteStatus: result?.rewriteStatus ?? null,
+      failed: Boolean(error),
+    });
+    const responseMs = turn.firstAudioAt != null ? Math.round(turn.firstAudioAt - speechEndedAt) : null;
+    if (responseMs != null) this.responseTimes.push(responseMs);
+
+    const timings = {
+      speechMs: durationMs,
+      sttMs: transcript.ms,
+      contextMs: result?.timings?.contextMs ?? null,
+      retrievalMs: result?.timings?.retrievalMs ?? null,
+      rewriteMs: result?.timings?.rewriteMs ?? null,
+      llmFirstTokenMs: result?.timings?.firstTokenMs ?? null,
+      llmMs: result?.timings?.generationMs ?? null,
+      ttsFirstAudioMs: turn.firstAudioSynthMs,
+      responseMs,
+    };
+    const summary = {
+      index,
+      callerText: text,
+      agentText: result?.reply ?? turn.sentences.join(" "),
+      spokenText: turn.interrupted ? turn.spoken.join(" ") : null,
+      interrupted: turn.interrupted,
+      language: turn.language,
+      ...classification,
+      sources: result?.sources ?? [],
+      searchQuery: result?.searchQuery ?? null,
+      rewriteStatus: result?.rewriteStatus ?? null,
+      model: result?.model ?? null,
+      responseMs,
+      timings,
+      error,
+    };
+
+    this.recorder.turn(summary);
+    this.log("turn.completed", {
+      turn: index,
+      intent: classification.intent,
+      outcome: classification.outcome,
+      responseMs,
+      interrupted: turn.interrupted,
+    });
+    this.transport.notify(SERVER.TURN, {
+      turn: index,
+      intent: classification.intent,
+      outcome: classification.outcome,
+      topic: classification.topic,
+      sources: summary.sources,
+      searchQuery: summary.searchQuery,
+      model: summary.model,
+      interrupted: turn.interrupted,
+      timings,
+      failed: classification.outcome === OUTCOMES.FAILED,
+    });
+
+    if (this.currentTurn === turn) this.currentTurn = null;
+    this.settleState();
+  }
+
+  newTurn(index) {
+    return {
+      index,
+      sentences: [],
+      spoken: [],
+      speaking: Promise.resolve(),
+      cancelled: false,
+      interrupted: false,
+      language: null,
+      speechEndedAt: null,
+      firstAudioAt: null,
+      firstAudioSynthMs: null,
+    };
+  }
+
+  /**
+   * Synthesise one sentence and send it. Sentences of a turn are chained (turn.speaking),
+   * so the next one is synthesised while this one plays on the client.
+   */
+  async speak(turn, sentence, { language, cache = false } = {}) {
+    if (turn.cancelled || this.ended) return;
+    const lang = language ?? chooseSpokenLanguage({
+      replyLanguage: this.config.replyLanguage,
+      text: sentence,
+      previous: turn.language ?? this.lastLanguage,
+    });
+
+    let audio;
+    try {
+      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache });
+    } catch (err) {
+      console.error("[voice] TTS failed:", err);
+      this.log("tts.failed", { turn: turn.index, message: String(err?.message ?? err).slice(0, 200) });
+      return;
+    }
+    // Interrupted while this sentence was being synthesised: it is never sent.
+    if (turn.cancelled || this.ended) return;
+
+    if (turn.firstAudioAt == null) {
+      turn.firstAudioAt = this.now();
+      turn.firstAudioSynthMs = audio.ms;
+      if (turn.index > 0) {
+        this.log("tts.first_audio", {
+          turn: turn.index,
+          synthMs: audio.ms,
+          responseMs: Math.round(turn.firstAudioAt - turn.speechEndedAt),
+        });
+      }
+    }
+    turn.language ??= lang;
+    this.lastLanguage = lang;
+    turn.spoken.push(sentence);
+    this.sendAudio(audio);
+    if (turn.index > 0) this.transport.notify(SERVER.AGENT_TEXT, { turn: turn.index, text: sentence });
+    this.setState(CALL_STATES.SPEAKING);
+  }
+
+  /** A short holding line if the reply is slow to start (FILLER) — a different phrasing
+   *  each turn, so a slow provider does not make the agent repeat itself. */
+  scheduleFiller(turn) {
+    if (FILLER.afterMs == null) return null;
+    return this.setTimer(() => {
+      if (turn.firstAudioAt != null || turn.cancelled || this.ended) return;
+      // The answer has already started — its first chunk is being synthesised and will be
+      // heard in about a second. A "one moment" now just delays it and makes a simple
+      // question sound hard (measured on two live calls: the filler fired 0.9 s before the
+      // answer, every time). The filler is for a model that has produced NOTHING yet.
+      if (turn.sentences.length > 0) return;
+      const language = this.lastLanguage ?? "en";
+      this.log("filler.spoken", { turn: turn.index });
+      const line = voiceLine("filler", language, turn.index);
+      // Spoken outside the reply's own chain: it must not wait for the first sentence.
+      this.tts
+        .synthesize({ text: line, voiceId: this.voices[language], language, cache: true })
+        .then((audio) => {
+          if (turn.firstAudioAt != null || turn.cancelled || this.ended) return;
+          this.sendAudio(audio);
+          // Shown in the live transcript because the caller heard it; never part of the
+          // turn's agentText, which is the reply itself.
+          this.transport.notify(SERVER.AGENT_TEXT, { turn: turn.index, text: line, filler: true });
+        })
+        .catch(() => {});
+    }, FILLER.afterMs);
+  }
+
+  /** The caller talked over the agent: stop speaking, drop the rest of the reply. */
+  bargeIn(speechMs) {
+    const turn = this.currentTurn;
+    if (turn) {
+      turn.cancelled = true;
+      turn.interrupted = true;
+    }
+    this.interruptions++;
+    this.clientPlaying = false;
+    this.audioPlaysUntil = null;
+    this.transport.clear();
+    this.log("playback.interrupted", { turn: turn?.index ?? null, afterSpeechMs: speechMs, spokenSentences: turn?.spoken.length ?? 0 });
+    this.setState(CALL_STATES.HEARING);
+  }
+
+  /**
+   * Is the agent thinking or audible right now? Audible = the client is playing, or audio
+   * was sent in the last moment and the client has not yet reported it playing.
+   */
+  agentBusy() {
+    return Boolean(this.currentTurn && !this.currentTurn.cancelled) || this.agentAudible();
+  }
+
+  /**
+   * Audio is playing. Two signals, either is enough: the client says so, or the gateway's
+   * own clock says the audio it has sent cannot have finished yet. The second one does not
+   * depend on the transport reporting playback at all (a phone line reports it
+   * differently, §9.2) and covers the round trip before the client's report arrives.
+   */
+  agentAudible() {
+    return this.clientPlaying || (this.audioPlaysUntil != null && this.now() < this.audioPlaysUntil + PLAYBACK_SLACK_MS);
+  }
+
+  /** Send audio and extend the estimate of when playback ends. */
+  sendAudio(audio) {
+    const durationMs = (audio.samples.length / audio.sampleRate) * 1000;
+    const startsAt = Math.max(this.now(), this.audioPlaysUntil ?? 0);
+    this.audioPlaysUntil = startsAt + durationMs;
+    this.transport.audio(audio.samples, audio.sampleRate);
+
+    this.clearTimer(this.timers.settle);
+    this.timers.settle = this.setTimer(
+      () => this.settleState(),
+      Math.max(0, this.audioPlaysUntil - this.now()) + PLAYBACK_SLACK_MS + 10
+    );
+  }
+
+  // ── state, timers, logging ───────────────────────────────────────────────
+
+  /** Back to LISTENING once nothing is in flight and nothing is playing. If audio is
+   *  still playing, the client's playback-ended report (onPlayback) settles it later. */
+  settleState() {
+    if (this.ended) return;
+    if (this.currentTurn && !this.currentTurn.cancelled) return;
+    if (this.agentAudible()) return;
+    this.setState(CALL_STATES.LISTENING);
+  }
+
+  setState(state) {
+    if (this.state === state) return;
+    this.state = state;
+    this.transport.notify(SERVER.STATE, { state });
+  }
+
+  armIdleTimer() {
+    if (this.ended) return;
+    this.clearTimer(this.timers.idle);
+    this.timers.idle = this.setTimer(() => {
+      // Never hang up on someone mid-reply: the idle clock is about the CALLER.
+      if (this.agentBusy()) return this.armIdleTimer();
+      this.end(END_REASONS.IDLE);
+    }, LIMITS.idleMs);
+  }
+
+  /** Write a timeline event and mirror it live to the transport. */
+  log(type, data) {
+    if (!this.recorder) return;
+    const event = this.recorder.event(type, data);
+    // Nested, never spread: the event has its own `type` ("speech.ended"…), which would
+    // overwrite the message type if the two were merged into one object on the wire.
+    this.transport.notify(SERVER.EVENT, { event });
+  }
+
+  /** For the gateway's health endpoint and logs. */
+  describe() {
+    return {
+      tenantId: this.tenantId,
+      callId: this.recorder?.callId ?? null,
+      state: this.state,
+      turns: this.turnIndex,
+      medianResponseMs: median(this.responseTimes),
+    };
+  }
+}

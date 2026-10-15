@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local voice models (npm run voice:models) — large binaries, never committed
+/models/

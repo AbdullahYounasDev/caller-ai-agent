@@ -37,6 +37,9 @@ const DEFAULTS = {
   hours: null,
   escalation: null,
   capabilities: {},
+  // { [spokenLanguage]: voiceId } — empty means every language uses its default voice
+  // (lib/voice/speech/voices.js voiceFor()).
+  voices: {},
 };
 
 
@@ -115,6 +118,7 @@ function normalizeConfig(row) {
     hours: row.hours ?? null,
     escalation: row.escalation ?? null,
     capabilities: row.capabilities ?? {},
+    voices: row.voices && typeof row.voices === "object" && !Array.isArray(row.voices) ? row.voices : {},
     updatedAt: row.updatedAt,
   };
 }
@@ -140,6 +144,7 @@ export async function saveAgentConfig(tenantId, patch) {
     "hours",
     "escalation",
     "capabilities",
+    "voices",
   ];
 
   const data = {};

@@ -164,3 +164,22 @@ describe("rankCandidates — STAGE 3: document first, heading second", () => {
     assert.equal(new Set(out).size, 5);
   });
 });
+
+describe("query embedding cache (retrieve.js embedQuery)", () => {
+  test("an exact repeat is served from memory; a different text, or the same text with other words, is embedded", async () => {
+    const { embedQuery } = await import("@/lib/agent/retrieve");
+    const calls = [];
+    const fake = async (text, options) => {
+      calls.push({ text, role: options.role });
+      return [text.length, 0.5];
+    };
+    const q = `cache-test ${Math.random()}`; // unique: the cache is module-level
+    const a = await embedQuery(`  ${q}  `, fake);
+    const b = await embedQuery(q, fake);
+    assert.deepEqual(a, b);
+    assert.equal(calls.length, 1, "the trimmed repeat did not call the embedder");
+    assert.equal(calls[0].role, "query", "always embedded as a QUERY (§6.2)");
+    await embedQuery(`${q}?`, fake);
+    assert.equal(calls.length, 2, "punctuation is NOT normalised away — a different text is a different vector");
+  });
+});

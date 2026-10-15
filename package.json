@@ -6,6 +6,9 @@
     "dev": "next dev",
     "build": "node scripts/check-locales.mjs && next build",
     "start": "next start",
+    "voice": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-gateway.mjs",
+    "voice:models": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-models.mjs",
+    "voice:smoke": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-smoke.mjs",
     "lint": "eslint",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",
@@ -41,8 +44,10 @@
     "pdfjs-dist": "^6.3.289",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "sherpa-onnx-node": "^1.13.8",
     "tesseract.js": "^7.0.0",
-    "undici": "^8.11.2"
+    "undici": "^8.11.2",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

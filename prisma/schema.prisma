@@ -193,16 +193,135 @@ model KnowledgeChunk {
   @@schema("ai_engine")
 }
 
+/// ONE CALL — today a voice session from the test console, later a phone call. Written
+/// only by the voice gateway (src/lib/voice/calls.js). What was SAID lives in `messages`
+/// under `conversationId`, exactly like a chat (one brain, one transcript store, §1);
+/// this row and its turns/events are what a call adds on top: how it went, how fast it
+/// was, and why it ended.
+///
+/// `createdAt` is the moment the call was answered.
 model CallLog {
-  id             String   @id @default(uuid())
-  tenantId       String   @map("tenant_id")
-  conversationId String?  @map("conversation_id")
-  durationSec    Int?     @map("duration_sec")
-  recordingUrl   String?  @map("recording_url") // raw audio → object storage, only the URL lives here
-  createdAt      DateTime @default(now()) @map("created_at")
+  id             String  @id @default(uuid())
+  tenantId       String  @map("tenant_id")
+  conversationId String? @map("conversation_id")
+
+  /// "browser" (test console) | "twilio" (later). The call session is identical for
+  /// both; only the transport adapter in src/lib/voice/transports/ differs.
+  transport String @default("browser")
+
+  /// "active" | "completed" | "failed"
+  status String @default("active")
+
+  /// caller_hangup | idle_timeout | max_duration | disconnected | server_shutdown |
+  /// setup_failed | error — END_REASONS in src/lib/voice/protocol.js
+  endReason String? @map("end_reason")
+
+  /// E.164 numbers once telephony exists. Null for browser sessions.
+  fromNumber String? @map("from_number")
+  toNumber   String? @map("to_number")
+
+  /// The models that served this call — { vad, stt, tts: {en, it}, llm } — so a
+  /// latency or quality regression can be traced to a model change.
+  engine Json?
+
+  turnCount     Int @default(0) @map("turn_count")
+  /// How many times the caller talked over the agent (barge-in).
+  interruptions Int @default(0)
+
+  /// MEDIAN end-of-speech → first-audio latency across the call's turns, in ms — the
+  /// single number that says whether the call felt responsive.
+  medianResponseMs Int? @map("median_response_ms")
+
+  endedAt      DateTime? @map("ended_at")
+  durationSec  Int?      @map("duration_sec")
+  recordingUrl String?   @map("recording_url") // raw audio → object storage, only the URL lives here
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  turns  CallTurn[]
+  events CallEvent[]
 
   @@index([tenantId])
+  @@index([tenantId, createdAt])
   @@map("call_logs")
+  @@schema("ai_engine")
+}
+
+/// ONE EXCHANGE in a call: what the caller said, what the agent answered, what the
+/// caller was after (intent), whether the knowledge base could answer it (outcome),
+/// and how long every stage took. One row per caller utterance that reached the brain.
+model CallTurn {
+  id       String  @id @default(uuid())
+  callId   String  @map("call_id")
+  call     CallLog @relation(fields: [callId], references: [id], onDelete: Cascade)
+  tenantId String  @map("tenant_id")
+
+  /// 1-based position in the call. The agent's greeting is not a turn.
+  index Int
+
+  callerText String @map("caller_text")
+  agentText  String @map("agent_text")
+  /// What the caller actually HEARD. Shorter than agentText when they interrupted.
+  spokenText  String? @map("spoken_text")
+  interrupted Boolean @default(false)
+
+  /// The language the reply was SPOKEN in — "en" | "it".
+  language String?
+
+  /// Rule-based, from src/lib/voice/intent.js — never a model call:
+  ///   intent  question | followup | greeting | acknowledgement | goodbye | human_request
+  ///   outcome answered | no_knowledge | conversational | handoff_requested | failed
+  intent  String
+  outcome String
+  /// The document the answer was grounded in (humanised title), when there was one.
+  topic   String?
+
+  /// Document titles retrieval handed the model, closest first.
+  sources       Json    @default("[]")
+  searchQuery   String? @map("search_query")
+  rewriteStatus String? @map("rewrite_status")
+  /// Which provider/model answered, e.g. "gemini:gemini-3.5-flash-lite".
+  model         String?
+
+  /// End-of-speech → first audio sent, in ms. The headline latency of the turn.
+  responseMs Int? @map("response_ms")
+  /// Every stage: { speechMs, sttMs, retrievalMs, rewriteMs, llmFirstTokenMs, llmMs,
+  /// ttsFirstAudioMs, responseMs }. JSON because stages will be added; responseMs is
+  /// also a column because it is the one that gets queried.
+  timings Json @default("{}")
+
+  error     String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([callId, index])
+  @@index([tenantId, intent])
+  @@map("call_turns")
+  @@schema("ai_engine")
+}
+
+/// THE CALL'S TIMELINE — an append-only log of everything that happened, in order:
+/// speech started/ended, transcribed, retrieved, first audio, interrupted, ended… It
+/// is what the console shows live and what someone debugging "why was that call
+/// slow / why did it cut me off" reads afterwards.
+model CallEvent {
+  id       String  @id @default(uuid())
+  callId   String  @map("call_id")
+  call     CallLog @relation(fields: [callId], references: [id], onDelete: Cascade)
+  tenantId String  @map("tenant_id")
+
+  /// Order within the call, from 1. Writes are fire-and-forget (they must never slow a
+  /// turn down), so order is carried explicitly rather than inferred from timestamps.
+  seq  Int
+  /// e.g. "call.started", "speech.ended", "stt.completed", "turn.completed"
+  type String
+  /// Milliseconds since the call started — a timeline that reads the same however the
+  /// server clock is set.
+  atMs Int   @map("at_ms")
+  data Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([callId, seq])
+  @@map("call_events")
   @@schema("ai_engine")
 }
 
@@ -269,6 +388,12 @@ model AgentConfig {
   // would mean a migration every time we add a capability. If you ever need to
   // query "which tenants enabled X", add a GIN index on this column.
   capabilities Json @default("{}")
+
+  // The agent's VOICE on calls, per spoken language: { en: "kokoro:af_heart", ur: "kokoro:hm_omega" }.
+  // Ids come from src/lib/voice/speech/voices.js (the only voices the models actually
+  // have); a language left out speaks with that language's default voice. JSON, like
+  // capabilities, because the catalog of voices lives in code.
+  voices Json @default("{}")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

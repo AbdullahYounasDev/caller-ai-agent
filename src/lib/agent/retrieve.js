@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db";
 import { embedText } from "./llm";
 import { buildKeywordQuery } from "./keyword-query";
+import { EMBEDDING_SCHEME_VERSION } from "./embed-scheme";
 
 /**
  * Embed a question and find the tenant's most relevant knowledge chunks.
@@ -94,6 +95,40 @@ export const USE_OR_KEYWORD_QUERY = false;
 export const KEYWORD_RANK_NORMALIZATION = 1;
 
 /**
+ * QUERY EMBEDDINGS ARE CACHED. Embedding the question is a round trip to the embedding
+ * API — measured ~0.8–1.1 s of every voice turn on the free tier (§6.24), and one unit of
+ * the ~1000/day embedding quota (§8 limitation 3). The same text always embeds to the same
+ * vector, and callers ask the same few questions all day ("what are your opening hours?"),
+ * so an exact repeat is answered from memory.
+ *
+ * Keyed by the EXACT text (trimmed only — normalising case or punctuation would hand one
+ * text the vector of another, a small unmeasured change to retrieval) AND by
+ * EMBEDDING_SCHEME_VERSION, so a vector from another scheme can never be reused (§6.2).
+ * In-process and bounded, like every cache here (§8 limitation 9).
+ */
+const QUERY_EMBEDDING_CACHE_SIZE = 1000;
+const queryEmbeddings = new Map();
+
+/**
+ * @param {string} query
+ * @param {(text: string, options: {role: "query"}) => Promise<number[]>} [embed] injectable for tests
+ * @returns {Promise<number[]>}
+ */
+export async function embedQuery(query, embed = embedText) {
+  const key = `${EMBEDDING_SCHEME_VERSION}\u0000${String(query).trim()}`;
+  if (queryEmbeddings.has(key)) {
+    const vector = queryEmbeddings.get(key);
+    queryEmbeddings.delete(key); // refresh LRU position
+    queryEmbeddings.set(key, vector);
+    return vector;
+  }
+  const vector = await embed(String(query).trim(), { role: "query" });
+  queryEmbeddings.set(key, vector);
+  if (queryEmbeddings.size > QUERY_EMBEDDING_CACHE_SIZE) queryEmbeddings.delete(queryEmbeddings.keys().next().value);
+  return vector;
+}
+
+/**
  * @param {object} args
  * @param {string} args.tenantId
  * @param {string} args.query - the customer's raw question
@@ -110,7 +145,7 @@ export async function retrieveRelevantChunks({
   maxDistance = MAX_DISTANCE,
   keywordQuery = USE_OR_KEYWORD_QUERY ? "or" : "and",
 }) {
-  const queryEmbedding = await embedText(query, { role: "query" });
+  const queryEmbedding = await embedQuery(query);
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
 
   // STAGE 1 — VECTOR SEARCH DECIDES WHAT IS ADMITTED AT ALL. `<=>` is cosine

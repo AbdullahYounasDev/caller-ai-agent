@@ -213,5 +213,6 @@ describe("llm.js rewrite configuration", () => {
     assert.equal(rewriteModelFor("gemini", { GEMINI_REWRITE_MODEL: " gemini-flash-lite-latest " }), "gemini-flash-lite-latest");
     assert.equal(rewriteModelFor("openrouter", { GEMINI_REWRITE_MODEL: "x" }), undefined, "one provider's setting never leaks to the other");
     assert.equal(rewriteModelFor("openrouter", { OPENROUTER_REWRITE_MODEL: "meta/llama-small" }), "meta/llama-small");
+    assert.equal(rewriteModelFor("groq", { GROQ_REWRITE_MODEL: "openai/gpt-oss-20b", GEMINI_REWRITE_MODEL: "x" }), "openai/gpt-oss-20b");
   });
 });
