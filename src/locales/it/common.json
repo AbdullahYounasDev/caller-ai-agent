@@ -30,5 +30,6 @@
   "replyLanguage.en": "Sempre in inglese",
   "replyLanguage.it": "Sempre in italiano",
   "replyLanguage.auto": "Segui la lingua del cliente",
-  "channel.chat": "Chat di prova"
+  "channel.chat": "Chat di prova",
+  "replyLanguage.ur": "Sempre in urdu"
 }

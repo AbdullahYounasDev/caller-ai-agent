@@ -45,16 +45,30 @@ export function detectSearchConfig(text) {
   const latin = sample.match(/[A-Za-zÀ-ÿ]/g) ?? [];
   if (letters.length >= 40 && latin.length / letters.length < 0.5) return "simple";
 
-  let italian = 0;
-  let english = 0;
-  for (const word of sample.toLowerCase().match(/[a-zà-ÿ]+/g) ?? []) {
-    if (ITALIAN.has(word)) italian++;
-    if (ENGLISH.has(word)) english++;
-  }
+  const { italian, english } = stopWordCounts(sample);
   // "e", "a", "i", "la", "me"… exist in both lists' neighbours; the ratio, not the
   // raw count, is what separates them.
   if (italian >= MIN_EVIDENCE && italian >= english * ITALIAN_RATIO) return "italian";
   return "english";
+}
+
+/**
+ * The raw evidence detectSearchConfig judges by: how many English and Italian stop
+ * words the text contains. Exported for callers with a different question and a
+ * different threshold — the voice gateway picks which VOICE speaks a reply from one
+ * spoken sentence, far below MIN_EVIDENCE (src/lib/voice/spoken-language.js).
+ *
+ * @param {string} text
+ * @returns {{italian: number, english: number}}
+ */
+export function stopWordCounts(text) {
+  let italian = 0;
+  let english = 0;
+  for (const word of String(text ?? "").toLowerCase().match(/[a-zà-ÿ]+/g) ?? []) {
+    if (ITALIAN.has(word)) italian++;
+    if (ENGLISH.has(word)) english++;
+  }
+  return { italian, english };
 }
 
 /** The configs a chunk may carry. retrieve.js builds one tsquery per entry. */

@@ -56,14 +56,20 @@ export const RTL_LOCALES = ["ar", "ur"];
 /**
  * What language the AGENT replies in. Distinct from the interface language.
  *
- *   "en" | "it"  always answer in that language
- *   "auto"       answer in whichever language the customer wrote in
+ *   "en" | "it" | "ur"  always answer in that language
+ *   "auto"              answer in whichever language the customer wrote in
  *
  * `auto` is not a locale and never reaches `t()` — it is an instruction to the
  * model, applied in prompt.js. Treating it as a locale would send a lookup
  * hunting for a catalog named "auto".
+ *
+ * "ur" is a REPLY language without being an active INTERFACE locale: a business
+ * in Pakistan can have its agent answer callers in Urdu while its owner reads the
+ * dashboard in English. The two settings are independent by design (§7); the
+ * dormant `ur` UI catalog is unaffected. Spoken Urdu needs the voice stack of
+ * §6.24 (Urdu speech recognition is hosted — Groq Whisper).
  */
-export const REPLY_LANGUAGES = ["en", "it", "auto"];
+export const REPLY_LANGUAGES = ["en", "it", "ur", "auto"];
 export const DEFAULT_REPLY_LANGUAGE = "auto";
 
 /** @param {unknown} value */

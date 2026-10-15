@@ -24,6 +24,12 @@ const MAX_CONTEXT_CHUNKS = 5;
  *        same config, same retrieval, same prompt, same persistence. Streaming is
  *        a DELIVERY choice, not a different brain — which is why it's a parameter
  *        here rather than a second function that would drift out of step.
+ * @param {(stage: "retrieved"|"first_token", data: object) => void} [args.onStage] -
+ *        OBSERVATION ONLY: told when retrieval has finished (with what it found) and
+ *        when the first token of the reply arrives, so a channel can show and log
+ *        progress while the turn is still running — the voice gateway's live timeline
+ *        (§6.24). It cannot change anything about the turn, and a throwing callback is
+ *        swallowed: reporting on a reply must never break the reply.
  */
 export async function respond({
   tenantId,
@@ -31,7 +37,17 @@ export async function respond({
   channel,
   userMessage,
   onChunk,
+  onStage,
 }) {
+  const stage = (name, data) => {
+    try {
+      onStage?.(name, data);
+    } catch {
+      // Observation must never break the turn it observes.
+    }
+  };
+  const startedAt = performance.now();
+  const since = (t) => Math.round(performance.now() - t);
   // 1. Persist the incoming message. Same `messages` table regardless of
   // channel, keyed by conversationId — so a conversation that starts in the
   // test chat and continues by phone is one query with the full history.
@@ -84,6 +100,8 @@ export async function respond({
     last && last.role === "user" && last.content === userMessage
       ? priorMessages.slice(0, -1)
       : priorMessages;
+  const contextMs = since(startedAt);
+  const retrievalStartedAt = performance.now();
   const turn = await retrieveForTurn({
     tenantId,
     message: userMessage,
@@ -91,6 +109,16 @@ export async function respond({
     topK: MAX_CONTEXT_CHUNKS,
   });
   const chunks = turn.chunks;
+  const retrievalMs = since(retrievalStartedAt);
+  const sources = [...new Set(chunks.map((c) => c.sourceTitle))];
+  stage("retrieved", {
+    sources,
+    searchQuery: turn.searchQuery,
+    trigger: turn.trigger,
+    rewriteStatus: turn.rewrite?.status ?? null,
+    rewriteMs: turn.rewrite?.ms ?? null,
+    ms: retrievalMs,
+  });
 
   // 4. Record the language this conversation is being held in.
   //
@@ -158,9 +186,23 @@ export async function respond({
   const onProvider = (description) => {
     answeredBy = description;
   };
-  const assistantReply = onChunk
-    ? await generateReplyStream({ systemInstruction, history, onChunk, onProvider })
+  // Time to the first token is measured on the stream itself, not inferred: it is the
+  // stage a voice caller hears as silence (§6.24), so it is the one worth knowing exactly.
+  const generationStartedAt = performance.now();
+  let firstTokenMs = null;
+  const streamChunk = onChunk
+    ? (text) => {
+        if (firstTokenMs === null) {
+          firstTokenMs = since(generationStartedAt);
+          stage("first_token", { ms: firstTokenMs });
+        }
+        onChunk(text);
+      }
+    : undefined;
+  const assistantReply = streamChunk
+    ? await generateReplyStream({ systemInstruction, history, onChunk: streamChunk, onProvider })
     : await generateReply({ systemInstruction, history, onProvider });
+  const generationMs = since(generationStartedAt);
 
   // 8. Persist the reply.
   await prisma.message.create({
@@ -179,7 +221,20 @@ export async function respond({
     // nothing cleared MAX_DISTANCE, which is itself useful to see: it means
     // this reply came from the persona/instructions alone, not the knowledge
     // base.
-    sources: [...new Set(chunks.map((c) => c.sourceTitle))],
+    sources,
+    // Whether the follow-up step fired ("heuristic" | "empty") or not (null) — §6.19.
+    searchTrigger: turn.trigger,
+    // Where the turn's time went, in ms. contextMs: config + history reads;
+    // retrievalMs: search INCLUDING any follow-up rewrite (rewriteMs is that part);
+    // firstTokenMs: generation start → first streamed token (null when not streaming);
+    // generationMs: the whole generation. The voice call log stores these per turn.
+    timings: {
+      contextMs,
+      retrievalMs,
+      rewriteMs: turn.rewrite?.ms ?? null,
+      firstTokenMs,
+      generationMs,
+    },
     // What was actually SEARCHED when it differs from what the customer said
     // (§6.19) — so "why did it answer about the Pro plan?" is answerable by
     // looking at the bubble instead of the server log. null when the message

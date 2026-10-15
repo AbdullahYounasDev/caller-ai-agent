@@ -72,7 +72,7 @@ describe("parseAcceptLanguage", () => {
 
 describe("reply language vs locale (§7)", () => {
   test("'auto' is a reply language but never a locale", () => {
-    for (const v of ["en", "it", "auto"]) assert.equal(isReplyLanguage(v), true, v);
+    for (const v of ["en", "it", "ur", "auto"]) assert.equal(isReplyLanguage(v), true, v);
     for (const v of ["ar", "", undefined, null, 1]) assert.equal(isReplyLanguage(v), false, String(v));
     assert.equal(isSupportedLocale("auto"), false);
     assert.ok(!SUPPORTED_LOCALES.includes("auto"));

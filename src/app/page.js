@@ -5,6 +5,8 @@ import CodeMirror from "@uiw/react-codemirror";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorView } from "@codemirror/view";
 import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
+import { VoiceCallPanel } from "./voice/VoiceCallPanel";
+import { VoicePicker } from "./voice/VoicePicker";
 
 // Hidden until tool-calling actually executes (Phase 4, respond.js) — showing
 // capability toggles for things the agent can only ever DESCRIBE, never do,
@@ -343,6 +345,7 @@ export default function Home() {
             uiLocale: config.uiLocale,
             replyLanguage: config.replyLanguage,
             capabilities: config.capabilities,
+            voices: config.voices,
           }),
         }
       );
@@ -1007,6 +1010,16 @@ export default function Home() {
             </div>
           </div>
 
+          <VoicePicker
+            voices={config.voices ?? {}}
+            replyLanguage={config.replyLanguage}
+            onChange={(voices) => patchConfig({ voices })}
+            t={t}
+            labelClass={label}
+            helpClass={help}
+            inputClass={inputCls}
+          />
+
           {SHOW_CAPABILITIES && (
             <div>
               <span className={label}>{t("dashboard:capabilities.title")}</span>
@@ -1408,6 +1421,10 @@ export default function Home() {
           </form>
         </Modal>
       )}
+
+      {/* The voice channel — the product (§1). Same brain as the chat below; it runs in
+          its own process (npm run voice), see src/lib/voice/gateway.js. */}
+      <VoiceCallPanel tenantId={tenantId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
 
       <section className={`${card} flex flex-1 flex-col`}>
         <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
