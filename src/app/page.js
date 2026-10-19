@@ -984,7 +984,7 @@ export default function Home() {
             role="tab"
             aria-selected={tab === id}
             onClick={() => setTab(id)}
-            className={`-mb-px rounded-t border border-b-0 px-4 py-2 text-sm ${tab === id ? "border-gray-300 bg-white font-medium" : "border-transparent text-gray-500 hover:text-black"}`}
+            className={`-mb-px rounded-t border border-b-0 px-4 py-2 text-sm ${tab === id ? "border-gray-300 bg-white font-medium text-black" : "border-transparent text-gray-500 hover:text-white"}`}
           >
             {t(`dashboard:tab.${id}`)}
           </button>
