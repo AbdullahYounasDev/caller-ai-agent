@@ -3,13 +3,9 @@ import { getAgentConfig, saveAgentConfig } from "@/lib/tenant/config";
 import { getCapability } from "@/lib/agent/capabilities/catalog";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
-import {
-  translator,
-  resolveLocale,
-  SUPPORTED_LOCALES,
-  REPLY_LANGUAGES,
-} from "@/lib/i18n";
+import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 
 /**
  * THE CONTRACT WITH THE PARTNER'S DASHBOARD.
@@ -20,7 +16,7 @@ import {
  * Both accept `&locale=` — the UI LOCALE, i.e. the language the business owner
  * is reading the dashboard in. Validation messages come back in that language,
  * because these are messages a real person reads and acts on. An English-only
- * error inside an Italian dashboard is a dead end.
+ * error inside an Urdu dashboard is a dead end.
  *
  * When no locale is given we use the tenant's saved `uiLocale`, then the
  * browser's Accept-Language, then English.
@@ -35,41 +31,6 @@ const TONES = ["professional", "friendly", "concise", "formal"];
 const CHANNELS = ["chat", "voice"];
 const MAX_BUSINESS_NAME = 120;
 const MAX_PURPOSE = 2000;
-
-/**
- * UI language for this request.
- *
- * ORDER, and it differs from the conversation-locale order on purpose:
- *   1. an explicit ?locale= — the dashboard previewing a language mid-change
- *   2. the tenant's SAVED uiLocale — an explicit decision by the business owner
- *   3. the browser's Accept-Language — a guess about a first-time visitor
- *   4. English
- *
- * A saved preference outranks the browser header here, which is the reverse of
- * how an end customer's language is chosen. The difference is who is speaking:
- * a business owner who set their dashboard to Italian means it, and shouldn't
- * be overridden by an en-US browser. An end customer never set anything, so
- * their browser is the best signal we have about them.
- */
-async function uiLocaleFor(request, tenantId) {
-  let saved;
-  if (tenantId) {
-    try {
-      saved = (await getAgentConfig(tenantId)).uiLocale;
-    } catch {
-      // A config read failing must not turn into a wrong-language error message
-      // on top of whatever actually went wrong.
-    }
-  }
-
-  return resolveLocale({
-    // Both count as "explicit"; the query param wins by being checked first.
-    requested: request.nextUrl.searchParams.get("locale") || saved,
-    acceptLanguage: request.headers.get("accept-language"),
-    enabled: undefined, // dashboard language is not limited by customer languages
-    fallback: undefined,
-  });
-}
 
 export async function GET(request) {
   try {
@@ -185,14 +146,14 @@ function validatePatch(patch, tr) {
   }
 
   // Dashboard language. Independent of what the agent replies in: reading the
-  // dashboard in Italian while the agent mirrors each customer is ordinary.
+  // dashboard in English while the agent answers callers in Urdu is ordinary.
   if (patch.uiLocale !== undefined && !SUPPORTED_LOCALES.includes(patch.uiLocale)) {
     errors.push(tr("validation:locale.invalid", { vars: { allowed: list(SUPPORTED_LOCALES) } }));
   }
 
-  // What the agent replies in: a fixed language, or "auto" to mirror the
-  // customer. Unlike uiLocale this is not a locale, so it is checked against
-  // REPLY_LANGUAGES rather than SUPPORTED_LOCALES.
+  // What the agent replies in: English or Urdu (it understands both either way).
+  // Checked against REPLY_LANGUAGES rather than SUPPORTED_LOCALES: they are two
+  // settings that happen to hold the same two codes today.
   if (patch.replyLanguage !== undefined && !REPLY_LANGUAGES.includes(patch.replyLanguage)) {
     errors.push(tr("validation:replyLanguage.invalid", { vars: { allowed: list(REPLY_LANGUAGES) } }));
   }

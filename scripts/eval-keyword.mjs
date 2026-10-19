@@ -41,7 +41,7 @@ const TENANT = process.env.EVAL_TENANT || "__eval_real__";
 const JSON_OUT = process.argv.includes("--json");
 const VERBOSE = process.argv.includes("--verbose");
 
-const CONFIGS = ["english", "italian", "simple"];
+const CONFIGS = ["english", "simple"];
 /** The tsquery for one chunk config. Config names come from the fixed list above, never input. */
 const tsq = (variant, cfg, question, orQuery) => {
   const c = Prisma.raw(`'${cfg}'`);
@@ -59,9 +59,8 @@ const VARIANTS = [
   { name: "OR + norm 8 (unique words)", kind: "or", norm: 8 },
 ];
 
-/** Italian vs English question, by words that only Italian uses. Good enough to bucket 94 questions. */
-const IT_MARKERS = /\b(quanto|quanti|quale|quali|qual|avete|vostra|vostre|vostri|vostro|dove|negozi|della|degli|delle|nel|nella|il|gli|costa|orari|ricetta|assistenza|periodo|politica|abbonamenti|piano|lo)\b/i;
-const qLang = (q) => (IT_MARKERS.test(q) || /[àèéìòù]/i.test(q) ? "it" : "en");
+/** Urdu (script) vs English question. Roman Urdu reads as English here: it is Latin letters. */
+const qLang = (q) => (/[\u0600-\u06FF]/.test(q) ? "ur" : "en");
 
 const hasTenant = await prisma.$queryRaw`SELECT count(*)::int AS n FROM ai_engine.knowledge_chunks WHERE tenant_id = ${TENANT}`;
 if (!hasTenant[0].n) {
@@ -74,13 +73,6 @@ if (!hasTenant[0].n) {
   process.exit(2);
 }
 
-const docLang = new Map(
-  (await prisma.$queryRaw`
-    SELECT s.title, bool_or(c.search_config = 'italian'::regconfig) AS it
-    FROM ai_engine.knowledge_sources s JOIN ai_engine.knowledge_chunks c ON c.source_id = s.id
-    WHERE s.tenant_id = ${TENANT} GROUP BY s.title`).map((r) => [r.title, r.it ? "italian" : "english"])
-);
-
 /** Per-chunk keyword ranks for one question under one variant. */
 async function rank(variant, question) {
   const { tsquery } = buildKeywordQuery(question);
@@ -89,7 +81,6 @@ async function rank(variant, question) {
            ts_rank_cd(
              c.content_tsv,
              CASE c.search_config
-               WHEN 'italian'::regconfig THEN ${tsq(variant, "italian", question, tsquery)}
                WHEN 'simple'::regconfig  THEN ${tsq(variant, "simple", question, tsquery)}
                ELSE ${tsq(variant, "english", question, tsquery)}
              END,
@@ -134,7 +125,7 @@ for (const variant of VARIANTS) {
     const scores = docScores(rows);
     const cfgSignal = {
       english: rows.some((x) => x.cfg === "english" && x.r > 0),
-      italian: rows.some((x) => x.cfg === "italian" && x.r > 0),
+      simple: rows.some((x) => x.cfg === "simple" && x.r > 0),
     };
     let r1 = null;
     let r3 = null;
@@ -152,7 +143,7 @@ for (const variant of VARIANTS) {
       }
     }
     const top = [...scores].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
-    per.push({ item, signal: scores.size > 0, cfgSignal, hit1: r1 === 1, hit3: r3 === 1, scored: Boolean(item.targets), top, topIsItalianDoc: top ? docLang.get(top) === "italian" : false });
+    per.push({ item, signal: scores.size > 0, cfgSignal, hit1: r1 === 1, hit3: r3 === 1, scored: Boolean(item.targets), top });
   }
   results.push({ variant, per });
 }
@@ -176,16 +167,12 @@ for (const { variant, per } of results) {
   const byCat = Object.fromEntries(Object.entries(cats).map(([k, v]) => [k, summarise(v)]));
   const overall = summarise(per.filter(groups.overall));
   const byLang = Object.fromEntries(
-    ["en", "it"].map((l) => [l, summarise(per.filter((p) => groups.overall(p) && p.item.lang === l))])
+    ["en", "ur"].map((l) => [l, summarise(per.filter((p) => groups.overall(p) && p.item.lang === l))])
   );
-  const itQ = per.filter((p) => p.item.lang === "it" && p.signal && p.scored && !p.item.isFollow);
-  const cross = {
-    questions: itQ.length,
-    topIsItalianDoc: itQ.filter((p) => p.topIsItalianDoc).length,
-    hitOnItalianChunks: per.filter((p) => p.item.lang === "it" && p.cfgSignal.italian).length,
-    hitOnEnglishChunks: per.filter((p) => p.item.lang === "it" && p.cfgSignal.english).length,
-    itTotal: per.filter((p) => p.item.lang === "it").length,
-  };
+  // Urdu questions against an English corpus: the keyword half can only match what is
+  // language-neutral (a brand, a plan name, a number); the vector half carries the meaning.
+  const urQ = per.filter((p) => p.item.lang === "ur");
+  const cross = { urTotal: urQ.length, withSignal: urQ.filter((p) => p.signal).length };
   const offTopic = per.filter((p) => p.item.category === "off_topic");
   report[variant.name] = { byCat, overall, byLang, cross, offTopicWithSignal: offTopic.filter((p) => p.signal).length, offTopicN: offTopic.length };
 }
@@ -208,18 +195,16 @@ if (JSON_OUT) {
     }));
   }
   row("OVERALL (excl conflict/follow)", names.map((n) => { const s = report[n].overall; return `${pct(s.hit1, s.n)} /${pct(s.hit3, s.n)} /${pct(s.signal, s.n)}`.padEnd(22); }));
-  for (const l of ["en", "it"]) {
+  for (const l of ["en", "ur"]) {
     row(`  ${l} questions (n=${report[names[0]].byLang[l].n})`, names.map((n) => { const s = report[n].byLang[l]; return `${pct(s.hit1, s.n)} /${pct(s.hit3, s.n)} /${pct(s.signal, s.n)}`.padEnd(22); }));
   }
-  console.log("\nItalian questions (cross-language incl.): keyword signal by CHUNK language, and where the top doc is the Italian one");
+  console.log("\nUrdu questions (answered from English documents): how many get ANY keyword signal at all");
   row("", names.map((n) => n.slice(0, 22).padEnd(22)));
-  row("hit on italian-config chunks", names.map((n) => `${report[n].cross.hitOnItalianChunks}/${report[n].cross.itTotal}`.padEnd(22)));
-  row("hit on english-config chunks", names.map((n) => `${report[n].cross.hitOnEnglishChunks}/${report[n].cross.itTotal}`.padEnd(22)));
-  row("top doc is the Italian doc", names.map((n) => `${report[n].cross.topIsItalianDoc}/${report[n].cross.questions}`.padEnd(22)));
+  row("urdu questions with signal", names.map((n) => `${report[n].cross.withSignal}/${report[n].cross.urTotal}`.padEnd(22)));
   console.log("\nOff-topic questions that get ANY keyword score (informational: keyword can never ADMIT a chunk, §6.3):");
   row("", names.map((n) => `${report[n].offTopicWithSignal}/${report[n].offTopicN}`.padEnd(22)));
   console.log("\nOR query built for a few questions (keyword-query.js):");
-  for (const q of ["How many practitioners can the ClinicHMS Growth plan support?", "Quanto costa il piano ClinicHMS Growth?", "what's your clinic software called", "who are you"]) {
+  for (const q of ["How many practitioners can the ClinicHMS Growth plan support?", "ClinicHMS Growth پلان کی قیمت کتنی ہے؟", "Growth plan ki fees kitni hai", "what's your clinic software called", "who are you"]) {
     console.log(`  ${JSON.stringify(q)}\n    -> ${buildKeywordQuery(q).tsquery || "(nothing left: falls back to AND)"}`);
   }
 }

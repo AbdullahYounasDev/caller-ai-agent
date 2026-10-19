@@ -25,7 +25,7 @@ const sources = await prisma.knowledgeSource.findMany({
   orderBy: [{ tenantId: "asc" }, { title: "asc" }],
 });
 
-const totals = { english: 0, italian: 0, simple: 0 };
+const totals = { english: 0, simple: 0 };
 let changed = 0;
 for (const s of sources) {
   const config = detectSearchConfig(s.content);
@@ -36,5 +36,5 @@ for (const s of sources) {
   if (n) console.log(`  ${DRY ? "would relabel" : "relabelled"} ${n} chunk(s) → ${config}: ${s.tenantId} / ${s.title}`);
   changed += n;
 }
-console.log(`\n${sources.length} document(s): ${totals.english} english, ${totals.italian} italian, ${totals.simple} simple — ${changed} chunk(s) ${DRY ? "would change" : "relabelled"}.`);
+console.log(`\n${sources.length} document(s): ${totals.english} english, ${totals.simple} simple — ${changed} chunk(s) ${DRY ? "would change" : "relabelled"}.`);
 await prisma.$disconnect();

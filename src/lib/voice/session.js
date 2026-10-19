@@ -57,7 +57,7 @@ export class CallSession {
    * @param {string} args.tenantId
    * @param {"browser"|"twilio"} args.transportName
    * @param {object} args.transport            see above
-   * @param {{forCall(call: {replyLanguage: string}): import("./speech/stt").Transcriber}} args.stt
+   * @param {{forCall(call: {vocabulary?: string[]}): import("./speech/stt").Transcriber}} args.stt
    *   the STT seam; it picks the recogniser for this call (speech/stt.js)
    * @param {import("./speech/tts").TextToSpeech} args.tts
    * @param {() => {push: Function, reset: Function}} args.createVad
@@ -104,15 +104,12 @@ export class CallSession {
       this.brain.invalidateAgentConfig(this.tenantId);
       this.config = await this.brain.getAgentConfig(this.tenantId);
 
-      // The engines THIS call uses, decided once: the speech recogniser follows the
-      // languages the call can be in (Urdu needs the hosted one — speech/stt.js), and
-      // each spoken language has the voice the business picked (or its default). The
-      // business's own name is taught to the recogniser, which has never heard it
-      // (vocabulary.js).
-      this.transcriber = this.stt.forCall({
-        replyLanguage: this.config.replyLanguage,
-        vocabulary: callVocabulary(this.config),
-      });
+      // The engines THIS call uses, decided once: every call understands Urdu and English
+      // whichever language it answers in, so the recogniser does not depend on the reply
+      // language (speech/stt.js); each spoken language has the voice the business picked
+      // (or its default). The business's own name is taught to the recogniser, which has
+      // never heard it (vocabulary.js).
+      this.transcriber = this.stt.forCall({ vocabulary: callVocabulary(this.config) });
       this.voices = Object.fromEntries(SPOKEN_LANGUAGES.map((lang) => [lang, voiceFor(this.config.voices, lang).id]));
       this.callEngine = { ...this.engineInfo, stt: this.transcriber.id, voices: this.voices };
 
@@ -140,10 +137,10 @@ export class CallSession {
       replyLanguage: this.config.replyLanguage,
       stt: this.transcriber.id,
     });
-    // A call that may be in Urdu, on a recogniser that cannot understand Urdu (no
-    // GROQ_API_KEY — speech/stt.js). The call still works in English; it is logged so the
-    // first garbled Urdu transcript has its explanation right above it in the timeline.
-    if (["ur", "auto"].includes(this.config.replyLanguage) && !this.transcriber.understandsUrdu) {
+    // Every call may be in Urdu, so a recogniser that cannot understand Urdu (no
+    // GROQ_API_KEY — speech/stt.js) is worth a line in the timeline: the call still works
+    // in English, and the first garbled Urdu transcript has its explanation right above it.
+    if (!this.transcriber.understandsUrdu) {
       this.log("stt.urdu_unavailable", { stt: this.transcriber.id });
     }
 

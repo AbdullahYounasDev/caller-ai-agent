@@ -131,8 +131,8 @@ describe("classifyTurn — intent and outcome, rule-based", () => {
     assert.equal(classifyTurn({ callerText: "What about the weather?", trigger: "heuristic", rewriteStatus: "unchanged" }).intent, INTENTS.QUESTION);
   });
 
-  test("asking for a person, in English and Italian", () => {
-    for (const text of ["Can I speak to a human please", "put me through to an operator", "Vorrei parlare con un operatore", "posso parlare con una persona?"]) {
+  test("asking for a person, in English, Urdu and Roman Urdu", () => {
+    for (const text of ["Can I speak to a human please", "put me through to an operator", "مجھے کسی انسان سے بات کرنی ہے", "مینیجر سے بات کروائیں", "kisi insan se baat karni hai", "manager se baat karwa dein"]) {
       const result = classifyTurn({ callerText: text, sources: ["x"] });
       assert.equal(result.intent, INTENTS.HUMAN_REQUEST, text);
       assert.equal(result.outcome, OUTCOMES.HANDOFF_REQUESTED, text);
@@ -141,11 +141,14 @@ describe("classifyTurn — intent and outcome, rule-based", () => {
 
   test("small talk is conversational, never 'no knowledge'", () => {
     assert.equal(classifyTurn({ callerText: "Hello!" }).intent, INTENTS.GREETING);
-    assert.equal(classifyTurn({ callerText: "Buongiorno" }).intent, INTENTS.GREETING);
+    assert.equal(classifyTurn({ callerText: "السلام علیکم" }).intent, INTENTS.GREETING);
+    assert.equal(classifyTurn({ callerText: "Assalam o alaikum" }).intent, INTENTS.GREETING);
     assert.equal(classifyTurn({ callerText: "thanks" }).intent, INTENTS.ACKNOWLEDGEMENT);
+    assert.equal(classifyTurn({ callerText: "شکریہ" }).intent, INTENTS.ACKNOWLEDGEMENT);
     assert.equal(classifyTurn({ callerText: "Okay, goodbye" }).intent, INTENTS.GOODBYE);
-    assert.equal(classifyTurn({ callerText: "grazie, arrivederci" }).intent, INTENTS.GOODBYE);
-    for (const text of ["Hello!", "thanks", "goodbye"]) {
+    assert.equal(classifyTurn({ callerText: "شکریہ، خدا حافظ" }).intent, INTENTS.GOODBYE);
+    assert.equal(classifyTurn({ callerText: "theek hai, Allah hafiz" }).intent, INTENTS.GOODBYE);
+    for (const text of ["Hello!", "thanks", "goodbye", "خدا حافظ"]) {
       assert.equal(classifyTurn({ callerText: text }).outcome, OUTCOMES.CONVERSATIONAL, text);
     }
   });
@@ -238,29 +241,34 @@ describe("PCM conversion", () => {
 });
 
 describe("spoken language and fixed agent lines", () => {
-  test("a fixed reply language always wins", () => {
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "it", text: "The price is 149 euro." }), "it");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "en", text: "Il prezzo è di 149 euro." }), "en");
-  });
-
-  test("'auto' follows the sentence, and sticks when a sentence carries no evidence", () => {
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "Il piano Pro costa 149 euro al mese." }), "it");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "The Pro plan is 149 euro a month." }), "en");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "Pro: 149 euro.", previous: "it" }), "it");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "Pro: 149 euro." }), "en");
-  });
-
-  test("detectSearchConfig is unchanged by the stopWordCounts extraction", () => {
-    assert.equal(detectSearchConfig("Il nostro studio è aperto dal lunedì al venerdì, e per le urgenze siamo sempre disponibili con il servizio della clinica."), "italian");
-    assert.equal(detectSearchConfig("Our clinic is open from Monday to Friday and we are always available for the emergencies of our patients."), "english");
-  });
-
-  test("Urdu is recognised by its script under 'auto'; a fixed 'ur' always speaks Urdu", () => {
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "ہمارے سپورٹ کے اوقات پیر سے جمعہ ہیں۔" }), "ur");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "پرو پلان 149 یورو ہے۔" }), "ur");
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "The price is 149 euro." }), "ur");
+  test("an English call is always spoken in English; an Urdu call in Urdu", () => {
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "en", text: "The price is 149 euro." }), "en");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "en", text: "قیمت 149 روپے ہے۔" }), "en", "the business chose English");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "ہمارے اوقات پیر سے جمعہ ہیں۔" }), "ur");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "پرو پلان 149 روپے ہے۔" }), "ur");
     // A brand name inside Urdu does not flip it to English.
-    assert.equal(chooseSpokenLanguage({ replyLanguage: "auto", text: "StorePulse کا پرو پلان بہترین ہے۔" }), "ur");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "StorePulse کا پرو پلان بہترین ہے۔" }), "ur");
+  });
+
+  test("an Urdu call reads a sentence with no Urdu letters at all in English, and a bare number in the language before it", () => {
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "Smile Care Dental Clinic." }), "en");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "500." , previous: "ur" }), "ur");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "500." , previous: "en" }), "en");
+    assert.equal(chooseSpokenLanguage({ replyLanguage: "ur", text: "500." }), "ur");
+  });
+
+  test("a stored 'auto' or Italian reply language (older data) speaks English", () => {
+    for (const replyLanguage of ["auto", "it", undefined]) {
+      assert.equal(chooseSpokenLanguage({ replyLanguage, text: "Hello" }), "en", String(replyLanguage));
+    }
+  });
+
+  test("detectSearchConfig: Urdu script is 'simple', English and Roman Urdu are 'english', short text is 'english'", () => {
+    assert.equal(detectSearchConfig("ہمارا کلینک پیر سے ہفتے تک صبح دس بجے سے رات آٹھ بجے تک کھلا رہتا ہے اور اتوار کو بند ہوتا ہے۔"), "simple");
+    assert.equal(detectSearchConfig("Our clinic is open from Monday to Friday and we are always available for the emergencies of our patients."), "english");
+    assert.equal(detectSearchConfig("Humara clinic Monday se Saturday tak subah das baje se raat aath baje tak khula rehta hai aur Sunday ko band hota hai."), "english");
+    assert.equal(detectSearchConfig("ہاں"), "english");
+    assert.equal(detectSearchConfig(""), "english");
   });
 
   test("the Urdu greeting agrees with the voice's gender", () => {
@@ -273,15 +281,15 @@ describe("spoken language and fixed agent lines", () => {
     assert.match(buildVoiceGreeting({ businessName: "this business", replyLanguage: "ur" }).text, /^السلام علیکم، کال کرنے کا شکریہ۔/);
   });
 
-  test("on a call the model is told its voice's gender — only on voice, and per language when they differ", () => {
+  test("on a call the model is told its voice's gender — only on voice, for the language it speaks", () => {
     const base = { businessName: "Nyron", tone: "professional", purpose: "", hours: null, capabilities: {}, timezone: "UTC" };
-    const voiceIt = buildSystemInstruction({ config: { ...base, replyLanguage: "it", voices: { it: "kokoro:im_nicola" } }, channel: "voice" });
-    assert.match(voiceIt, /VOICE: Your voice on this call is male\. .*masculine forms/);
-    const chat = buildSystemInstruction({ config: { ...base, replyLanguage: "it", voices: {} }, channel: "chat" });
+    const voiceMale = buildSystemInstruction({ config: { ...base, replyLanguage: "ur", voices: { ur: "kokoro:hm_omega" } }, channel: "voice" });
+    assert.match(voiceMale, /VOICE: Your voice on this call is male\. .*masculine forms/);
+    const voiceFemale = buildSystemInstruction({ config: { ...base, replyLanguage: "en", voices: {} }, channel: "voice" });
+    assert.match(voiceFemale, /VOICE: Your voice on this call is female\. .*feminine forms/);
+    const chat = buildSystemInstruction({ config: { ...base, replyLanguage: "ur", voices: {} }, channel: "chat" });
     assert.doesNotMatch(chat, /VOICE:/);
-    const mixed = buildSystemInstruction({ config: { ...base, replyLanguage: "auto", voices: { ur: "kokoro:hm_omega" } }, channel: "voice" });
-    assert.match(mixed, /female in English, female in Italian, male in Urdu/);
-    assert.match(mixed, /Urdu script, never in Roman/);
+    assert.match(voiceMale, /Urdu script, never in Roman/);
   });
 
   test("filler lines rotate, so a slow provider does not make the agent repeat itself", () => {
@@ -297,18 +305,17 @@ describe("spoken language and fixed agent lines", () => {
       text: "Hello, thanks for calling Nyron. How can I help you today?",
       language: "en",
     });
-    assert.match(buildVoiceGreeting({ businessName: "Nyron", replyLanguage: "it" }).text, /^Buongiorno, grazie per aver chiamato Nyron\./);
-    assert.equal(buildVoiceGreeting({ businessName: "this business", replyLanguage: "auto" }).text, "Hello, thanks for calling. How can I help you today?");
-    // "auto" has no caller to mirror yet; the interface language must not leak in (§7).
-    assert.equal(buildVoiceGreeting({ businessName: "X", replyLanguage: "auto", uiLocale: "it" }).language, "en");
+    assert.equal(buildVoiceGreeting({ businessName: "this business", replyLanguage: "en" }).text, "Hello, thanks for calling. How can I help you today?");
+    // Older stored values ("auto", Italian) degrade to English; the interface language must not leak in (§7).
+    for (const replyLanguage of ["auto", "it", undefined]) assert.equal(buildVoiceGreeting({ businessName: "X", replyLanguage, uiLocale: "ur" }).language, "en");
+    assert.equal(buildVoiceGreeting({ businessName: "X", replyLanguage: "en", uiLocale: "ur" }).language, "en");
   });
 
   test("every fixed spoken line is voice-safe: no digits, markdown or URLs", () => {
     const lines = [
       buildVoiceGreeting({ businessName: "this business", replyLanguage: "en" }).text,
-      buildVoiceGreeting({ businessName: "this business", replyLanguage: "it" }).text,
       buildVoiceGreeting({ businessName: "this business", replyLanguage: "ur" }).text,
-      ...["filler", "fallback"].flatMap((kind) => ["en", "it", "ur"].flatMap((lang) => [0, 1, 2].map((i) => voiceLine(kind, lang, i)))),
+      ...["filler", "fallback"].flatMap((kind) => ["en", "ur"].flatMap((lang) => [0, 1, 2].map((i) => voiceLine(kind, lang, i)))),
       ...Object.values(PREVIEW_TEXT),
     ];
     for (const line of lines) assert.doesNotMatch(line, /[\d*#_`[\]]|https?:/, line);
@@ -335,7 +342,7 @@ describe("voice catalog", () => {
   });
 
   test("Kokoro speaker ids match the model's own table (kokoro-multi-lang-v1_0 metadata)", () => {
-    const expected = { af_heart: 3, am_michael: 16, bf_emma: 21, bm_george: 26, if_sara: 35, im_nicola: 36, hf_alpha: 31, hm_omega: 33 };
+    const expected = { af_heart: 3, am_michael: 16, bf_emma: 21, bm_george: 26, hf_alpha: 31, hm_omega: 33 };
     for (const [name, sid] of Object.entries(expected)) assert.equal(getVoice(`kokoro:${name}`).speaker, sid, name);
   });
 
@@ -363,13 +370,17 @@ describe("speech-to-text routing", () => {
     },
   };
 
-  test("auto: Urdu-capable calls go to Groq when a key exists; English/Italian calls stay local", () => {
+  test("every call understands Urdu: Groq whenever a key exists, whatever the reply language; local without one", () => {
     const stt = createSpeechToText({ engine: fakeEngine, env: { GROQ_API_KEY: "k" } });
-    assert.equal(stt.forCall({ replyLanguage: "ur" }).id, "groq:whisper-large-v3");
-    assert.equal(stt.forCall({ replyLanguage: "auto" }).id, "groq:whisper-large-v3");
-    assert.equal(stt.forCall({ replyLanguage: "en" }).id, "parakeet");
+    assert.equal(stt.forCall({ vocabulary: [] }).id, "groq:whisper-large-v3");
+    assert.equal(stt.forCall().id, "groq:whisper-large-v3");
+    assert.equal(stt.forCall({ replyLanguage: "en" }).id, "groq:whisper-large-v3", "an English business still has Urdu callers");
     const noKey = createSpeechToText({ engine: fakeEngine, env: {} });
-    assert.equal(noKey.forCall({ replyLanguage: "ur" }).id, "parakeet");
+    assert.equal(noKey.forCall().id, "parakeet");
+    assert.equal(noKey.forCall().understandsUrdu, false);
+    assert.equal(stt.forCall().understandsUrdu, true);
+    const forcedLocal = createSpeechToText({ engine: fakeEngine, env: { GROQ_API_KEY: "k", VOICE_STT_PROVIDER: "local" } });
+    assert.equal(forcedLocal.forCall().id, "parakeet");
     assert.throws(() => createSpeechToText({ engine: fakeEngine, env: { VOICE_STT_PROVIDER: "groq" } }), /GROQ_API_KEY/);
   });
 
@@ -404,6 +415,29 @@ describe("speech-to-text routing", () => {
     assert.match(fallback.fallbackReason, /503/);
   });
 
+  test("Whisper writing short Urdu in Devanagari (Hindi) is asked again, once, with language=ur", async () => {
+    const asked = [];
+    const answers = ["हाँ जी", "ہاں جی"];
+    const transcriber = groqTranscriber({
+      apiKey: "k",
+      model: "whisper-large-v3",
+      fallback: { transcribe: async () => ({ text: "local", ms: 1, engine: "parakeet" }) },
+      fetchImpl: async (url, init) => {
+        asked.push(init.body.get("language"));
+        return { ok: true, json: async () => ({ text: answers.shift() }) };
+      },
+    });
+    const result = await transcriber.transcribe(new Float32Array(1600));
+    assert.equal(result.text, "ہاں جی");
+    assert.deepEqual(asked, [null, "ur"], "first with no language hint, then the retry");
+
+    // Normal Urdu or English is never asked twice.
+    asked.length = 0;
+    answers.push("What are your opening hours?");
+    await transcriber.transcribe(new Float32Array(1600));
+    assert.deepEqual(asked, [null]);
+  });
+
   test("every transcriber spells the business's name right, and Whisper is given it as its prompt", async () => {
     const local = createSpeechToText({ engine: { ...fakeEngine, recognizer: { ...fakeEngine.recognizer, decodeAsync: async () => ({ text: "Tell me about NIRON." }) } }, env: {} });
     const result = await local.forCall({ replyLanguage: "en", vocabulary: ["Nyron"] }).transcribe(new Float32Array(160));
@@ -417,8 +451,10 @@ describe("speech-to-text routing", () => {
       env: { GROQ_API_KEY: "k" },
       fetchImpl: async (url, init) => ((form = init.body), { ok: true, json: async () => ({ text: "What is Nairan?" }) }),
     });
-    const whisper = await hosted.forCall({ replyLanguage: "auto", vocabulary: ["Nyron"] }).transcribe(new Float32Array(160));
-    assert.equal(form.get("prompt"), "Nyron");
+    const whisper = await hosted.forCall({ vocabulary: ["Nyron"] }).transcribe(new Float32Array(160));
+    assert.match(form.get("prompt"), /^Nyron\. /, "the business's name first, then the script primer");
+    assert.match(form.get("prompt"), /السلام علیکم/, "an Urdu-script primer keeps short Urdu in Urdu script");
+    assert.equal(form.get("language"), null, "Whisper is not told which language it hears: callers use either");
     assert.equal(whisper.text, "What is Nyron?");
   });
 

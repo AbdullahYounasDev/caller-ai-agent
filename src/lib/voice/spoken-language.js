@@ -1,41 +1,34 @@
-import { stopWordCounts } from "@/lib/agent/language";
-
 /** Arabic-script letters (Urdu is written in it). */
 const ARABIC_SCRIPT = /[؀-ۿݐ-ݿﭐ-﷿ﹰ-﻿]/g;
-const ANY_LETTER = /\p{L}/gu;
+const LATIN_LETTER = /[A-Za-z]/g;
 
 /**
- * WHICH LANGUAGE A SENTENCE IS SPOKEN IN — "en" | "it" | "ur" — and so which voice reads it.
+ * WHICH LANGUAGE A SENTENCE IS SPOKEN IN — "en" | "ur" — and so which voice reads it.
  *
- * When the business fixed a reply language, that is the answer (§7: the business
- * decided). When it is "auto", the MODEL decides the reply's language by mirroring the
- * caller (prompt.js), so the voice has to follow the text it is handed — an Italian or
- * Urdu sentence read by the English voice is unintelligible.
- *
- *   - Urdu is recognised by its SCRIPT: a sentence that is mostly Arabic-script letters
- *     is Urdu. (Arabic itself is not a spoken language of this product; prompt.js tells
- *     the model to write Urdu in Urdu script, never Roman Urdu, for exactly this reason.)
- *   - English vs Italian by stop words: they share almost no function words.
- *   - STICKY: a sentence with no evidence either way ("Pro: 149 euro.") keeps the
- *     previous sentence's voice instead of flipping mid-reply.
+ * The business fixed a reply language (§7: the business decided) and the model is told
+ * to answer in it, so that is the answer — with ONE exception that matters in Pakistan:
+ * Urdu answers carry English words. prompt.js asks the model to write everyday loanwords
+ * in Urdu script, so that is rare; but a brand, a code or an English phrase can still
+ * arrive as a sentence with Latin letters and no Urdu letters at all. The Urdu voice
+ * would spell that out as gibberish, so an Urdu call speaks such a sentence with the
+ * English voice. A sentence with no letters at all ("500.") keeps the language of the
+ * sentence before it.
  *
  * Pure (tests/voice-units.test.mjs).
  *
  * @param {object} args
- * @param {"en"|"it"|"ur"|"auto"} args.replyLanguage  agent_configs.replyLanguage
- * @param {string} args.text                          the sentence about to be spoken
- * @param {"en"|"it"|"ur"|null} [args.previous]       the language of the last sentence
- * @returns {"en"|"it"|"ur"}
+ * @param {"en"|"ur"} args.replyLanguage  agent_configs.replyLanguage
+ * @param {string} args.text              the sentence about to be spoken
+ * @param {"en"|"ur"|null} [args.previous] the language of the last sentence
+ * @returns {"en"|"ur"}
  */
 export function chooseSpokenLanguage({ replyLanguage, text, previous = null }) {
-  if (replyLanguage === "en" || replyLanguage === "it" || replyLanguage === "ur") return replyLanguage;
+  if (replyLanguage !== "ur") return "en";
 
-  const letters = String(text ?? "").match(ANY_LETTER)?.length ?? 0;
-  const arabic = String(text ?? "").match(ARABIC_SCRIPT)?.length ?? 0;
-  if (letters && arabic / letters > 0.5) return "ur";
-
-  const { italian, english } = stopWordCounts(text);
-  if (italian > english) return "it";
-  if (english > italian) return "en";
-  return previous ?? "en";
+  const value = String(text ?? "");
+  const arabic = value.match(ARABIC_SCRIPT)?.length ?? 0;
+  const latin = value.match(LATIN_LETTER)?.length ?? 0;
+  if (arabic > 0) return "ur";
+  if (latin > 0) return "en";
+  return previous ?? "ur";
 }

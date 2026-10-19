@@ -80,23 +80,37 @@ const REWRITE_TIMEOUT_MS = 3000;
  *  rewriting; treat it as a failed rewrite rather than search on prose. */
 const MAX_QUERY_CHARS = 300;
 
-// "ok", "thanks", "yes please", "grazie", "va bene" — a turn with nothing to
-// search for. Without this, every pleasantry on a call is short enough to
-// trigger a model call whose best possible output is the same pleasantry.
-const ACK_WORD =
-  "ok|okay|yes|yeah|yep|no|nope|sure|thanks|thank you|thx|great|perfect|alright|right|got it|please|bye|goodbye|hello|hi|hey|grazie|ciao|va bene|sì|si|certo|perfetto|benissimo|arrivederci|buongiorno|buonasera|prego|per favore";
-const ACKNOWLEDGEMENT = new RegExp(`^\\s*((${ACK_WORD})[\\s.!,]*){1,3}$`, "i");
+// Urdu (in Urdu script and in Roman letters) is matched with Unicode-aware word edges:
+// JavaScript's \b does not treat Arabic-script letters as word characters, so it cannot be
+// used to delimit an Urdu word.
+const WORD_START = "(?<![\\p{L}\\p{M}])";
+const WORD_END = "(?![\\p{L}\\p{M}])";
+const words = (list, flags = "iu") => new RegExp(`${WORD_START}(?:${list})${WORD_END}`, flags);
 
-// A message that opens by continuing the previous one…
-const ELLIPSIS_OPENER =
-  /^\s*(and|but|also|or|so|then|what about|how about|what if|e|ma|anche|invece|oppure|e se|allora|che dire)\b/i;
-// …or points back at something already said. English and Italian only — the
-// two active locales (§7). Other languages are caught by the empty-first-pass
-// trigger below instead of being half-covered here. Bare "one", "la" and "ci"
-// are deliberately NOT listed: they are far too common in complete questions
-// ("up to one store", "la fattura") and would fire constantly.
-const ANAPHORA =
-  /\b(it|its|that|those|these|them|they|that one|this one|the (same|other|first|second|third|last|previous) one|quello|quella|quelli|quelle|lo stesso|la stessa)\b/i;
+// "ok", "thanks", "yes please", "ji haan", "شکریہ" — a turn with nothing to search for.
+// Without this, every pleasantry on a call is short enough to trigger a model call whose
+// best possible output is the same pleasantry.
+const ACK_WORD =
+  "ok|okay|yes|yeah|yep|no|nope|sure|thanks|thank you|thx|great|perfect|alright|right|got it|please|bye|goodbye|hello|hi|hey|" +
+  "جی|جی ہاں|ہاں|نہیں|ٹھیک ہے|اچھا|شکریہ|بہت شکریہ|شکریہ جی|خدا حافظ|اللہ حافظ|سلام|السلام علیکم|" +
+  "ji|ji haan|haan|han|nahi|nahin|theek hai|thik hai|acha|achha|shukriya|shukria|khuda hafiz|allah hafiz|salam|assalam o alaikum";
+const ACKNOWLEDGEMENT = new RegExp(`^\\s*((${ACK_WORD})[\\s.!,۔،؟?]*){1,3}$`, "iu");
+
+// A message that opens by continuing the previous one ("and the Pro one?", "اور پرو والا؟",
+// "aur Sunday ko?")…
+const ELLIPSIS_OPENER = new RegExp(
+  `^\\s*(and|but|also|or|so|then|what about|how about|what if|اور|لیکن|مگر|یا|پھر|تو|اگر|aur|lekin|magar|ya|phir|to|toh|agar)${WORD_END}`,
+  "iu"
+);
+// …or points back at something already said. English, Urdu and Roman Urdu — the two active
+// languages (§7) as people actually write them. Bare "one" and "یہ" are deliberately NOT
+// listed: they are far too common in complete questions ("up to one store", "یہ کلینک
+// کہاں ہے") and would fire constantly.
+const ANAPHORA = words(
+  "it|its|that|those|these|them|they|that one|this one|the (?:same|other|first|second|third|last|previous) one|" +
+    "اس کا|اس کی|اس کے|ان کا|ان کی|ان کے|اسی|پرانا والا|والا|والی|والے|" +
+    "iska|iski|iske|uska|uski|uske|inka|inki|inke|unka|unki|unke|isi|wala|wali|wale"
+);
 
 // The pointers above are safe to fire on at any length. The ones below are NOT: each
 // matched complete, standalone questions in eval-questions.mjs and cost a needless model
@@ -107,7 +121,7 @@ const ANAPHORA =
 // referent. It points back only as a bare pronoun (at the end, or before a verb) or
 // before a GENERIC noun ("this plan", "this option").
 const THIS_POINTS_BACK =
-  /\b(this|questo|questa|questi|queste)\s*[?.!]*\s*$|\b(this|questo|questa|questi|queste)\s+(one|is|does|do|includes?|included|covered|available|possible|required|allowed|free|valid|costs?|means?|works?|covers?|comes?|has|will|can|plan|option|item|product|service|package|offer|add-?on|è|costa|include|comprende|vale|piano|opzione|prodotto|servizio|pacchetto|offerta)\b/i;
+  /\bthis\s*[?.!]*\s*$|\bthis\s+(one|is|does|do|includes?|included|covered|available|possible|required|allowed|free|valid|costs?|means?|works?|covers?|comes?|has|will|can|plan|option|item|product|service|package|offer|add-?on)\b|(?<![\p{L}\p{M}])(?:یہ|وہ|ye|yeh|woh|wo)\s*[?؟.!۔]*\s*$/iu;
 // "there" is a pronoun only when it ENDS the message ("do you deliver there?"). Mid-sentence
 // it is existential or part of a phrase: "is there parking", "is my info still there if…".
 const THERE_POINTS_BACK = /\bthere\s*[?.!]*\s*$/i;
@@ -123,9 +137,10 @@ const THE_X_ONE_MAX_WORDS = 10;
 // Deliberately NOT here: a list of business nouns (price, refund, shipping…). It would exempt
 // "Who pays for shipping?" — a real follow-up in eval-questions.mjs — so recall on genuine
 // follow-ups would drop; the noun vocabulary belongs to each tenant, not to this file.
-const SECOND_PERSON = /\b(you|your|yours|voi|vostr[aeio]|tuo|tua|tuoi|tue)\b/i;
-// Internal capital (ClinicHMS, StorePulse), a capitalised word that is not the first, or a digit.
-const BRAND_OR_NUMBER = /[a-zà-ÿ][A-Z]|\s[A-Z][a-zà-ÿ]+|\d/;
+const SECOND_PERSON = words("you|your|yours|آپ|آپ کا|آپ کی|آپ کے|aap|ap|apka|apki|apke|aapka|aapki|aapke");
+// Internal capital (ClinicHMS, StorePulse), a capitalised word that is not the first, or a digit
+// (Latin, or Urdu/Arabic-Indic).
+const BRAND_OR_NUMBER = /[a-z][A-Z]|\s[A-Z][a-z]+|[\d۰-۹٠-٩]/;
 const OVERVIEW_FRAME = /^\W*(what|who)\s+(is|are|does|do)\s+[\w'’-]+\s+(do|about|mean|sell|offer|provide)\b/i;
 const isSelfContainedShort = (text) => SECOND_PERSON.test(text) || BRAND_OR_NUMBER.test(text) || OVERVIEW_FRAME.test(text);
 

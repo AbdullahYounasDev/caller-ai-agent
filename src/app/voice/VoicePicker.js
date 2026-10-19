@@ -12,8 +12,8 @@ import { VOICES, SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
  * business never picks something that would silently fall back to the default.
  *
  * ▶ plays the voice saying a fixed sample line, rendered by the gateway (cached there per
- * voice). Which languages are shown follows the reply language: a fixed language shows
- * just that one, "auto" shows all of them — the caller decides which is spoken.
+ * voice). Only the reply language is shown: the agent speaks only the language the
+ * business chose, although it understands both.
  *
  * The value is agent_configs.voices ({ [language]: voiceId }); saving is the form's
  * normal Save, validated server-side (PUT /api/agent-config).
@@ -63,7 +63,7 @@ export function VoicePicker({ voices, replyLanguage, onChange, t, labelClass, he
     };
   }, []);
 
-  const languages = replyLanguage === "auto" ? SPOKEN_LANGUAGES : [replyLanguage];
+  const languages = SPOKEN_LANGUAGES.includes(replyLanguage) ? [replyLanguage] : ["en"];
 
   function preview(voiceId) {
     audio.current?.pause();
@@ -133,10 +133,10 @@ export function VoicePicker({ voices, replyLanguage, onChange, t, labelClass, he
       </div>
 
       <p className={helpClass}>{t("dashboard:voice.picker.tierHelp")}</p>
-      {/* The agent can SPEAK Urdu locally, but understanding an Urdu caller needs the
-          hosted recogniser (lib/voice/speech/stt.js). Said plainly here, where Urdu is
-          chosen, instead of being discovered on a call. */}
-      {languages.includes("ur") && gateway?.urduStt === false && (
+      {/* Every call may be spoken in Urdu, whichever language the agent answers in, and
+          understanding Urdu needs the hosted recogniser (lib/voice/speech/stt.js). Said
+          plainly here instead of being discovered on a call. */}
+      {gateway?.urduStt === false && (
         <p className="mt-1 text-xs text-amber-700">{t("dashboard:voice.picker.urduSttMissing")}</p>
       )}
       {previewError && (

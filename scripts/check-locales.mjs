@@ -2,21 +2,21 @@
 /**
  * Fails the build when translation catalogs drift out of sync.
  *
- * Without this, adding a key to `en` and forgetting the other three is
- * invisible: the fallback quietly serves English to an Arabic customer and
+ * Without this, adding a key to `en` and forgetting the other one is
+ * invisible: the fallback quietly serves English to an Urdu customer and
  * nobody finds out until one of them mentions it. Translation rot is silent by
  * nature, so it needs a mechanical check.
  *
  * WHAT IT CHECKS
  *   - every locale has every namespace file
  *   - every locale has every BASE key that `en` has, and no extras
- *   - plural keys are compared by base name, not exact form. Arabic legitimately
- *     has `unread_zero/_one/_two/_few/_many/_other` where English has only
- *     `_one/_other` — demanding identical key sets would make correct Arabic
- *     fail. What IS required is that every plural key has at least `_other`,
- *     the category every language has.
- *   - placeholders match: if `en` says {businessName} and Italian says
- *     {nomeAzienda}, the variable silently renders as literal text.
+ *   - plural keys are compared by base name, not exact form. A language may
+ *     legitimately have more plural categories than English's `_one/_other`, so
+ *     demanding identical key sets would make a correct translation fail. What IS
+ *     required is that every plural key has at least `_other`, the category every
+ *     language has.
+ *   - placeholders match: if `en` says {businessName} and Urdu says
+ *     {کاروبار}, the variable silently renders as literal text.
  *
  * Run: npm run i18n:check
  */
@@ -28,11 +28,9 @@ import { fileURLToPath } from "node:url";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "locales");
 const SOURCE_LOCALE = "en";
 
-// ACTIVE locales only. `ar` and `ur` remain on disk but dormant — checking them
-// would fail the build over languages the product does not currently ship, and
-// silently dropping them would lose translated work. Add a code here to bring
-// one back under enforcement (and to lib/i18n + catalogs.js).
-const ACTIVE_LOCALES = ["en", "it"];
+// ACTIVE locales: English (the source) and Urdu — the only two the product ships.
+// Add a code here, to lib/i18n and to catalogs.js to bring another one under enforcement.
+const ACTIVE_LOCALES = ["en", "ur"];
 
 // CLDR plural categories. A key ending in one of these is a plural form.
 const PLURAL_SUFFIXES = ["zero", "one", "two", "few", "many", "other"];

@@ -5,12 +5,12 @@
  *
  *   npm run voice:smoke
  *     Speech models only. ZERO quota: no LLM, no embedding, no database.
- *     For English and Italian: Piper speaks a sentence → Parakeet transcribes it back,
+ *     For English: Piper and Kokoro speak a sentence → Parakeet transcribes it back,
  *     at 16 kHz and again through SIMULATED PHONE AUDIO (8 kHz, the band a Twilio call
  *     carries, §9.2) → accuracy and the time each stage took. Then the VAD is run over
  *     the audio padded with silence, to check it finds exactly one utterance.
  *
- *   npm run voice:smoke -- --call [--tenant=test-tenant] [--say="What are your opening hours?"] [--lang=en]
+ *   npm run voice:smoke -- --call [--tenant=test-tenant] [--say="What are your opening hours?"] [--lang=en|ur]
  *     A REAL call through the running app + gateway (`npm run dev` and `npm run voice`),
  *     with a synthesised caller: gets a ticket, dials, waits out the greeting, "speaks"
  *     the question in real time, and reports the transcript, the reply, the turn's intent
@@ -52,16 +52,11 @@ async function benchmark() {
       "What are your opening hours on Saturday?",
       "How much does the Pro plan cost per month, and is support included?",
     ],
-    it: [
-      "Quali sono i vostri orari di apertura il sabato?",
-      "Quanto costa il piano Pro al mese, e l'assistenza è inclusa?",
-    ],
   };
 
   // Both voice tiers (voices.js): the natural default and a fast Piper voice per language.
   const voicesByLanguage = {
     en: ["kokoro:af_heart", "piper:en_US-lessac-medium"],
-    it: ["kokoro:if_sara", "piper:it_IT-paola-medium"],
   };
 
   const rows = [];
@@ -138,8 +133,8 @@ async function realCall() {
   const { float32ToPcm16 } = await import("@/lib/voice/audio");
   const appUrl = process.env.APP_URL || "http://localhost:3000";
   const tenantId = args.tenant || process.env.TEST_TENANT || "test-tenant";
-  const say = args.say || "What are your opening hours?";
-  const language = args.lang === "it" ? "it" : "en";
+  const say = args.say || (args.lang === "ur" ? "آپ کے اوقاتِ کار کیا ہیں؟" : "What are your opening hours?");
+  const language = args.lang === "ur" ? "ur" : "en";
 
   const res = await fetch(`${appUrl}/api/voice/session?tenantId=${encodeURIComponent(tenantId)}`, {
     method: "POST",

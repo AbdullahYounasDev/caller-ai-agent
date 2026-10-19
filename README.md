@@ -2,7 +2,7 @@
 
 An AI phone agent for small businesses. A business gives the agent its own
 material — price list, opening hours, policies — and the agent answers its
-customers' questions from it, in the customer's language (English and Italian).
+customers' questions from it, in the customer's language (English and Urdu).
 
 The calling channel (Twilio) is not built yet. What exists is the engine
 underneath it — document ingestion, hybrid retrieval, the shared `respond()`

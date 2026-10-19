@@ -2,10 +2,21 @@ import { prisma } from "@/lib/db";
 import { getAgentConfig } from "@/lib/tenant/config";
 import { retrieveForTurn } from "./query";
 import { buildSystemInstruction } from "./prompt";
-import { generateReply, generateReplyStream } from "./llm";
+import { generateReply, generateReplyStream, generateExtraction } from "./llm";
+import { randomUUID } from "node:crypto";
+import { enabledRecordTypes } from "@/lib/collect/config";
+import { advanceCollection, draftFromMarker } from "@/lib/collect/engine";
+import { createExtractor } from "@/lib/collect/extract";
+import { createMarkerFilter, stripMarker } from "@/lib/collect/marker";
+import { writeDraft } from "@/lib/collect/store";
+import { createRecord } from "@/lib/standins/records";
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_CONTEXT_CHUNKS = 5;
+
+// One extractor for the whole process (lib/collect/extract.js): it carries no state, and the
+// circuit breaker behind generateExtraction is shared on purpose.
+const extractDetails = createExtractor({ generate: generateExtraction });
 
 /**
  * The channel-agnostic "brain". Every channel adapter — the test chat today,
@@ -80,7 +91,7 @@ export async function respond({
     }),
     prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { locale: true },
+      select: { locale: true, collectDraft: true },
     }),
   ]);
   // `desc` fetched the NEWEST N messages, newest first — reversed here so the
@@ -102,12 +113,18 @@ export async function respond({
       : priorMessages;
   const contextMs = since(startedAt);
   const retrievalStartedAt = performance.now();
-  const turn = await retrieveForTurn({
-    tenantId,
-    message: userMessage,
-    history: earlierTurns,
-    topK: MAX_CONTEXT_CHUNKS,
-  });
+  // Taking a customer's request (an appointment, a callback — lib/collect) runs ALONGSIDE
+  // retrieval: it needs the same history and nothing from the search, and retrieval is the
+  // slower of the two (an embedding round trip), so it adds no latency to a turn.
+  const [turn, collection] = await Promise.all([
+    retrieveForTurn({
+      tenantId,
+      message: userMessage,
+      history: earlierTurns,
+      topK: MAX_CONTEXT_CHUNKS,
+    }),
+    takeRequest({ tenantId, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
+  ]);
   const chunks = turn.chunks;
   const retrievalMs = since(retrievalStartedAt);
   const sources = [...new Set(chunks.map((c) => c.sourceTitle))];
@@ -141,7 +158,7 @@ export async function respond({
   }
 
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
-  const systemInstruction = buildSystemInstruction({ config, channel, chunks });
+  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan });
 
   // 6. Shape stored history into Gemini's `contents` format.
   let history = priorMessages.map((m) => ({
@@ -190,8 +207,12 @@ export async function respond({
   // stage a voice caller hears as silence (§6.24), so it is the one worth knowing exactly.
   const generationStartedAt = performance.now();
   let firstTokenMs = null;
-  const streamChunk = onChunk
+  // The model may open a reply with a start marker (lib/collect/marker.js); it is held back
+  // and removed here, so neither the customer nor the text-to-speech voice ever sees it.
+  const markers = createMarkerFilter();
+  const passOn = onChunk
     ? (text) => {
+        if (!text) return;
         if (firstTokenMs === null) {
           firstTokenMs = since(generationStartedAt);
           stage("first_token", { ms: firstTokenMs });
@@ -199,10 +220,34 @@ export async function respond({
         onChunk(text);
       }
     : undefined;
-  const assistantReply = streamChunk
-    ? await generateReplyStream({ systemInstruction, history, onChunk: streamChunk, onProvider })
-    : await generateReply({ systemInstruction, history, onProvider });
+  const streamChunk = passOn ? (text) => passOn(markers.push(text)) : undefined;
+  let rawReply;
+  try {
+    rawReply = streamChunk
+      ? await generateReplyStream({ systemInstruction, history, onChunk: streamChunk, onProvider })
+      : await generateReply({ systemInstruction, history, onProvider });
+  } catch (err) {
+    // The customer never heard this turn's question or read-back, so the request must not
+    // have moved on either: put the draft back as it was. (If the turn had SAVED a request,
+    // restoring the draft is still right: the customer's next "yes" saves the same
+    // submission key, which returns the same record rather than a second one.)
+    if (collection.draftWrite) {
+      await collection.draftWrite;
+      await writeDraft(conversationId, conversation?.collectDraft ?? null).catch(() => {});
+    }
+    throw err;
+  }
+  if (passOn) passOn(markers.end());
+  const { text: assistantReply, type: markedType } = stripMarker(rawReply);
   const generationMs = since(generationStartedAt);
+
+  // The model recognised a request the rules missed: start the draft so the NEXT message is
+  // taken as the answer to the question this reply just asked.
+  if (markedType && collection.plan?.state === "idle") {
+    const draft = draftFromMarker({ collect: config.collect, type: markedType, nowMs: Date.now(), id: randomUUID() });
+    if (draft) collection.draftWrite = writeDraft(conversationId, draft).catch((err) => console.error("[collect] could not start a draft:", err));
+  }
+  await collection.draftWrite;
 
   // 8. Persist the reply.
   await prisma.message.create({
@@ -243,5 +288,51 @@ export async function respond({
     // reply), so a silent fallback is still visible to a human.
     searchQuery: turn.searchQuery !== userMessage ? turn.searchQuery : null,
     rewriteStatus: turn.rewrite?.status ?? null,
+    // What happened to a request this turn, for the console and the call log — null when the
+    // business takes none. `field` is the question just asked; `reference` exists once saved.
+    collection: collection.plan
+      ? {
+          state: collection.plan.state,
+          type: collection.plan.type ?? markedType ?? null,
+          field: collection.plan.ask?.id ?? null,
+          reference: collection.plan.reference ?? null,
+        }
+      : null,
   };
+}
+
+/**
+ * Move this conversation's request on by one message and persist the draft — failing
+ * SOFT: taking a request is a feature on top of answering, and a bug or an outage in it must
+ * cost the customer nothing but the request, never the reply.
+ *
+ * @returns {Promise<{plan: object|null, draftWrite: Promise<void>|null}>}
+ */
+async function takeRequest({ tenantId, conversationId, channel, config, userMessage, earlierTurns, storedDraft }) {
+  if (!enabledRecordTypes(config.collect).length) return { plan: null, draftWrite: null };
+  try {
+    const result = await advanceCollection({
+      collect: config.collect,
+      agent: config,
+      draft: storedDraft,
+      message: userMessage,
+      history: earlierTurns,
+      nowMs: Date.now(),
+      deps: {
+        newId: randomUUID,
+        extract: extractDetails,
+        submit: (record) =>
+          createRecord(tenantId, { ...record, conversationId, channel, timezone: config.timezone, configVersion: config.collectVersion }),
+      },
+    });
+    // Not awaited here: the write runs while the model generates, and respond() awaits it
+    // before returning, so the next message always finds the draft.
+    const draftWrite = result.changed
+      ? writeDraft(conversationId, result.draft).catch((err) => console.error("[collect] could not save the draft:", err))
+      : null;
+    return { plan: result.plan, draftWrite };
+  } catch (err) {
+    console.error("[collect] taking a request failed; replying without it:", err);
+    return { plan: null, draftWrite: null };
+  }
 }

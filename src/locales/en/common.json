@@ -17,8 +17,6 @@
   "state.empty": "Nothing here yet",
   "state.error": "Something went wrong",
   "language.en": "English",
-  "language.it": "Italiano",
-  "language.ar": "العربية",
   "language.ur": "اردو",
   "channel.voice": "Phone and calls",
   "tone.professional": "Professional",
@@ -27,9 +25,7 @@
   "tone.formal": "Formal",
   "yes": "Yes",
   "no": "No",
-  "replyLanguage.en": "Always English",
-  "replyLanguage.it": "Always Italian",
-  "replyLanguage.auto": "Match the customer's language",
+  "replyLanguage.en": "Always reply in English",
   "channel.chat": "Test chat",
-  "replyLanguage.ur": "Always Urdu"
+  "replyLanguage.ur": "Always reply in Urdu"
 }

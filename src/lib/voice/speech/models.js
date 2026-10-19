@@ -34,10 +34,10 @@ export const VAD_MODEL = {
 };
 
 /**
- * STT — NVIDIA Parakeet TDT 0.6B v3, int8. 25 European languages including English
- * and Italian (the two active locales, §7), with punctuation. Non-streaming: it
- * transcribes one whole utterance once the VAD says the caller has stopped, which on
- * a modern CPU costs a fraction of the utterance's length.
+ * STT — NVIDIA Parakeet TDT 0.6B v3, int8. 25 European languages including English,
+ * with punctuation — and NOT Urdu, which is why Urdu callers go to the hosted recogniser
+ * (speech/stt.js). Non-streaming: it transcribes one whole utterance once the VAD says
+ * the caller has stopped, which on a modern CPU costs a fraction of the utterance's length.
  */
 export const STT_MODEL = {
   id: "parakeet-tdt-0.6b-v3-int8",
@@ -57,7 +57,7 @@ export const STT_MODEL = {
  * The fp32 build, NOT the int8 one, deliberately: measured on this project's 4-core
  * laptop CPU, int8 ran at 1.3–1.6× real time (slower than speech — unusable live) and
  * fp32 at ~0.6×. int8 kernels are not faster on every CPU; measure before switching.
- * One OfflineTts instance per engine language ("en", "it", "ur"), because the
+ * One OfflineTts instance per engine language ("en", "ur"), because the
  * phonemizer language is fixed per instance in sherpa-onnx.
  */
 export const KOKORO_MODEL = {
@@ -68,7 +68,7 @@ export const KOKORO_MODEL = {
   /** English words come from Kokoro's own US-English lexicon; anything else goes through espeak-ng. */
   lexicons: ["lexicon-us-en.txt", "lexicon-zh.txt"],
   /** Engine language passed to sherpa-onnx per spoken language. Urdu = espeak-ng "ur". */
-  engineLanguage: { en: null, it: "it", ur: "ur" },
+  engineLanguage: { en: null, ur: "ur" },
 };
 
 /**
@@ -76,7 +76,7 @@ export const KOKORO_MODEL = {
  * in voices.js (`piper:<key>`).
  */
 export const PIPER_VOICES = Object.fromEntries(
-  ["en_US-lessac-medium", "en_US-ryan-medium", "it_IT-paola-medium", "it_IT-riccardo-x_low"].map((name) => [
+  ["en_US-lessac-medium", "en_US-ryan-medium"].map((name) => [
     name,
     {
       id: `piper-${name}`,

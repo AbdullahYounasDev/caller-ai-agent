@@ -11,14 +11,20 @@ describe("buildKeywordQuery", () => {
     assert.equal(buildKeywordQuery("How much is the Pro plan?").tsquery, "pro | plan");
   });
 
-  test("an Italian question is filtered with the Italian list too", () => {
-    assert.deepEqual(terms("Quanto costa il piano ClinicHMS Growth?"), ["costa", "piano", "clinichms", "growth"]);
-    assert.deepEqual(terms("Qual è la vostra politica di rimborso per gli abbonamenti annuali?"), ["politica", "rimborso", "abbonamenti", "annuali"]);
+  test("an Urdu question (script) is filtered with the Urdu list: the `simple` config has no stop words of its own", () => {
+    assert.deepEqual(terms("آپ کی clinic timings کیا ہیں؟"), ["clinic", "timings"]);
+    assert.deepEqual(terms("بریسز کتنے کے لگتے ہیں اور کیا قسطوں میں ادائیگی ہو سکتی ہے؟"), ["بریسز", "لگتے", "قسطوں", "ادائیگی"]);
+    assert.deepEqual(terms("میں اپائنٹمنٹ بک کرنا چاہتا ہوں"), ["اپائنٹمنٹ", "بک"]);
   });
 
-  test("apostrophes split words: contractions and Italian elisions leave no junk terms", () => {
+  test("a Roman Urdu question is filtered too", () => {
+    assert.deepEqual(terms("Consultation ki fees kitni hai?"), ["consultation", "fees"]);
+    assert.deepEqual(terms("Pro plan ki monthly fee kya hai"), ["pro", "plan", "monthly", "fee"]);
+    assert.deepEqual(terms("kya aap Sunday ko open hain"), ["sunday", "open"]);
+  });
+
+  test("apostrophes split words: contractions leave no junk terms", () => {
     assert.deepEqual(terms("what's your clinic software called"), ["clinic", "software", "called"]);
-    assert.deepEqual(terms("Qual è l'orario dell'assistenza?"), ["orario", "assistenza"]);
     assert.deepEqual(terms("I don't know what you’re building"), ["building"]);
   });
 
@@ -35,14 +41,14 @@ describe("buildKeywordQuery", () => {
   });
 
   test("nothing but filler gives an EMPTY query, which the caller must treat as 'fall back to AND'", () => {
-    for (const q of ["who are you", "what do you do", "tell me about you", "", "   ", null, undefined, "?!", "e il"]) {
+    for (const q of ["who are you", "what do you do", "tell me about you", "", "   ", null, undefined, "?!", "aap kaun hain", "آپ کیا ہیں"]) {
       assert.deepEqual(buildKeywordQuery(q), { terms: [], tsquery: "" }, String(q));
     }
   });
 
-  test("accented and non-Latin letters survive as terms", () => {
-    assert.deepEqual(terms("perché è così caro il caffè"), ["così", "caro", "caffè"]);
-    assert.deepEqual(terms("سعر الخطة"), ["سعر", "الخطة"]);
+  test("non-Latin letters survive as terms", () => {
+    assert.deepEqual(terms("فیس کی تفصیل"), ["فیس", "تفصیل"]);
+    assert.deepEqual(terms("café menu"), ["café", "menu"]);
   });
 
   test("SAFE for to_tsquery: no operator character can reach the query", () => {
@@ -54,10 +60,10 @@ describe("buildKeywordQuery", () => {
   });
 
   test("the stop list holds the filler it promises and none of the words a customer actually asks about", () => {
-    for (const w of ["the", "what", "how", "much", "your", "tell", "guys", "il", "della", "quanto", "vostra", "dell", "s"]) {
+    for (const w of ["the", "what", "how", "much", "your", "tell", "guys", "کیا", "ہے", "میں", "kya", "hai", "kitna", "s"]) {
       assert.ok(KEYWORD_STOPWORDS.has(w), w);
     }
-    for (const w of ["price", "plan", "refund", "hours", "support", "free", "trial", "cancel", "cost", "costa", "prezzo", "orari", "rimborso", "pro", "starter", "growth", "enterprise"]) {
+    for (const w of ["price", "plan", "refund", "hours", "support", "free", "trial", "cancel", "cost", "fees", "timings", "فیس", "قیمت", "وقت", "pro", "starter", "growth", "enterprise"]) {
       assert.ok(!KEYWORD_STOPWORDS.has(w), `${w} is content, not filler`);
     }
   });

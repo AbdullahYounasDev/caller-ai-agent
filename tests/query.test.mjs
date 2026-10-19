@@ -4,13 +4,14 @@ import assert from "node:assert/strict";
 import { needsContext, isAcknowledgement, concatQuery } from "@/lib/agent/query";
 
 describe("needsContext — does this message depend on the conversation before it?", () => {
-  test("complete standalone questions (English and Italian) do not", () => {
+  test("complete standalone questions (English, Urdu and Roman Urdu) do not", () => {
     for (const q of [
       "How much is the StorePulse Pro plan per month?",
       "What are your opening hours on Saturdays?",
       "Do you offer teeth whitening for adults?",
-      "Quanto costa il piano Growth al mese?",
-      "Quali sono i vostri orari di apertura il sabato?",
+      "Pro plan کی monthly fee کتنی ہے",
+      "ہفتے کے دن آپ کے کھلنے کے اوقات کیا ہیں؟",
+      "Saturday ko aap ka clinic kitne baje khulta hai",
     ]) {
       assert.equal(needsContext(q), false, q);
     }
@@ -34,12 +35,13 @@ describe("needsContext — does this message depend on the conversation before i
     }
   });
 
-  test("Italian ellipsis openers", () => {
+  test("Urdu and Roman Urdu ellipsis openers", () => {
     for (const q of [
-      "E il piano Pro per due negozi diversi?",
-      "Ma anche il sabato siete aperti per i clienti?",
-      "Invece per le aziende cosa prevedete come offerta?",
-      "Allora quanto costerebbe in totale per un anno?",
+      "اور پرو پلان دو دکانوں کے لیے کتنے کا ہے؟",
+      "لیکن اتوار کو کلینک کھلا ہوتا ہے کیا؟",
+      "aur Growth plan ka kya price hai bhai",
+      "phir ek saal ka package kitne ka hoga",
+      "to Saturday ko bhi open hain kya aap",
     ]) {
       assert.equal(needsContext(q), true, q);
     }
@@ -51,26 +53,28 @@ describe("needsContext — does this message depend on the conversation before i
       "Is that included in the monthly price you quoted?",
       "How much is the second one for a team of five?",
       "Can I cancel them at any time without a penalty?",
-      "Quanto costa quello con più utenti inclusi nel piano?",
-      "Questa opzione comprende anche l'assistenza telefonica?",
+      "اس کا کرایہ کتنا ہے اور کتنے دن میں مل جاتا ہے",
+      "iski warranty kitne saal ki hai aur kya include hai",
+      "ye wala package kitne ka hai batayen",
     ]) {
       assert.equal(needsContext(q), true, q);
     }
   });
 
-  test("bare 'one', 'la' and 'ci' inside a complete question do NOT fire (they are listed as too common)", () => {
+  test("bare 'one' and 'یہ' inside a complete question do NOT fire (they are far too common)", () => {
     assert.equal(needsContext("Can I use up to one store on the Starter plan?"), false);
-    assert.equal(needsContext("Dove posso trovare la fattura del mese scorso?"), false);
+    assert.equal(needsContext("یہ کلینک گلشن اقبال میں کہاں واقع ہے؟"), false);
+    assert.equal(needsContext("ye clinic Gulshan mein kahan hai bataiye"), false);
   });
 
   test("empty, nullish and pleasantries never trigger a rewrite", () => {
-    for (const q of ["", "   ", null, undefined, "ok", "Thanks!", "grazie"]) assert.equal(needsContext(q), false, String(q));
+    for (const q of ["", "   ", null, undefined, "ok", "Thanks!", "شکریہ"]) assert.equal(needsContext(q), false, String(q));
   });
 });
 
 describe("isAcknowledgement — pleasantry detection", () => {
-  test("English and Italian acknowledgements, any case and punctuation", () => {
-    for (const m of ["ok", "OK!", "Okay.", "Thanks!", "thank you", "yes please", "got it", "bye", "va bene", "grazie", "Grazie, ciao!", "sì, certo", "perfetto"]) {
+  test("English, Urdu and Roman Urdu acknowledgements, any case and punctuation", () => {
+    for (const m of ["ok", "OK!", "Okay.", "Thanks!", "thank you", "yes please", "got it", "bye", "ٹھیک ہے", "شکریہ", "جی ہاں، شکریہ۔", "اللہ حافظ", "Theek hai", "Shukriya!", "ji haan, acha", "Allah hafiz"]) {
       assert.equal(isAcknowledgement(m), true, m);
     }
   });
@@ -119,7 +123,7 @@ describe("concatQuery", () => {
 
 describe("needsContext — precision rules (scripts/eval-trigger.mjs has the measured effect)", () => {
   test("a short message that addresses the business directly is a complete question, not a follow-up", () => {
-    for (const q of ["who are you", "what do you do", "What's your ragù recipe?", "Do you ship abroad?", "Chi siete voi?", "Qual è la vostra sede?"]) {
+    for (const q of ["who are you", "what do you do", "What's your biryani recipe?", "Do you ship abroad?", "aap kaun hain", "آپ کی لوکیشن کہاں ہے؟"]) {
       assert.equal(needsContext(q), false, q);
     }
   });
@@ -157,7 +161,7 @@ describe("needsContext — precision rules (scripts/eval-trigger.mjs has the mea
   });
 
   test("'there' points back only at the END of a message", () => {
-    assert.equal(needsContext("Do you deliver to Milan and also over there?"), true);
+    assert.equal(needsContext("Do you deliver to Karachi and also over there?"), true);
     assert.equal(needsContext("is my info still there if I cancel and come back later"), false);
     assert.equal(needsContext("Is there parking available at your clinic for patients?"), false, "existential 'there'");
   });

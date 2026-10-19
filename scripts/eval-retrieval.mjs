@@ -78,7 +78,7 @@ Payment plans are available for treatments over 500 euros.
 
 # Our team
 
-Our lead dentist is Dr. Elena Ricci, who speaks Italian, English and Arabic.`,
+Our lead dentist is Dr. Elena Ricci, who speaks Urdu and English.`,
   },
 ];
 
@@ -96,10 +96,10 @@ const ANSWERABLE = [
   { q: "Can I pay by card?", expect: "eval-policies.md" },
   { q: "Do you offer payment plans?", expect: "eval-policies.md" },
   { q: "Who is the lead dentist?", expect: "eval-policies.md" },
-  // Cross-language: the corpus is English, the question is not. This is the
-  // case that breaks naive setups and the one "auto" reply mode depends on.
-  { q: "Quanto costa una visita di controllo?", expect: "eval-pricing.md" },
-  { q: "A che ora chiudete il sabato?", expect: "eval-hours.md" },
+  // Cross-language: the corpus is English, the question is in Urdu. This is the case that
+  // breaks naive setups — a Pakistani caller asking about a price list written in English.
+  { q: "معائنے کی فیس کتنی ہے؟", expect: "eval-pricing.md" },
+  { q: "ہفتے کے دن آپ کتنے بجے بند ہوتے ہیں؟", expect: "eval-hours.md" },
 ];
 
 /** Questions this business genuinely cannot answer. Retrieval SHOULD return

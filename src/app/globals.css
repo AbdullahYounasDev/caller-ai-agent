@@ -24,3 +24,11 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Urdu is right-to-left and needs an Arabic-script font: the Latin web fonts above have no
+   glyphs for it. A system stack (Nastaliq first, plain Naskh and Windows' Segoe UI/Tahoma
+   after it) keeps the console free of a font download. */
+[lang="ur"] {
+  font-family: "Noto Nastaliq Urdu", "Jameel Noori Nastaleeq", "Noto Naskh Arabic", "Segoe UI", Tahoma, sans-serif;
+  line-height: 1.9;
+}

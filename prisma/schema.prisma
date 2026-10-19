@@ -24,11 +24,15 @@ model Conversation {
   tenantId  String   @map("tenant_id")
   channel   String // chat | voice — chat is the internal test surface (§ CLAUDE.md)
   status    String   @default("active") // active | resolved | escalated
-  // Locale this conversation is being held in (en | it | ar | ur). Set from the
-  // end user's choice / host page, falling back to the tenant's defaultLocale.
-  // Per CONVERSATION, not per tenant: one business serves customers in several
-  // languages and the agent must reply in the one this customer actually used.
+  // The language this conversation's agent replies in (en | ur) — a transcript label,
+  // stamped from agent_configs.reply_language; the agent understands both whatever it is.
   locale    String   @default("en")
+
+  /// The request being taken in this conversation, if any (src/lib/collect/engine.js): a
+  /// draft appointment or callback, filled in over several messages and cleared once it is
+  /// saved, cancelled or abandoned. One JSON document, never queried — a record only
+  /// becomes a row in `records` when the customer confirms it.
+  collectDraft Json? @map("collect_draft")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -360,18 +364,18 @@ model AgentConfig {
   // --- language ---
   // TWO SETTINGS, and they answer different questions. Never merge them.
   //
-  // uiLocale       "en" | "it" — the INTERFACE language. Drives the dashboard
+  // uiLocale       "en" | "ur" — the INTERFACE language. Drives the dashboard
   //                Every screen a business owner reads. One choice, one dropdown.
   //
-  // replyLanguage  "en" | "it" | "auto" — what the AGENT REPLIES IN.
-  //                "auto" means answer in whichever language the customer wrote
-  //                in. It is NOT a locale: it never reaches the translation
-  //                lookup, it becomes an instruction to the model in prompt.js.
+  // replyLanguage  "en" | "ur" — what the AGENT REPLIES IN. It always UNDERSTANDS both
+  //                languages (and the two mixed), whichever is chosen. It is NOT a
+  //                locale: it never reaches the translation lookup, it becomes an
+  //                instruction to the model in prompt.js.
   //
-  // A clinic can run its dashboard in Italian while its agent mirrors whatever
-  // language each customer happens to open with. One field cannot express that.
+  // A clinic can run its dashboard in English while its agent answers callers in
+  // Urdu. One field cannot express that.
   uiLocale      String @default("en") @map("ui_locale")
-  replyLanguage String @default("auto") @map("reply_language")
+  replyLanguage String @default("en") @map("reply_language")
 
   // --- free-form structured settings ---
   // hours:      { mon: [["09:00","17:00"]], ... } — opening hours in `timezone`
@@ -394,6 +398,15 @@ model AgentConfig {
   // have); a language left out speaks with that language's default voice. JSON, like
   // capabilities, because the catalog of voices lives in code.
   voices Json @default("{}")
+
+  // --- what the agent collects (src/lib/collect/config.js) ---
+  /// Which details the agent asks for, for which kinds of request (appointment, callback…),
+  /// and the business's own lists (services, staff) and custom fields. One JSON document,
+  /// validated on write by PUT /api/collect; NULL = the feature has never been set up (off).
+  collect        Json?
+  /// Bumped on every save of `collect`, so a record can say which version of the questions
+  /// it was taken under.
+  collectVersion Int   @default(0) @map("collect_version")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
@@ -455,5 +468,78 @@ model IngestJob {
 
   @@index([tenantId, status])
   @@map("ingest_jobs")
+  @@schema("ai_engine")
+}
+
+
+// ── REQUESTS THE AGENT TAKES (appointments, callbacks) ─────────────────────
+//
+// ⚠ STAND-INS FOR THE PARTNER'S SIDE. Customers and their requests belong to the backend
+// (tenant_core: end_customers, bookings, notifications — docs/handoff-to-backend.md). Until
+// that exists the engine keeps them here so the whole flow can be built and tested end to
+// end. Everything touching these two tables goes through src/lib/standins/, so replacing
+// them is replacing one folder, not hunting through the code. The AGENT never reads them
+// back: what it knows about a customer is the conversation.
+
+/// A person who asked for something. Found again by phone number, so a customer who calls
+/// twice is one row.
+model Customer {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  name      String?
+  /// International form, +923001234567.
+  phone     String?
+  email     String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  records Record[]
+
+  @@unique([tenantId, phone])
+  @@index([tenantId])
+  @@map("customers")
+  @@schema("ai_engine")
+}
+
+/// One request a customer confirmed: an appointment or a callback. Always saved as
+/// "requested" — only a person confirms it (CLAUDE.md §6.11).
+model Record {
+  id             String    @id @default(uuid())
+  tenantId       String    @map("tenant_id")
+  /// What a customer is told and a business searches by: AP-4K7Q2, CB-9XM3T.
+  reference      String
+  /// appointment | callback (src/lib/collect/catalog.js)
+  type           String
+  /// requested | confirmed | done | cancelled
+  status         String    @default("requested")
+  conversationId String?   @map("conversation_id")
+  customerId     String?   @map("customer_id")
+  customer       Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  /// chat | voice — where it was taken
+  channel        String    @default("chat")
+  /// en | ur — the language the customer was served in
+  language       String    @default("en")
+  /// The details by field id: { name, phone, service, datetime… } — values as validated
+  /// (phone in international form, a choice as the owner's option id).
+  data           Json
+  /// One line for lists: "Ahmed · Root canal · Thursday, 22 October 2026 at 5:00 pm"
+  summary        String    @default("")
+  /// The day and time asked for, exactly as the customer meant it in the business's own
+  /// time zone: "2026-10-22T17:00". A STRING on purpose — it is a wall-clock time, and
+  /// turning it into an instant is a decision for whoever schedules it.
+  scheduledLocal String?   @map("scheduled_local")
+  timezone       String    @default("UTC")
+  /// agent_configs.collect_version when it was taken
+  configVersion  Int       @default(0) @map("config_version")
+  /// Makes saving idempotent: the same confirmation twice is one row.
+  submissionKey  String    @map("submission_key")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  @@unique([tenantId, submissionKey])
+  @@unique([tenantId, reference])
+  @@index([tenantId, status, createdAt])
+  @@index([tenantId, type])
+  @@map("records")
   @@schema("ai_engine")
 }

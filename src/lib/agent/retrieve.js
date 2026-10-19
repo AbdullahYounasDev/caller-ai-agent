@@ -82,8 +82,9 @@ const RRF_K = 60;
  * length) and norm 8 (unique words) scored 50-52 / 82 overall: slightly better hit@3,
  * clearly worse hit@1 (long chunks are over-penalised); norm 1 won. `websearch_to_tsquery`
  * is IDENTICAL to AND on a plain sentence (it only ORs a literal "or"), so it is not a
- * candidate. Italian questions: AND matched an Italian chunk for 2 of 10, OR for 8 of 10,
- * and the Italian document was the top keyword hit for 6 of 7 that had any signal.
+ * candidate. Measured on the (now removed) Italian questions: AND matched an Italian chunk
+ * for 2 of 10, OR for 8 of 10, and the Italian document was the top keyword hit for 6 of 7
+ * that had any signal. Those numbers say nothing about Urdu and have to be re-taken.
  *
  * WHAT THIS DOES NOT PROVE: keyword score only RE-ORDERS the vector-admitted pool; it can
  * never admit a chunk (§6.3), and these numbers have no vector search in them. Whether
@@ -182,8 +183,8 @@ export async function retrieveRelevantChunks({
   // search wouldn't already have allowed. It reads the PRECOMPUTED `content_tsv`
   // (generated from `search_config`, chosen per document at ingest — language.js)
   // instead of tokenising every candidate per query, and the QUERY is analysed with
-  // each chunk's OWN config: an Italian chunk is matched by an Italian-stemmed
-  // tsquery, an English chunk by an English one. Cross-language (an Italian
+  // each chunk's OWN config: an Urdu chunk ('simple') is matched by a plain
+  // tsquery, an English chunk by an English-stemmed one. Cross-language (an Urdu
   // question, an English chunk) contributes only what is language-neutral — a
   // brand, a plan name, a number — and the vector half carries the meaning, as
   // before (eval cross_language, §6.3).
@@ -210,7 +211,6 @@ export async function retrieveRelevantChunks({
              ts_rank_cd(
                c.content_tsv,
                CASE c.search_config
-                 WHEN 'italian'::regconfig THEN ${keywordTsQuery("italian")}
                  WHEN 'simple'::regconfig  THEN ${keywordTsQuery("simple")}
                  ELSE ${keywordTsQuery("english")}
                END${keywordNorm}

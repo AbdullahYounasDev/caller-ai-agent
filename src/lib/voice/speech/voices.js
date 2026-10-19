@@ -10,7 +10,7 @@
  *
  * TWO ENGINES, and the trade-off is real (measured on a 4-core laptop CPU, §6.24):
  *   "natural" — Kokoro-82M (Apache-2.0). Human-sounding prosody, US/UK English,
- *               Italian and Urdu, male and female. ~0.6× real time: a 3 s sentence
+ *               and Urdu, male and female. ~0.6× real time: a 3 s sentence
  *               takes ~1.8 s to synthesise, so the session keeps the first spoken
  *               chunk short (sentences.js) to hold first-audio latency down.
  *   "fast"    — Piper (VITS). ~0.15× real time, clearly more synthetic.
@@ -26,15 +26,15 @@
  * the console sorts by it so the best voice in each group is the first one offered.
  */
 
-/** The languages a call can be spoken in — agent_configs.replyLanguage minus "auto". */
-export const SPOKEN_LANGUAGES = ["en", "it", "ur"];
+/** The languages a call can be spoken in — exactly agent_configs.replyLanguage's values. */
+export const SPOKEN_LANGUAGES = ["en", "ur"];
 
 /**
  * @typedef {object} Voice
  * @property {string} id         stable id stored in agent_configs.voices — "kokoro:af_heart"
  * @property {"kokoro"|"piper"} engine
- * @property {"en"|"it"|"ur"} language
- * @property {string} accent     shown in the picker: "US" | "UK" | "IT" | "PK"
+ * @property {"en"|"ur"} language
+ * @property {string} accent     shown in the picker: "US" | "UK" | "PK"
  * @property {"female"|"male"} gender
  * @property {string} name       the speaker's display name
  * @property {"natural"|"fast"} tier
@@ -85,9 +85,6 @@ export const VOICES = [
   kokoro("en", "UK", "female", "bf_isabella", 22, "C"),
   kokoro("en", "UK", "male", "bm_george", 26, "C"),
   kokoro("en", "UK", "male", "bm_fable", 25, "C"),
-  // ── Italian, natural ─────────────────────────────────────────────────────
-  kokoro("it", "IT", "female", "if_sara", 35, "C"),
-  kokoro("it", "IT", "male", "im_nicola", 36, "C"),
   // ── Urdu, natural (Kokoro's Hindi speakers + the Urdu phonemizer, see above) ─
   kokoro("ur", "PK", "female", "hf_alpha", 31, "C"),
   kokoro("ur", "PK", "female", "hf_beta", 32, "C"),
@@ -96,8 +93,6 @@ export const VOICES = [
   // ── fast (Piper) ─────────────────────────────────────────────────────────
   piper("en", "US", "female", "Lessac", "en_US-lessac-medium", "B"),
   piper("en", "US", "male", "Ryan", "en_US-ryan-medium", "B"),
-  piper("it", "IT", "female", "Paola", "it_IT-paola-medium", "B"),
-  piper("it", "IT", "male", "Riccardo", "it_IT-riccardo-x_low", "C"),
 ];
 
 /**
@@ -107,12 +102,11 @@ export const VOICES = [
  */
 export const PREVIEW_TEXT = {
   en: "Hello, thanks for calling. I can help you with our prices, opening hours and services.",
-  it: "Buongiorno, grazie per la chiamata. Posso aiutarla con prezzi, orari e servizi.",
   ur: "السلام علیکم، کال کرنے کا شکریہ۔ آپ ہم سے قیمتوں، اوقات اور خدمات کے بارے میں پوچھ سکتے ہیں۔",
 };
 
 /** What a business gets until it picks something: the best-graded natural voice. */
-export const DEFAULT_VOICES = { en: "kokoro:af_heart", it: "kokoro:if_sara", ur: "kokoro:hf_alpha" };
+export const DEFAULT_VOICES = { en: "kokoro:af_heart", ur: "kokoro:hf_alpha" };
 
 const BY_ID = new Map(VOICES.map((v) => [v.id, v]));
 
@@ -128,7 +122,7 @@ export function getVoice(id) {
  * default instead of reading Urdu with an English voice.
  *
  * @param {Record<string,string>|null|undefined} chosen  agent_configs.voices
- * @param {"en"|"it"|"ur"} language
+ * @param {"en"|"ur"} language
  * @returns {Voice}
  */
 export function voiceFor(chosen, language) {
