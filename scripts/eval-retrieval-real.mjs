@@ -15,7 +15,7 @@
  *   1. It queries `/api/knowledge/search?...&real=1`, which calls
  *      `retrieveRelevantChunks` directly — the exact function the agent uses.
  *   2. It ingests the FULL `test-docs/` fixture pack (12 files: md, txt, csv,
- *      PDF, DOCX, a scanned/OCR PDF, an Italian FAQ, a deliberate cross-document
+ *      PDF, DOCX, a scanned/OCR PDF, a deliberate cross-document
  *      price conflict, an off-topic recipe) through the REAL multipart upload
  *      path (`POST /api/knowledge`), not a shortcut.
  *
@@ -96,7 +96,6 @@ const FIXTURE_FILES = [
   "08-storepulse-price-list-conflict.txt",
   "09-off-topic-recipe.txt",
   "10-nyron-onboarding-scanned.pdf",
-  "11-clinichms-faq-it.md",
   "12-storepulse-plans.csv",
 ];
 

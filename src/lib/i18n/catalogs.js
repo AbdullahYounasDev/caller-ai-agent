@@ -4,19 +4,18 @@ import enCapabilities from "@/locales/en/capabilities.json";
 import enValidation from "@/locales/en/validation.json";
 import enErrors from "@/locales/en/errors.json";
 
-import itCommon from "@/locales/it/common.json";
-import itDashboard from "@/locales/it/dashboard.json";
-import itCapabilities from "@/locales/it/capabilities.json";
-import itValidation from "@/locales/it/validation.json";
-import itErrors from "@/locales/it/errors.json";
+import urCommon from "@/locales/ur/common.json";
+import urDashboard from "@/locales/ur/dashboard.json";
+import urCapabilities from "@/locales/ur/capabilities.json";
+import urValidation from "@/locales/ur/validation.json";
+import urErrors from "@/locales/ur/errors.json";
 
 /**
  * Every ACTIVE catalog, statically imported.
  *
- * Active languages are English and Italian. The `ar` and `ur` catalogs are
- * still on disk, fully translated, but DORMANT — reactivating one means adding
- * its six imports above and an entry below, plus its code to SUPPORTED_LOCALES
- * and ACTIVE_LOCALES (scripts/check-locales.mjs). Nothing else.
+ * Active languages are English and Urdu — the only two the product supports.
+ * Adding one later means five imports above, an entry below, its code in
+ * SUPPORTED_LOCALES and in ACTIVE_LOCALES (scripts/check-locales.mjs).
  *
  * THE NAMESPACES COVER THE WHOLE PRODUCT, not one screen:
  *   common       shared words — buttons, states, language and tone names
@@ -47,12 +46,12 @@ export const CATALOGS = {
     validation: enValidation,
     errors: enErrors,
   },
-  it: {
-    common: itCommon,
-    dashboard: itDashboard,
-    capabilities: itCapabilities,
-    validation: itValidation,
-    errors: itErrors,
+  ur: {
+    common: urCommon,
+    dashboard: urDashboard,
+    capabilities: urCapabilities,
+    validation: urValidation,
+    errors: urErrors,
   },
 };
 

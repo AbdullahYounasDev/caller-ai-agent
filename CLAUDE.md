@@ -90,6 +90,12 @@ public.
 We **never** create or migrate tenant tables. We consume `tenantId` as an opaque
 string and scope every query by it.
 
+> **Update (the backend split):** the partner's responsibility table now has the backend storing the
+> *versioned* agent config, knowledge uploads/limits, integration secrets, approval decisions and
+> usage counts, and the engine reading config, processing knowledge, proposing/executing actions and
+> reporting usage. Until that exists, config stays in `agent_configs` behind `tenant/config.js`, and
+> the request-taking backend parts are stood in locally (`src/lib/standins/`, §6.25).
+
 **DECIDED — agent configuration lives on our side.** `agent_configs` is in
 `ai_engine`; the partner's dashboard edits it through `PUT /api/agent-config`.
 Persona and capabilities change whenever the prompt pipeline changes, so keeping
@@ -120,7 +126,7 @@ prisma/migrations/             # some hand-written (incl. embed_hash, §6.21): P
 docker-compose.yml             # Postgres 16 + pgvector — `npm run db:up`
 tests/                         # `npm test` — node:test, no deps, NO database/network/quota (§8, §11)
 test-docs/                     # the 12-file fixture corpus `eval:real` ingests (+ TESTING-GUIDE, TEST-REPORT, RETEST-REPORT)
-eng.traineddata, ita.traineddata   # Tesseract language data for OCR (§6.5)
+eng.traineddata                # Tesseract language data for OCR (§6.5); Urdu (urd.traineddata) is gitignored, fetched on demand
 models/voice/                  # local speech models, ~1.3 GB — GITIGNORED; `npm run voice:models` fetches them (§6.24)
 public/voice/mic-worklet.js    # browser mic capture → 16 kHz PCM16 frames (AudioWorklet; loaded by URL, cannot be bundled)
 scripts/
@@ -138,6 +144,7 @@ scripts/
   eval-retrieval-real.baseline.json  # saved numbers eval-real diffs against; commit changes deliberately
   eval-questions.mjs           # the labelled question set, shared by both real-path evals
   eval-embedding-variants.mjs  # picks an embedding scheme IN MEMORY before anything is re-embedded (§6.2, §6.20)
+  test-collect*.mjs            # `npm run test:collect` — request-taking end to end against the real DB, faked models, ZERO quota (§6.25)
   test-reembed*.mjs            # `npm run test:reembed` — ingest/re-embed invariants with a faked embedder, no quota
   repro-tenant-recall.mjs      # synthetic multi-tenant data: does the shared HNSW index lose a tenant's rows? (§6.1)
   backfill-search-config.mjs   # `npm run db:backfill-search` — label chunks with their document's language; no embeddings (§6.3)
@@ -145,13 +152,16 @@ scripts/
   alias-loader.mjs / alias-register.mjs  # lets plain-node scripts import src/ (the "@/" alias) so they run the app's own code
   test-openrouter.mjs          # OpenRouter integration vs. a local stand-in
 src/app/
-  page.js                      # THE TEST CONSOLE — config, knowledge, voice call, chat
+  page.js                      # THE TEST CONSOLE — tabs: agent · knowledge · collected · call · chat
+  collect/CollectPanel.js      # the "what the agent collects" checklist + the list of requests taken (§6.25)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
     voice/session/route.js     # checks the tenant, issues a one-minute ticket for the gateway's WebSocket (§6.24)
     voice/gateway/route.js     # where the gateway is (health + voice preview URLs) — for the voice picker
     voice/calls/route.js       # recent calls (summary); voice/calls/[id] = one call's turns + timeline
+    collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned)
+    records/route.js           # list requests the agent took; records/[id] = read / confirm / decline one
     agent-config/route.js      # GET/PUT — partner's dashboard contract
     agent-config/catalog/      # capability list, translated, for his UI
     knowledge/route.js         # list + add/replace: typed text, uploads, URL crawl
@@ -166,7 +176,7 @@ src/lib/
     llm.js                     # ★ LLM SEAM — chat swappable, embeddings are not
     gemini.js / groq.js / openrouter.js  # providers; import ONLY from llm.js. groq = the fast one (§6.24)
     openai-compatible.js       # the OpenAI chat dialect, shared by groq.js and openrouter.js
-    language.js                # per-document text-search language: english | italian | simple (§6.3)
+    language.js                # per-document text-search language: english | simple (Urdu) (§6.3)
     embed-scheme.js            # ★ everything that changes a stored vector + the scheme VERSION (§6.2)
     retry.js                   # shared backoff; quota vs. rate-limit
     respond.js                 # ★ THE BRAIN — channel-agnostic
@@ -196,6 +206,12 @@ src/lib/
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
     sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
+  collect/                     # ★ REQUEST-TAKING (§6.25) — what the agent collects, validates and hands over
+    catalog.js                 # field catalogue, record types, industry presets, limits — DATA, not code
+    config.js                  # per-tenant collect config: normalise/validate, preset, describeCatalog
+    engine.js                  # ★ advanceCollection — the deterministic state machine that owns a request
+    extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
+  standins/                    # fake backend (customers, records, events) behind fixed interfaces — what Haseeb replaces (§6.25)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
   tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18)
   i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
@@ -377,6 +393,15 @@ already allowed in; it can never admit one vector search would have rejected.
 `retrieveWithoutThreshold` (the eval/debug path) stays pure-vector on purpose —
 mixing in keyword scores there would defeat its one job, showing the raw
 rejected-chunk distances.
+
+> **Languages have since changed (§7): the product is English + Urdu only.** Everything below that
+> mentions Italian — the 94-question set's Italian items, the `cross_language` category, every
+> measured number — was measured BEFORE Italian was removed and has NOT been re-run. Today
+> `detectSearchConfig` returns `english` or `simple` (Urdu script); the Italian test document is
+> gone and the Italian questions in `scripts/eval-questions.mjs` were rewritten as Urdu ones that
+> have never been scored. Treat the saved `eval:real` baseline as stale until the Urdu corpus is
+> embedded and the run is repeated (§9.1 item 1). A pre-existing `italian` label in a database is
+> relabelled by the new migration and `npm run db:backfill-search`.
 
 **The keyword half is LANGUAGE-AWARE.** It used to be `to_tsvector('english', …)`
 for everything: an Italian document got no correct stemming and its stop words
@@ -586,7 +611,7 @@ this is a best-effort structural read, not a guarantee.
 ### 6.5 OCR, and the detached-buffer trap
 
 [`ocr.js`](src/lib/agent/ocr.js) renders each page with pdfjs and reads it with
-Tesseract (`eng+ita`). Triggered by `looksScanned()`, which tests characters
+Tesseract (`eng`, plus `urd` when a scanned document is mostly Urdu — the Urdu data file is downloaded on demand and gitignored). Triggered by `looksScanned()`, which tests characters
 **per page** — a scan is rarely truly empty, it carries a stray header or page
 number, so raw emptiness is the wrong test.
 
@@ -1103,7 +1128,7 @@ three short ones unchanged, and nothing is retrieved. (The same check protects
 against the rewrite inventing facts: its instruction forbids adding any price,
 number or product the customer never mentioned, because a rewrite is a search
 key, not an answer, and a bent query is invisible to the grounding rule
-downstream. It must also keep the customer's language — Italian stays Italian;
+downstream. It must also keep the customer's language — Urdu stays Urdu;
 prompt text is in `prompt.js`.)
 
 **When a model call is spent (`retrieveForTurn` in `query.js`), in order:**
@@ -1113,8 +1138,8 @@ prompt text is in `prompt.js`.)
    "and/but/what about/e/ma/anche…", or points back with "that/it/them/the Pro
    one/quello…", or is four words or fewer and not obviously complete (a short
    message that addresses the business, names a brand or is "what does X do" is
-   not rewritten — see the latency list below) (English and Italian only; the two
-   active locales, §7). Pure regex, free.
+   not rewritten — see the latency list below) (English, Urdu script and Roman Urdu; the two
+   active languages, §7). Pure regex, free.
 3. Otherwise search as typed, and only if that returns NOTHING (and the message
    isn't a pleasantry like "thanks"/"grazie") rewrite and search again — the
    net for follow-ups the cheap check missed. A message that already retrieves
@@ -1585,23 +1610,27 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   Parakeet, Silero, and the DEFAULT voices; other voices on first use, then kept);
   `decodeAsync` / `generateAsync` run on native threads, and each engine instance is used one
   call at a time (`serial.js`), so concurrent calls queue instead of oversubscribing the CPU.
-- **Speech recognition is routed PER CALL** (`stt.forCall({replyLanguage})`,
-  `VOICE_STT_PROVIDER=auto` by default): local **Parakeet** (fast, en/it, 25 European languages,
-  **no Urdu**) for English/Italian lines; **Groq Whisper large-v3** (hosted, free tier,
-  `GROQ_API_KEY`) for lines that can be in Urdu (`ur` or `auto`) — it also handles Urdu/English
-  code-switching, which is how Pakistani callers actually speak. There is NO local Urdu model good
-  enough to ship (best open CPU models: 27–34% word error on Urdu). A fixed reply language is
-  passed to Whisper as a hint (stops it writing short Urdu in Devanagari). A Groq failure or 6 s
-  timeout falls back to Parakeet for that utterance and is logged (`stt.completed.fallback`). A
-  call that may be Urdu on a recogniser that cannot understand it logs `stt.urdu_unavailable`, and
-  the console's voice picker says so where Urdu is chosen.
+- **Speech recognition does NOT depend on the reply language** (`VOICE_STT_PROVIDER=auto` by
+  default). The reply language decides what the agent SAYS, never what it can HEAR: a business
+  that chose English still has callers who speak Urdu or mix the two, and a recogniser picked from
+  the reply language turned that Urdu into confident English nonsense (seen on a real call). So:
+  **Groq Whisper large-v3** (hosted, free tier, `GROQ_API_KEY`) handles every call when a key is
+  set — it understands Urdu, English and Urdu/English code-switching, which is how Pakistani
+  callers actually speak; local **Parakeet** (fast, English, **no Urdu**) is the fallback and the
+  keyless mode. There is NO local Urdu model good enough to ship (best open CPU models: 27–34%
+  word error on Urdu). Whisper is not given a language hint (a fixed hint forces the other
+  language into the wrong one); it gets a short primer in Urdu script plus English, and if it
+  still answers in Devanagari the same audio is asked once more with `language=ur`. A Groq failure
+  or 6 s timeout falls back to Parakeet for that utterance and is logged
+  (`stt.completed.fallback`). Without a key an Urdu-speaking caller is NOT understood: the call
+  logs `stt.urdu_unavailable` and the console's voice picker says so.
 - **Voices — a catalog of only real voices** (`speech/voices.js`, pure, imported by the gateway,
   `PUT /api/agent-config` and the console). Two engines:
-  - **Natural — Kokoro-82M v1.0, fp32** (Apache-2.0): US/UK English, Italian and Urdu, male and
+  - **Natural — Kokoro-82M v1.0, fp32** (Apache-2.0): US/UK English and Urdu, male and
     female. **fp32, not int8**: measured, int8 ran at 1.3–1.6× real time on this CPU (slower than
     speech — unusable live), fp32 at ~0.57×. One engine instance per language (the phonemizer
     language is per instance).
-  - **Fast — Piper** (US English Lessac/Ryan, Italian Paola/Riccardo): ~0.13× real time, more
+  - **Fast — Piper** (US English Lessac/Ryan): ~0.13× real time, more
     synthetic.
   - **Urdu = Kokoro's Hindi speakers + espeak-ng's Urdu phonemizer** (engine language `ur`) —
     spoken Urdu and Hindi are one language at the sound level and the phonemizer reads Urdu script.
@@ -1610,8 +1639,7 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
     use it**.
   - `agent_configs.voices` = `{ [language]: voiceId }` (migration `20261010180000_agent_voices`,
     hand-written, HNSW line removed). `voiceFor()` never returns a voice of the wrong language — a
-    bad id degrades to that language's default. Defaults: `kokoro:af_heart`, `kokoro:if_sara`,
-    `kokoro:hf_alpha`.
+    bad id degrades to that language's default. Defaults: `kokoro:af_heart` (English), `kokoro:hf_alpha` (Urdu).
   - The gateway serves `GET /voices/preview?voice=` (a fixed sample line per language, synthesised
     once per voice, 30/min per client) for the console's ▶ Listen; `/health` lists installed voices.
 - **The recogniser is taught the business's name** (`lib/voice/vocabulary.js`, applied inside
@@ -1627,7 +1655,7 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   the customer's words are a transcript and sound-alike names mean that name. Product names are not
   in the vocabulary yet — same matcher, a new source.
 - **The agent's gender is the voice's gender.** On the voice channel the prompt states it
-  (`voiceGenderInstruction`), so Urdu and Italian self-references agree with what the caller hears
+  (`voiceGenderInstruction`), so Urdu self-references agree with what the caller hears
   ("میں کر سکتی ہوں" for a female voice); the Urdu greeting picks سکتی / سکتا the same way.
 - **Turn flow:** VAD finds the utterance (after `VAD.minSilenceSeconds` = 0.5 s of silence — the
   biggest fixed latency, paid on every turn) → STT → `respond()` streams → `SentenceChunker` →
@@ -1676,11 +1704,11 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
 - **Logging never slows a turn:** `recorder.js` tracks every write and `close()` awaits them, but
   no turn awaits one; timeline events are batched (one INSERT per 400 ms). A failed log write is
   logged and dropped. `call_events.seq` carries the order explicitly.
-- **Which language a sentence is spoken in:** a fixed `replyLanguage` decides; for `auto`,
-  `spoken-language.js` recognises Urdu by its script (mostly Arabic-script letters) and English vs
-  Italian by stop words (`stopWordCounts`, extracted from `language.js` with no behaviour change),
-  and stays sticky when a sentence has no evidence. The greeting is in the fixed reply language,
-  or English for `auto` — the UI language is never consulted (§7).
+- **Which language a sentence is spoken in:** the business's `replyLanguage` decides, with one
+  exception that matters in Pakistan — an Urdu-call sentence made only of Latin letters (a brand,
+  a code, an English phrase) is spoken with the English voice, because the Urdu voice would spell
+  it out as gibberish (`spoken-language.js`). A sentence with no letters keeps the previous one's
+  language. The greeting is in the reply language — the UI language is never consulted (§7).
 - **Limits** (`config.js`): 15 min per call, 90 s of caller silence ends it, 3 concurrent calls per
   tenant, 6 per gateway (a CPU budget for this machine, not a business rule), 20 s max utterance.
 - **Wire protocol** (`protocol.js`, imported by both sides): binary frames are PCM16 audio, text
@@ -1707,7 +1735,7 @@ first search empty — fixed above), first chunk of Kokoro 2.9–3.1 s (1.8 s fo
 with the machine otherwise idle: on battery, with Chrome and the dev server busy, Kokoro ran at
 ~1.2× real time, not 0.57×). The rewrite on gpt-oss-120b: median 0.59 s, p90 0.98 s over the 23
 conversation items of the eval set, outputs correct; gpt-oss-20b was only ~0.15 s faster and
-translated three English follow-ups into Italian, so it is NOT a rewrite model. Benchmark the
+translated three English follow-ups into another language, so it is NOT a rewrite model. Benchmark the
 speech stages on mains power; the dedicated speech server (§9.2) is the real fix for CPU contention.
 
 **Measured on this repo's dev machine (i7-1185G7, 4 cores / 8 threads, CPU only)** —
@@ -1732,44 +1760,111 @@ for playback, webhook signature → dialled number → tenant in `registry.js`);
 (`recording_url` stays null); auto-hang-up after a goodbye; merging an utterance that was cut by
 a mid-sentence pause with the one after it; a per-tenant greeting; a local Urdu recogniser.
 
+### 6.25 Taking a request — appointments and call-backs (the collect domain)
+
+**What exists:** the owner ticks, in the console's "What your agent collects" tab, which details
+the agent must ask for (name, phone, service, date and time, party size, reason…), per kind of
+request (appointment, call-back); the agent then takes those details in conversation — chat or
+voice — validates them, reads them back, and saves a request. A "Collected" tab lists what was
+taken. Backend responsibilities that are stood in for are in
+[`docs/handoff-to-backend.md`](docs/handoff-to-backend.md).
+
+**Rules that must not drift:**
+
+- **Configuration over code.** `lib/collect/catalog.js` is DATA: FIELDS (how a detail is asked and
+  checked), RECORD_TYPES (which fields make one kind of request), INDUSTRIES (a starting
+  selection). A new kind of business is a new preset, never a new code path. Stored per tenant as
+  one JSON document, `agent_configs.collect`, versioned (`collect_version`), replaced whole by
+  `PUT /api/collect`. Reading a stored document never throws (bad values degrade to the nearest
+  valid one — a conversation is waiting); a save returns translated, specific refusals, including
+  "this request type has no way to reach the customer".
+- **A state machine owns the collection, not the model** (`collect/engine.js advanceCollection`).
+  §6.11 says the model never mutates tenant data; this is how that stays true while it still
+  sounds natural. Each turn the engine decides the PLAN (which field to ask next, or read back, or
+  finish); the model only WORDS that plan (`prompt.js buildCollectionInstruction`); every value is
+  judged by code (`validate.js`), never by the model. A model that invents a phone number gets as
+  far as the format check.
+- **Understanding is two layers, cheapest first** (`extract.js`): rules for the field just asked
+  about (free, works with the provider down), then ONE small extraction call that reads the whole
+  message against the fields still missing ("I'm Ahmed, root canal tomorrow after five" fills
+  three). Extraction runs in PARALLEL with retrieval, has its own circuit breaker
+  (`llm.js generateExtraction`) and fails soft to the rules — a turn is never lost to it.
+- **Starting:** rule-based detection of "I want an appointment / call me back" in English, Urdu
+  script and Roman Urdu (`phrases.js`; the thing asked for FIRST wins; "reschedule/cancel my
+  appointment" starts nothing — the agent has no bookings to look up). A model fallback:
+  `[[START appointment]]` at the start of a reply (`marker.js`) — stripped from the stream, the
+  transcript and the voice before anyone sees or hears it.
+- **Never saved without a read-back and a yes.** The customer confirms the summary; a "no" opens
+  correction, where the customer may name any field; after MAX_MISSES unanswered tries the engine
+  gives up politely instead of looping. "Never mind" cancels (narrowly — a false cancel loses a
+  minute of the customer's work); an optional question may simply be declined.
+- **The result is a `requested` record, never a booking.** `standins/records.js createRecord`
+  is idempotent on `submissionKey` (a retried turn is the same row and reference); the customer is
+  told the team will confirm; only a person moves it on (`PATCH /api/records/:id`, console only).
+- **Draft:** the in-progress details live in `conversations.collect_draft`, expire after 30
+  minutes (`DRAFT_TTL_MS`), and are rolled back if the reply fails (so a failed turn is repeated,
+  not half-applied). Dates are checked in the business's time zone against its opening hours; a
+  time is a wall-clock string (`scheduledLocal`), not an instant.
+- **Urdu specifics:** digits in Urdu/Arabic-Indic form and spoken digits are normalised; yes/no
+  is token-based ("جی نہیں" is NO — "ji" is a filler); regexes use Unicode word edges, never `\b`.
+- **Stand-ins, not a second backend.** `lib/standins/*` (customers, records, events) sit behind
+  fixed interfaces; nothing else touches those tables. The AI never reads them back (§6.11).
+
+**Verified:** `npm test` (435 unit tests, incl. the whole engine with faked extractor),
+`npm run test:collect` (the full flow against the real database with a faked model: configure →
+converse → read-back → save → idempotent retry → status workflow), screenshots of both tabs in
+English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
+every provider; real Pakistani callers through the voice path; the extraction call's latency
+against a real provider (it runs in parallel with retrieval, but nobody has timed it).
+
+**Not built:** WhatsApp/SMS confirmation to the customer's phone; slot availability (opening
+hours only); modifying or cancelling an existing booking; tool execution of any other kind
+(`TOOL_EXECUTION_AVAILABLE` stays false — collecting is not executing).
+
 ---
 
 ## 7. Languages
 
-Active INTERFACE languages: **English (default) and Italian**. Active AGENT languages:
-**English, Italian and Urdu** — the main market is Pakistan plus English-speaking countries.
+**Two languages, everywhere: English and Urdu.** Italian and Arabic were removed on purpose
+(product decision: the market is Pakistan plus English-speaking countries) — their catalogs,
+voices, OCR data, stop-word lists and the Italian test document are gone from the repo. Do not
+bring them back piecemeal; a new language is a whole-stack change (UI catalog, voices, STT,
+stop words, language detection, prompt wording) and should be designed as one.
 Nothing user-facing is a hardcoded string — not a heading, not a button, not a validation message.
 
 **⚠️ TWO SETTINGS. They answer different questions — never merge them.**
 
 | Setting | Values | Controls |
 | --- | --- | --- |
-| `agent_configs.uiLocale` | `en` \| `it` | The **interface** — every dashboard screen |
-| `agent_configs.replyLanguage` | `en` \| `it` \| `ur` \| `auto` | What the **agent says**; `auto` mirrors whoever is speaking |
+| `agent_configs.uiLocale` | `en` \| `ur` | The **interface** — every dashboard screen (Urdu renders right-to-left) |
+| `agent_configs.replyLanguage` | `en` \| `ur` | What the **agent says** |
 
-A clinic can run an Italian dashboard while its agent mirrors each caller — and a Karachi
-business can run an English dashboard while its agent answers in Urdu. **Urdu is a reply
-language, not an interface locale**: the dormant `ur` UI catalog is untouched. Spoken Urdu needs
-§6.24's voice stack (Kokoro Urdu voices locally; Urdu speech recognition via Groq Whisper).
-Retrieval needs nothing new: Urdu documents get the `simple` text-search config (non-Latin script,
-§6.3) and the embedding model is multilingual.
+The two are independent: a Karachi business can run an English dashboard while its agent
+answers in Urdu.
 
-- **`auto` IS NOT A LOCALE.** There is no `auto` catalog; it never reaches `t()`.
-  It becomes an instruction in `prompt.js`. `isReplyLanguage()` keeps them apart.
-- **`buildSystemInstruction()` takes no `locale` parameter** — reply language
-  comes from `config.replyLanguage`; interface language is presentation and must
-  never leak into a prompt.
-- **Precedence differs by design**: for UI a saved `uiLocale` outranks
-  `Accept-Language` (the owner decided); for replies the speaker's own language
-  wins. Both have been got backwards once — don't reintroduce either.
-- `ar` and `ur` are **dormant**: fully translated, on disk, excluded from
-  `SUPPORTED_LOCALES`, `catalogs.js` and `ACTIVE_LOCALES`. Not build-enforced, so
-  expect drift. RTL helpers are kept because every layout uses logical CSS, so
-  reactivating Arabic is config rather than redesign.
-- `npm run i18n:check` enforces key **and** placeholder parity and runs on build.
-  Translation rot is silent; do not weaken this to unblock a build.
-- Plurals go through `Intl.PluralRules`. Arabic has **six** categories, so
-  `count === 1 ? a : b` gets nearly every Arabic sentence wrong.
+**The rule the owner set: understand both, answer in the chosen one.** With `replyLanguage =
+ur` the agent understands Urdu AND English (and Urdu with English words mixed in, the way
+people actually talk) and always replies in Urdu; with `en` it understands both and replies in
+English. Concretely:
+- **There is no `auto`.** An older stored `auto` (or `it`) degrades to the default, `en`
+  (`tenant/config.js`). `isReplyLanguage()` accepts only `en`/`ur`.
+- **The prompt** (`prompt.js` language section) states the rule in those words, and says the
+  customer's words are a transcript on the voice channel.
+- **Speech recognition no longer depends on the reply language** (§6.24): a caller may speak
+  either language to either agent, so the recogniser must hear both.
+- **`buildSystemInstruction()` takes no `locale` parameter** — reply language comes from
+  `config.replyLanguage`; interface language is presentation and must never leak into a prompt.
+- **UI language precedence:** a saved `uiLocale` outranks `Accept-Language`
+  (`tenant/ui-locale.js` is the one place that decides it, for every route).
+- **Urdu text is matched with Unicode-aware edges, never `\b`** — JavaScript's `\b` does not
+  see Arabic-script letters as word characters (`collect/phrases.js` shows the pattern). Roman
+  Urdu ("mujhe appointment chahiye") is understood by the collection rules too.
+- `ar` is gone; its RTL helpers stay because Urdu needs them (every layout uses logical CSS).
+- `npm run i18n:check` enforces key **and** placeholder parity for `en` and `ur` and runs on
+  build. Translation rot is silent; do not weaken this to unblock a build.
+- Plurals go through `Intl.PluralRules`.
+- **Urdu is not native-reviewed**, and the Urdu retrieval/LLM quality has not been measured
+  (§8 limitations).
 
 ---
 
@@ -1783,11 +1878,11 @@ right language, with history persisted per tenant.
 | --- | --- |
 | RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
 | Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Retrieval of the About chunk for those openers is still 0% |
-| Keyword half | ✅ language-aware (`english`/`italian`/`simple` per document, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
+| Keyword half | ✅ language-aware (`english`/`simple` per document — Urdu script is `simple`, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
-| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English, Italian, **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking: no mid-reply gaps on real calls. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY`. Twilio not built |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking: no mid-reply gaps on real calls. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Twilio not built |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -1800,7 +1895,8 @@ right language, with history persisted per tenant.
 | Website crawling | ✅ SSRF defences verified against 8+ attack vectors, now including DNS-rebinding pinning and cross-origin-redirect blocking (§6.9) |
 | Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
-| Interface + reply languages | ✅ independent, both directions |
+| **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
+| **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
 | Console UI | ✅ upload/write/crawl as three top-level actions; write/edit share one modal + CodeMirror editor; multi-select bulk delete; every action button disables while its own request is in flight |
@@ -1814,8 +1910,9 @@ right language, with history persisted per tenant.
    call and up to ~10 s on a bad one**, because Gemini's free tier takes 3.5–10 s to its first
    token (§6.24). The ~800 ms target needs a fast LLM (Groq — built, needs a key) and probably
    the fast voice tier.
-2. **No tool execution.** The agent collects booking details but cannot book.
-   Guarded so it never claims otherwise (§6.11).
+2. **No tool execution.** The agent collects booking details (§6.25) and saves them as a
+   *request* a person confirms; it cannot book, check a calendar, or change an existing
+   booking. Guarded so it never claims otherwise (§6.11). No WhatsApp/SMS confirmation is sent.
 3. **Free-tier model quotas — two SEPARATE caps, both hit in practice.**
    Chat is ~20 requests/day *per model*; switching `GEMINI_CHAT_MODEL` moves to
    a fresh quota. Embeddings are a different cap
@@ -1865,7 +1962,7 @@ right language, with history persisted per tenant.
    (chat: 60/min per tenant, 5 per 10s per conversation), same caveat
    `rate-limit.js`'s own header states. The voice gateway's call limits and used-ticket
    set are per gateway process too (§6.24).
-10. **Italian is not native-reviewed.**
+10. **Urdu is not native-reviewed**, and no Urdu retrieval or LLM-answer numbers exist yet: the saved `eval:real` baseline predates the language change, and the former Italian questions are now Urdu ones that have never been scored (§6.3 note).
 11. **No per-tenant BUSINESS limits** (max documents, storage quota, plan
     tiers) — that is the partner's billing/plan system (§4), not built yet.
     What DOES exist since §6.18: `assertTenantServiceable()` is actually wired
@@ -1879,8 +1976,12 @@ right language, with history persisted per tenant.
 
 ### 9.1 Next, in order
 
+0. **Hand the backend contract to Haseeb** (`docs/handoff-to-backend.md`): agree which `/internal/*`
+   routes come first, replace `standins/`, and decide who sends the customer's confirmation (WhatsApp/SMS).
+   Then the conversation-memory fixes seen in testing (an utterance cut by a pause arrives as two
+   turns; the agent should see the previous exchange after a pause) and measuring Urdu end to end.
 1. **Finish the once-only embedding pass (§6.20), as soon as a paid key or the
-   quota allows ~800 texts:** `eval:embedding-variants` → adopt a scheme in
+   quota allows ~800 texts** — with an Urdu corpus in it now, since Italian is gone (§6.3 note): `eval:embedding-variants` → adopt a scheme in
    `embed-scheme.js` and bump the version → `reembed` → `db:check` → the two
    sweeps and `MAX_DISTANCE` → `eval:real` before/after, including the
    cross-language category after the language-aware keyword change. Then
@@ -1945,7 +2046,7 @@ right language, with history persisted per tenant.
 6. **Voice latency** — DIAGNOSED (§6.24): free-tier Gemini queueing, 3.5–10 s to first token,
    not thinking and not prompt size. Next: add `GROQ_API_KEY`, set `LLM_PROVIDER=groq`
    (`LLM_FALLBACK_PROVIDER=gemini`), run `voice:smoke -- --call` and record the numbers; check
-   Groq's answer quality in Urdu and Italian; then the follow-up rewrite on voice (§6.19) and
+   Groq's answer quality in Urdu; then the follow-up rewrite on voice (§6.19) and
    whether the fast voice tier should be the default for latency-sensitive businesses.
 7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
    (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
@@ -2017,9 +2118,10 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 327 unit tests: chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 435 unit tests: collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 #   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
 npm run test:openrouter  # OpenRouter integration vs. a local stand-in
 

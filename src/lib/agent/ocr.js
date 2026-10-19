@@ -34,11 +34,14 @@ const RENDER_SCALE = 2;
 const MAX_OCR_PAGES = 30;
 
 /**
- * Both active interface languages. Tesseract needs the traineddata for each and
- * downloads it on first use, which is most of why the first OCR is slow.
- * Passing both lets one document contain both languages — common in Italy.
+ * Both active languages (§7). Tesseract needs the traineddata for each and downloads
+ * it on first use (cached next to the process — eng.traineddata is in the repo root,
+ * urd.traineddata appears there after the first Urdu scan and is git-ignored), which is
+ * most of why the first OCR is slow. Passing both lets one document contain both
+ * languages, as Pakistani business documents routinely do. Urdu OCR is noticeably less
+ * accurate than English; a scanned Urdu document is worth re-uploading as a text PDF.
  */
-const OCR_LANGUAGES = "eng+ita";
+const OCR_LANGUAGES = "eng+urd";
 
 /**
  * Does this PDF need OCR?

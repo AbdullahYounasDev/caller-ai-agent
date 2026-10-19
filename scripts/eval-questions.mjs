@@ -25,14 +25,15 @@ export const A = (text) => ({ role: "assistant", text });
  *               aware path respond() uses) instead of the single-message GET.
  *               Scored under whichever strategy --strategy= selects (§6.19).
  *
- * A NOTE ON CROSS-LANGUAGE PURITY: this fixture set has no fact that exists
- * ONLY in the Italian FAQ (11) with no English restatement elsewhere — every
- * fact in it is also covered by an English document. Most `cross_language`
- * items below therefore use `expectAny` including both the Italian doc and
- * its English counterpart, which is an honest reflection of the corpus, not
- * a design flaw in the eval — except the StorePulse questions (11 has no
- * StorePulse content at all), which ARE a clean, uncontaminated cross-lingual
- * test.
+ * A NOTE ON CROSS-LANGUAGE: the product speaks English and Urdu (§7). The corpus is
+ * English, so a `cross_language` item is an URDU question (in Urdu script) whose answer
+ * is in an English document — exactly the situation of a Pakistani caller asking about
+ * a price list written in English. These replaced the earlier Italian questions and the
+ * Italian FAQ they used; the saved baseline (eval-retrieval-real.baseline.json) predates
+ * that change, so cross_language and the two Urdu follow-ups have NO baseline number
+ * until `npm run eval:real -- --update-baseline` is run on a healthy provider. Urdu
+ * documents, Roman Urdu and code-mixed questions are not in this set yet — the test pack
+ * for them is built by hand (CLAUDE.md §6.25).
  */
 export const QUESTIONS = [
   // ── FACTUAL — direct, clearly worded (24) ─────────────────────────────
@@ -55,7 +56,7 @@ export const QUESTIONS = [
   { q: "What is your uptime guarantee for the Growth plan?", category: "factual", expect: "05-availability-and-support-hours.md" },
   { q: "Which regions do you operate in?", category: "factual", expect: "05-availability-and-support-hours.md" },
   { q: "Is support available on public holidays?", category: "factual", expect: "05-availability-and-support-hours.md" },
-  { q: "Can I get a refund if I cancel my annual subscription?", category: "factual", expectAny: ["04-returns-and-refund-policy.txt", "11-clinichms-faq-it.md"] },
+  { q: "Can I get a refund if I cancel my annual subscription?", category: "factual", expect: "04-returns-and-refund-policy.txt" },
   { q: "What happens if I upgrade my plan partway through the month?", category: "factual", expect: "04-returns-and-refund-policy.txt" },
   { q: "Can I return a barcode scanner I bought from you?", category: "factual", expect: "04-returns-and-refund-policy.txt" },
   { q: "How long is my data kept after I cancel my account?", category: "factual", expectAny: ["04-returns-and-refund-policy.txt", "06-clinichms-faq.md"] },
@@ -75,16 +76,16 @@ export const QUESTIONS = [
   { q: "what happens to my stuff if I stop paying", category: "phrased_loosely", expectAny: ["04-returns-and-refund-policy.txt", "06-clinichms-faq.md"] },
 
   // ── CROSS LANGUAGE (10) ────────────────────────────────────────────────
-  { q: "Quanto costa il piano ClinicHMS Growth?", category: "cross_language", expectAny: ["02-clinichms-pricing.pdf", "11-clinichms-faq-it.md"] },
-  { q: "Avete un periodo di prova gratuito per ClinicHMS?", category: "cross_language", expectAny: ["02-clinichms-pricing.pdf", "04-returns-and-refund-policy.txt", "11-clinichms-faq-it.md"] },
-  { q: "Qual è la vostra politica di rimborso per gli abbonamenti annuali?", category: "cross_language", expectAny: ["04-returns-and-refund-policy.txt", "11-clinichms-faq-it.md"] },
-  { q: "Dove si trovano i vostri data center?", category: "cross_language", expectAny: ["05-availability-and-support-hours.md", "11-clinichms-faq-it.md"] },
+  { q: "ClinicHMS Growth پلان کی قیمت کتنی ہے؟", category: "cross_language", expect: "02-clinichms-pricing.pdf" },
+  { q: "کیا ClinicHMS کا مفت ٹرائل ملتا ہے؟", category: "cross_language", expectAny: ["02-clinichms-pricing.pdf", "04-returns-and-refund-policy.txt"] },
+  { q: "سالانہ سبسکرپشن کی رقم واپسی کی پالیسی کیا ہے؟", category: "cross_language", expect: "04-returns-and-refund-policy.txt" },
+  { q: "آپ کے ڈیٹا سینٹر کہاں ہیں؟", category: "cross_language", expect: "05-availability-and-support-hours.md" },
   { q: "Quanti negozi supporta il piano StorePulse Pro?", category: "cross_language", expectAny: ["03-storepulse-pricing-plans.docx", "08-storepulse-price-list-conflict.txt", "12-storepulse-plans.csv"] },
-  { q: "Qual è la vostra ricetta del ragù?", category: "cross_language", expect: "09-off-topic-recipe.txt" },
-  { q: "Quali sono gli orari di supporto per il piano Enterprise?", category: "cross_language", expectAny: ["05-availability-and-support-hours.md", "11-clinichms-faq-it.md"] },
-  { q: "How much is ClinicHMS Growth in euros per month?", category: "cross_language", expectAny: ["02-clinichms-pricing.pdf", "11-clinichms-faq-it.md"] },
-  { q: "Is ClinicHMS data stored in Europe?", category: "cross_language", expectAny: ["05-availability-and-support-hours.md", "11-clinichms-faq-it.md"] },
-  { q: "What is the cancellation policy for annual plans?", category: "cross_language", expectAny: ["04-returns-and-refund-policy.txt", "11-clinichms-faq-it.md"] },
+  { q: "راگو ساس بنانے کی ترکیب کیا ہے؟", category: "cross_language", expect: "09-off-topic-recipe.txt" },
+  { q: "Enterprise پلان کے لیے سپورٹ کے اوقات کیا ہیں؟", category: "cross_language", expect: "05-availability-and-support-hours.md" },
+  { q: "How much is ClinicHMS Growth in euros per month?", category: "cross_language", expect: "02-clinichms-pricing.pdf" },
+  { q: "Is ClinicHMS data stored in Europe?", category: "cross_language", expect: "05-availability-and-support-hours.md" },
+  { q: "What is the cancellation policy for annual plans?", category: "cross_language", expect: "04-returns-and-refund-policy.txt" },
 
   // ── OFF TOPIC — must return NOTHING (8) ───────────────────────────────
   { q: "What is the capital of France?", category: "off_topic" },
@@ -130,7 +131,7 @@ export const QUESTIONS = [
   // the ASSISTANT said). Searched via POST /api/knowledge/search, which calls
   // retrieveForTurn() — the function respond() calls (§6.19).
   {
-    q: "And the Growth one?", category: "followup", expectAny: ["02-clinichms-pricing.pdf", "11-clinichms-faq-it.md"],
+    q: "And the Growth one?", category: "followup", expectAny: ["02-clinichms-pricing.pdf"],
     history: [U("How much is the ClinicHMS Starter plan?"), A("The ClinicHMS Starter plan is 89 euros per month and supports up to 2 practitioners.")],
   },
   {
@@ -146,7 +147,7 @@ export const QUESTIONS = [
     history: [U("Can I get a refund on an annual plan?"), A("Annual subscriptions have a 30 day money back guarantee from the purchase date.")],
   },
   {
-    q: "Is there a free trial for that?", category: "followup", expectAny: ["02-clinichms-pricing.pdf", "04-returns-and-refund-policy.txt", "11-clinichms-faq-it.md"],
+    q: "Is there a free trial for that?", category: "followup", expectAny: ["02-clinichms-pricing.pdf", "04-returns-and-refund-policy.txt"],
     history: [U("Tell me about the ClinicHMS Enterprise plan."), A("Enterprise has custom pricing, unlimited practitioners, multi-branch support, a dedicated account manager and 24/7 priority support.")],
   },
   {
@@ -162,7 +163,7 @@ export const QUESTIONS = [
     history: [U("How long is my data kept after I cancel?"), A("Exported data stays available for 90 days after cancellation, then it is permanently deleted.")],
   },
   {
-    q: "Where is the main one?", category: "followup", expectAny: ["05-availability-and-support-hours.md", "11-clinichms-faq-it.md"],
+    q: "Where is the main one?", category: "followup", expectAny: ["05-availability-and-support-hours.md"],
     history: [U("Which regions do you serve?"), A("We serve Italy, the EU and the UK, with data centers in Frankfurt, Milan and London.")],
   },
   {
@@ -178,12 +179,12 @@ export const QUESTIONS = [
     history: [U("What add-ons does StorePulse have?"), A("There is a barcode and label printing module, and a supplier portal.")],
   },
   {
-    q: "E il Growth?", category: "followup", expectAny: ["02-clinichms-pricing.pdf", "11-clinichms-faq-it.md"],
-    history: [U("Quanto costa il piano Starter di ClinicHMS?"), A("Il piano Starter costa 89 euro al mese per un massimo di 2 professionisti.")],
+    q: "اور Growth والا؟", category: "followup", expect: "02-clinichms-pricing.pdf",
+    history: [U("ClinicHMS Starter پلان کی قیمت کتنی ہے؟"), A("Starter پلان کی قیمت 89 یورو ماہانہ ہے اور اس میں زیادہ سے زیادہ 2 پریکٹیشنرز شامل ہیں۔")],
   },
   {
-    q: "E per lo Starter?", category: "followup", expectAny: ["05-availability-and-support-hours.md", "11-clinichms-faq-it.md"],
-    history: [U("Quali sono gli orari di assistenza per il piano Enterprise?"), A("Il piano Enterprise include assistenza 24 ore su 24, 7 giorni su 7.")],
+    q: "اور Starter کے لیے؟", category: "followup", expect: "05-availability-and-support-hours.md",
+    history: [U("Enterprise پلان کے لیے سپورٹ کے اوقات کیا ہیں؟"), A("Enterprise پلان میں چوبیس گھنٹے، ہفتے کے ساتوں دن سپورٹ شامل ہے۔")],
   },
   {
     q: "What if there's a mismatch?", category: "followup", expect: "07-storepulse-user-guide.pdf",

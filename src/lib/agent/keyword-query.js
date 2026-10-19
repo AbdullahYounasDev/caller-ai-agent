@@ -12,11 +12,12 @@
  * keyword eval (scripts/eval-keyword.mjs) without a database or a model.
  *
  * Why a stop-word list of our own when Postgres configs already drop stop words:
- * the query is analysed with EACH CHUNK's config (§6.3). An Italian question run
- * through the `english` config keeps "quanto", "della", "vostra" as terms; and with
- * OR a single junk term that happens to occur in a chunk now adds score instead of
- * being harmlessly ANDed away. So the filter is the UNION of both active languages
- * (§7) plus question words and chat filler ("tell me about", "you guys").
+ * the query is analysed with EACH CHUNK's config (§6.3), and the `simple` config used
+ * for Urdu has NO stop-word list at all. An Urdu question run through it keeps "کیا",
+ * "ہے", "میں" as terms; and with OR a single junk term that happens to occur in a chunk
+ * now adds score instead of being harmlessly ANDed away. So the filter is the UNION of
+ * both active languages (§7) — English, Urdu script and Roman Urdu — plus question
+ * words and chat filler ("tell me about", "you guys").
  *
  * SAFE TO INTERPOLATE INTO to_tsquery(): every term is letters/digits only, so a
  * caller cannot smuggle tsquery operators (& | ! <-> ( ) :*) in through a question.
@@ -31,14 +32,14 @@ const STOPWORDS = new Set(
     "tell give show let get got please guys guy thing things stuff want need like know ok okay yes hi hello hey thanks thank " +
     // English contraction fragments left behind by splitting on the apostrophe.
     "s t re ve ll d m don doesn didn isn aren wasn weren won wouldn couldn shouldn can cant " +
-    // Italian: articles, prepositions, pronouns, auxiliaries, question words, filler.
-    "il lo la i gli le un uno una di del dello della dei degli delle da dal dalla dai dalle al allo alla ai agli alle nel nello nella nei negli nelle sul sullo sulla sui sugli sulle " +
-    "per con su tra fra e ed o ma se non che chi cui come quando dove perché perche anche più piu molto " +
-    "è sono siamo siete hanno ha abbiamo avete ho hai essere avere stato stata sia siano " +
-    "questo questa questi queste quello quella quelli quelle nostro nostra nostri nostre vostro vostra vostri vostre suo sua suoi sue loro ci vi mi ti si già solo ogni tutti tutte tutto " +
-    "quanto quanta quanti quante quale quali qual cosa fare posso può possiamo puoi vorrei volevo dimmi dammi " +
-    // Italian elisions left behind by splitting on the apostrophe (l'azienda, dell'ordine, quest'anno).
-    "l dell all nell sull quest quell dov com anch c un po"
+    // Urdu (script): particles, postpositions, auxiliaries, question words, filler.
+    "کا کی کے کو سے میں پر نے اور یا کہ کیا کیوں کب کہاں کون کس کتنا کتنی کتنے کیسے کیسا کیسی ہے ہیں ہو ہوں تھا تھی تھے ہوگا ہوگی ہوں گے گا گی گے " +
+    "یہ وہ اس ان اسی جو جی ہاں نہیں بھی تو ہی بس پھر اب سب کچھ کوئی بتائیں بتایے بتائیے بتاؤ بتادیں چاہیے چاہئے چاہتا چاہتی چاہتے سکتا سکتی سکتے مجھے ہمیں آپ آپکا آپکی آپکے ہم میرا میری میرے ہمارا ہماری ہمارے " +
+    // Roman Urdu: the same words as people type them.
+    "ka ki ke ko se mein me par pe ne aur ya k kya kyun kyon kab kahan kaun kis kitna kitni kitne kaise kaisa kaisi hai hain ho hun hoon tha thi the hoga hogi ga gi ge " +
+    "ye yeh wo woh us un isi jo ji haan han nahi nahin bhi to hi bas phir ab sab kuch koi bata batain batayen bataiye batao chahiye chahta chahti chahte sakta sakti sakte mujhe humein hamein aap aapka aapki aapke apka apki apke hum mera meri mere hamara hamari hamare " +
+    // Urdu / Roman Urdu that appears in every question about a business and carries no topic.
+    "کریں کرنا کرنی کرنے کرتے کرتا کرتی karein karna karni karne karte karta karti"
   ).split(/\s+/)
 );
 

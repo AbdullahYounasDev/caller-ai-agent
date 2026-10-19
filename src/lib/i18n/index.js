@@ -11,12 +11,14 @@ import { CATALOGS, NAMESPACES } from "./catalogs";
  *                        Covers every namespace. Changing it changes the whole
  *                        interface, not one panel.
  *
- *   REPLY LANGUAGE       what language the AGENT SPEAKS to a customer.
- *   (replyLanguage)      "en", "it", or "auto" to mirror whichever language the
- *                        customer used. Applied in prompt.js, never here.
+ *   REPLY LANGUAGE       what language the AGENT SPEAKS to a customer: "en" or "ur".
+ *   (replyLanguage)      Applied in prompt.js, never here. Whichever is chosen, the
+ *                        agent UNDERSTANDS both English and Urdu (and the two mixed,
+ *                        which is how people in Pakistan actually talk) and ANSWERS
+ *                        in the one chosen.
  *
- * A clinic in Milan may run its dashboard in Italian while its agent mirrors
- * whichever language each caller uses. One setting cannot express that.
+ * A business in Karachi may read its dashboard in English while its agent answers
+ * callers in Urdu, or the reverse. One setting cannot express that.
  * ─────────────────────────────────────────────────────────────────────────
  *
  * WHY NOT next-intl / i18next: this is the whole system in one file, with no
@@ -33,44 +35,39 @@ import { CATALOGS, NAMESPACES } from "./catalogs";
  */
 
 /**
- * ACTIVE interface languages. English is the default and the source of truth.
- *
- * Arabic and Urdu catalogs still exist on disk under `src/locales/ar` and
- * `src/locales/ur` — fully translated, including Arabic's six plural forms.
- * They are DORMANT, not deleted: reactivating one means adding its code here
- * and to `catalogs.js`, nothing more. Being dormant, they are not covered by
- * `npm run i18n:check`, so expect them to have drifted from `en` by the time
- * they come back.
+ * ACTIVE interface languages: English (the default and the source of truth) and
+ * Urdu. These are the only two languages the product supports anywhere — the
+ * dashboard, what the agent understands, what it answers in, and what it speaks.
+ * Italian and Arabic were removed on purpose; do not bring them back piecemeal.
  */
-export const SUPPORTED_LOCALES = ["en", "it"];
+export const SUPPORTED_LOCALES = ["en", "ur"];
 export const DEFAULT_LOCALE = "en";
 
 /**
- * Kept although neither active language is RTL. The helpers below are generic,
- * cost nothing, and every layout was already built on logical CSS properties —
- * so turning Arabic back on is a config change rather than a redesign. Removing
- * this would quietly reintroduce the left/right assumptions it exists to prevent.
+ * Urdu is right-to-left. Direction is a DOCUMENT concern (see dirFor), and every
+ * layout uses logical CSS properties (ms-/me-/ps-/pe-, start/end), so switching the
+ * interface to Urdu flips the page without a separate stylesheet.
  */
-export const RTL_LOCALES = ["ar", "ur"];
+export const RTL_LOCALES = ["ur"];
 
 /**
  * What language the AGENT replies in. Distinct from the interface language.
  *
- *   "en" | "it" | "ur"  always answer in that language
- *   "auto"              answer in whichever language the customer wrote in
+ *   "en"  always answer in English
+ *   "ur"  always answer in Urdu
  *
- * `auto` is not a locale and never reaches `t()` — it is an instruction to the
- * model, applied in prompt.js. Treating it as a locale would send a lookup
- * hunting for a catalog named "auto".
+ * Both settings UNDERSTAND both languages: a business that chose English still has
+ * callers who speak Urdu, or mix the two mid-sentence, and the agent must follow
+ * them and answer in the chosen language. There is no "mirror the caller" mode any
+ * more — the business decides what its agent says (an older "auto" value is mapped
+ * to the default by config.js).
  *
- * "ur" is a REPLY language without being an active INTERFACE locale: a business
- * in Pakistan can have its agent answer callers in Urdu while its owner reads the
- * dashboard in English. The two settings are independent by design (§7); the
- * dormant `ur` UI catalog is unaffected. Spoken Urdu needs the voice stack of
+ * Neither value is a locale lookup problem: the reply language reaches the model as
+ * an instruction in prompt.js, never `t()`. Spoken Urdu needs the voice stack of
  * §6.24 (Urdu speech recognition is hosted — Groq Whisper).
  */
-export const REPLY_LANGUAGES = ["en", "it", "ur", "auto"];
-export const DEFAULT_REPLY_LANGUAGE = "auto";
+export const REPLY_LANGUAGES = ["en", "ur"];
+export const DEFAULT_REPLY_LANGUAGE = "en";
 
 /** @param {unknown} value */
 export function isReplyLanguage(value) {
@@ -80,8 +77,8 @@ export function isReplyLanguage(value) {
 /**
  * Everything a language switcher needs, anywhere in the system.
  *
- * `nativeName` is the language's name IN THAT LANGUAGE — "Italiano", not
- * "Italian". A switcher labelled in the language you currently can't read is
+ * `nativeName` is the language's name IN THAT LANGUAGE — "اردو", not
+ * "Urdu". A switcher labelled in the language you currently can't read is
  * useless to the person who most needs it.
  */
 export const LOCALE_META = SUPPORTED_LOCALES.map((code) => ({
@@ -181,7 +178,7 @@ export function t({ locale, key, vars = {}, count }) {
  * Bind a locale once and translate many times — what a component or a request
  * handler actually wants.
  *
- *   const tr = translator("ar");
+ *   const tr = translator("ur");
  *   tr("dashboard:chat.send");
  *
  * @param {string} locale
@@ -206,8 +203,8 @@ function lookup(locale, namespace, path) {
  *
  * This is why `Intl.PluralRules` rather than `count === 1 ? a : b`: Arabic has
  * SIX plural categories (zero, one, two, few, many, other) and the naive check
- * gets almost every Arabic sentence wrong. Urdu and English have two, Italian
- * has three. Letting Intl decide means each translator writes the forms their
+ * gets almost every sentence wrong in languages with more forms. Urdu and English
+ * have two. Letting Intl decide means each translator writes the forms their
  * own language actually has.
  */
 function pluralKey(locale, path, count) {
@@ -218,15 +215,11 @@ function pluralKey(locale, path, count) {
 /**
  * Replace {placeholders}, formatting numbers for the locale.
  *
- * ON ARABIC NUMERALS — a product decision, not a bug. Our locale codes have no
- * region, and CLDR's default numbering system for bare "ar" is Latin digits:
- *   Intl.NumberFormat("ar").format(1234)    -> "1,234"
- *   Intl.NumberFormat("ar-EG").format(1234) -> "١٬٢٣٤"
- * So today Arabic customers see Latin digits. That is correct for much of the
- * Gulf and the Maghreb, and wrong-looking in Egypt. If a tenant needs
- * Arabic-Indic numerals, the fix is region-aware locales (ar-EG) rather than
- * hardcoding a numbering system here — don't "fix" it globally without asking,
- * it would look wrong for the majority.
+ * ON URDU NUMERALS — a product decision, not a bug. Our locale codes have no
+ * region, and CLDR formats bare "ur" with Latin digits (Pakistan writes prices and
+ * phone numbers that way in practice). If a tenant ever needs Extended Arabic-Indic
+ * numerals, the fix is a region-aware locale rather than hardcoding a numbering
+ * system here.
  *
  * Unknown placeholders are left as-is: a visible "{businessName}" in dev is a
  * bug report, whereas silently deleting it hides the missing variable.
@@ -250,8 +243,8 @@ function interpolate(template, vars, locale) {
  *   3. the tenant's configured default
  *
  * Every candidate is checked against what the TENANT has enabled — a business
- * that only operates in English and Arabic must not get its agent answering in
- * Urdu just because a visitor's browser asked.
+ * that only operates in English must not get Urdu just because a visitor's
+ * browser asked.
  *
  * @param {object} args
  * @param {string} [args.requested]     explicit locale from the client
@@ -291,9 +284,9 @@ export function resolveLocale({ requested, acceptLanguage, enabled, fallback }) 
 }
 
 /**
- * "it-IT,it;q=0.9,en;q=0.8" -> ["it", "en"], highest quality first.
- * Region subtags are dropped: we translate by language, so it-CH and it-IT are
- * both "it".
+ * "ur-PK,ur;q=0.9,en;q=0.8" -> ["ur", "ur", "en"], highest quality first.
+ * Region subtags are dropped: we translate by language, so en-GB and en-US are
+ * both "en".
  */
 export function parseAcceptLanguage(header) {
   if (!header || typeof header !== "string") return [];

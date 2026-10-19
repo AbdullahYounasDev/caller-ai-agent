@@ -7,6 +7,9 @@ import { EditorView } from "@codemirror/view";
 import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
 import { VoiceCallPanel } from "./voice/VoiceCallPanel";
 import { VoicePicker } from "./voice/VoicePicker";
+import { CollectPanel } from "./collect/CollectPanel";
+import { fieldDef } from "@/lib/collect/config";
+import { pick } from "@/lib/collect/catalog";
 
 // Hidden until tool-calling actually executes (Phase 4, respond.js) — showing
 // capability toggles for things the agent can only ever DESCRIBE, never do,
@@ -143,7 +146,8 @@ function IconButton({ onClick, disabled, label, color, children }) {
 //
 // TWO LANGUAGE CONTROLS, and they answer different questions:
 //   • Interface language     — changes THIS ENTIRE PAGE.
-//   • Agent reply language   — English, Italian, or mirror whoever is speaking.
+//   • Agent reply language   — English or Urdu. The agent understands both either way
+//                              (and the two mixed); this is only what it answers in.
 
 const DEFAULT_TENANT_ID = "test-tenant";
 const TONES = ["professional", "friendly", "concise", "formal"];
@@ -208,6 +212,9 @@ export default function Home() {
 
   // --- the two languages ---
   const [uiLocale, setUiLocale] = useState("en");
+  // Which part of the console is showing. The sections are independent screens that used to
+  // be stacked on one long page; a tab each keeps "what does it collect" one click away.
+  const [tab, setTab] = useState("agent");
   // True once this tenant's SAVED dashboard language has been applied.
   // A ref, not state: it must survive a refetch without causing one, and it
   // must not be stored on the config object — the previous version did exactly
@@ -287,8 +294,8 @@ export default function Home() {
       // Changing the language dropdown re-runs this fetch (the capability
       // labels are translated server-side). The server returns the SAVED
       // language, which would overwrite the selection the user just made — so
-      // picking English on a business saved as Italian snapped straight back
-      // to Italian and the dropdown appeared broken.
+      // picking English on a business saved as Urdu snapped straight back
+      // to Urdu and the dropdown appeared broken.
       //
       // Once the saved language has been adopted, the in-flight choice wins
       // until it is saved or the page is reloaded.
@@ -894,6 +901,7 @@ export default function Home() {
                     sources: payload.sources,
                     searchQuery: payload.searchQuery,
                     rewriteStatus: payload.rewriteStatus,
+                    collection: payload.collection,
                   },
                 ];
               }
@@ -908,6 +916,7 @@ export default function Home() {
                       sources: payload.sources,
                       searchQuery: payload.searchQuery,
                       rewriteStatus: payload.rewriteStatus,
+                      collection: payload.collection,
                     },
                   ];
             });
@@ -935,7 +944,7 @@ export default function Home() {
   const btn = "rounded bg-black px-4 py-2 text-sm text-white disabled:opacity-40";
 
   return (
-    <div dir={dir} className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-6">
+    <div dir={dir} lang={uiLocale} className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">{t("dashboard:agent.title")}</h1>
@@ -967,391 +976,411 @@ export default function Home() {
         <input id="tenant" className={inputCls} value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
       </div>
 
+      <nav className="flex flex-wrap gap-1 border-b border-gray-200" role="tablist" aria-label={t("dashboard:agent.title")}>
+        {["agent", "knowledge", "collect", "call", "chat"].map((id) => (
+          <button
+            key={id}
+            type="button"
+            role="tab"
+            aria-selected={tab === id}
+            onClick={() => setTab(id)}
+            className={`-mb-px rounded-t border border-b-0 px-4 py-2 text-sm ${tab === id ? "border-gray-300 bg-white font-medium" : "border-transparent text-gray-500 hover:text-black"}`}
+          >
+            {t(`dashboard:tab.${id}`)}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "agent" && (
+        <>
       {!config ? (
-        <p className="text-sm text-gray-400">{t("common:state.loading")}</p>
-      ) : (
-        <form onSubmit={saveConfig} className={`${card} flex flex-col gap-4`}>
-          <div>
-            <label className={label} htmlFor="bn">{t("dashboard:field.businessName.label")}</label>
-            <input id="bn" className={inputCls} value={config.businessName}
-              onChange={(e) => patchConfig({ businessName: e.target.value })} />
-            <p className={help}>{t("dashboard:field.businessName.help")}</p>
-          </div>
-
-          <div>
-            <label className={label} htmlFor="purpose">{t("dashboard:field.purpose.label")}</label>
-            <textarea id="purpose" className={`${inputCls} min-h-20`}
-              placeholder={t("dashboard:field.purpose.placeholder")}
-              value={config.purpose} onChange={(e) => patchConfig({ purpose: e.target.value })} />
-            <p className={help}>{t("dashboard:field.purpose.help")}</p>
-          </div>
-
-          <div className="flex flex-wrap gap-3">
-            <div className="flex-1">
-              <label className={label} htmlFor="tone">{t("dashboard:field.tone.label")}</label>
-              <select id="tone" className={inputCls} value={config.tone}
-                onChange={(e) => patchConfig({ tone: e.target.value })}>
-                {TONES.map((tone) => (
-                  <option key={tone} value={tone}>{t(`common:tone.${tone}`)}</option>
-                ))}
-              </select>
-            </div>
-            <div className="flex-1">
-              <label className={label} htmlFor="reply">
-                {t("dashboard:field.replyLanguage.label")}
-              </label>
-              <select id="reply" className={inputCls} value={config.replyLanguage}
-                onChange={(e) => patchConfig({ replyLanguage: e.target.value })}>
-                {REPLY_LANGUAGES.map((r) => (
-                  <option key={r} value={r}>{t(`common:replyLanguage.${r}`)}</option>
-                ))}
-              </select>
-              <p className={help}>{t("dashboard:field.replyLanguage.help")}</p>
-            </div>
-          </div>
-
-          <VoicePicker
-            voices={config.voices ?? {}}
-            replyLanguage={config.replyLanguage}
-            onChange={(voices) => patchConfig({ voices })}
-            t={t}
-            labelClass={label}
-            helpClass={help}
-            inputClass={inputCls}
-          />
-
-          {SHOW_CAPABILITIES && (
+          <p className="text-sm text-gray-400">{t("common:state.loading")}</p>
+        ) : (
+          <form onSubmit={saveConfig} className={`${card} flex flex-col gap-4`}>
             <div>
-              <span className={label}>{t("dashboard:capabilities.title")}</span>
-              <p className={`${help} mb-2`}>{t("dashboard:capabilities.help")}</p>
-              <div className="flex flex-col gap-2">
-                {catalog.map((cap) => (
-                  <label key={cap.id} className="flex items-start gap-2 text-sm">
-                    <input type="checkbox" className="mt-1"
-                      checked={Boolean(config.capabilities?.[cap.id]?.enabled)}
-                      onChange={(e) => toggleCapability(cap.id, e.target.checked)} />
-                    <span>
-                      {cap.label}
-                      {cap.setupNote && (
-                        <span className="ms-1 text-xs text-amber-600">{cap.setupNote}</span>
-                      )}
-                      <span className="block text-xs text-gray-500">{cap.description}</span>
-                      <span className="block text-xs text-gray-400">
-                        {t("dashboard:capabilities.channelsLabel")}:{" "}
-                        {cap.channels.map((c) => cap.channelLabels[c]).join(" · ")}
+              <label className={label} htmlFor="bn">{t("dashboard:field.businessName.label")}</label>
+              <input id="bn" className={inputCls} value={config.businessName}
+                onChange={(e) => patchConfig({ businessName: e.target.value })} />
+              <p className={help}>{t("dashboard:field.businessName.help")}</p>
+            </div>
+  
+            <div>
+              <label className={label} htmlFor="purpose">{t("dashboard:field.purpose.label")}</label>
+              <textarea id="purpose" className={`${inputCls} min-h-20`}
+                placeholder={t("dashboard:field.purpose.placeholder")}
+                value={config.purpose} onChange={(e) => patchConfig({ purpose: e.target.value })} />
+              <p className={help}>{t("dashboard:field.purpose.help")}</p>
+            </div>
+  
+            <div className="flex flex-wrap gap-3">
+              <div className="flex-1">
+                <label className={label} htmlFor="tone">{t("dashboard:field.tone.label")}</label>
+                <select id="tone" className={inputCls} value={config.tone}
+                  onChange={(e) => patchConfig({ tone: e.target.value })}>
+                  {TONES.map((tone) => (
+                    <option key={tone} value={tone}>{t(`common:tone.${tone}`)}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1">
+                <label className={label} htmlFor="reply">
+                  {t("dashboard:field.replyLanguage.label")}
+                </label>
+                <select id="reply" className={inputCls} value={config.replyLanguage}
+                  onChange={(e) => patchConfig({ replyLanguage: e.target.value })}>
+                  {REPLY_LANGUAGES.map((r) => (
+                    <option key={r} value={r}>{t(`common:replyLanguage.${r}`)}</option>
+                  ))}
+                </select>
+                <p className={help}>{t("dashboard:field.replyLanguage.help")}</p>
+              </div>
+            </div>
+  
+            <VoicePicker
+              voices={config.voices ?? {}}
+              replyLanguage={config.replyLanguage}
+              onChange={(voices) => patchConfig({ voices })}
+              t={t}
+              labelClass={label}
+              helpClass={help}
+              inputClass={inputCls}
+            />
+  
+            {SHOW_CAPABILITIES && (
+              <div>
+                <span className={label}>{t("dashboard:capabilities.title")}</span>
+                <p className={`${help} mb-2`}>{t("dashboard:capabilities.help")}</p>
+                <div className="flex flex-col gap-2">
+                  {catalog.map((cap) => (
+                    <label key={cap.id} className="flex items-start gap-2 text-sm">
+                      <input type="checkbox" className="mt-1"
+                        checked={Boolean(config.capabilities?.[cap.id]?.enabled)}
+                        onChange={(e) => toggleCapability(cap.id, e.target.checked)} />
+                      <span>
+                        {cap.label}
+                        {cap.setupNote && (
+                          <span className="ms-1 text-xs text-amber-600">{cap.setupNote}</span>
+                        )}
+                        <span className="block text-xs text-gray-500">{cap.description}</span>
+                        <span className="block text-xs text-gray-400">
+                          {t("dashboard:capabilities.channelsLabel")}:{" "}
+                          {cap.channels.map((c) => cap.channelLabels[c]).join(" · ")}
+                        </span>
                       </span>
-                    </span>
-                  </label>
-                ))}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+  
+            <div className="flex flex-wrap items-center gap-3">
+              <button type="submit" disabled={savingConfig} className={btn}>
+                {savingConfig ? t("common:state.saving") : t("common:action.save")}
+              </button>
+              <button type="button" onClick={loadConfig} disabled={reloadingConfig}
+                className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40">
+                {t("common:action.reload")}
+              </button>
+              {configStatus && <p className="text-sm">{configStatus}</p>}
+            </div>
+          </form>
+        )}
+        </>
+      )}
+
+      {tab === "knowledge" && (
+      <section className={card}>
+          <h2 className="mb-1 font-medium">{t("dashboard:knowledge.title")}</h2>
+          <p className={`${help} mb-3`}>{t("dashboard:knowledge.help")}</p>
+  
+          {/* ---- the three ways to teach the agent something, always on top ---- */}
+          {!crawlOpen ? (
+            <div className="mb-4 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={ingesting}
+                className={btn}
+              >
+                {t("dashboard:knowledge.upload")}
+              </button>
+              <button type="button" onClick={openComposer} className={btn}>
+                {t("dashboard:knowledge.addText")}
+              </button>
+              <button type="button" onClick={openCrawl} className={btn}>
+                {t("dashboard:knowledge.crawlButton")}
+              </button>
+              {/* The real file input stays off-screen — its native "Choose files"
+                  button can't be restyled to match the other two, so a plain
+                  button forwards its click here instead. */}
+              <input
+                ref={fileInputRef}
+                id="doc-file"
+                type="file"
+                multiple
+                accept={limits.extensions?.join(",")}
+                disabled={ingesting}
+                onChange={(e) => {
+                  const files = e.target.files;
+                  // Cleared so choosing the SAME file twice still fires a
+                  // change — the common case when someone fixes a document and
+                  // re-uploads it.
+                  const picked = files ? [...files] : [];
+                  e.target.value = "";
+                  uploadDocs(picked);
+                }}
+                className="hidden"
+              />
+            </div>
+          ) : (
+            <div className="mb-4 flex flex-col gap-2">
+              <input
+                type="url"
+                autoFocus
+                className={inputCls}
+                placeholder={t("dashboard:knowledge.crawlPlaceholder")}
+                value={crawlUrl}
+                onChange={(e) => setCrawlUrl(e.target.value)}
+              />
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={crawlWebsite}
+                  disabled={crawling || !crawlUrl.trim()}
+                  className={btn}
+                >
+                  {crawling ? t("dashboard:knowledge.crawling") : t("dashboard:knowledge.crawlButton")}
+                </button>
+                <button
+                  type="button"
+                  onClick={closeCrawl}
+                  disabled={crawling}
+                  className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40"
+                >
+                  {t("common:action.cancel")}
+                </button>
               </div>
             </div>
           )}
-
-          <div className="flex flex-wrap items-center gap-3">
-            <button type="submit" disabled={savingConfig} className={btn}>
-              {savingConfig ? t("common:state.saving") : t("common:action.save")}
-            </button>
-            <button type="button" onClick={loadConfig} disabled={reloadingConfig}
-              className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40">
-              {t("common:action.reload")}
-            </button>
-            {configStatus && <p className="text-sm">{configStatus}</p>}
-          </div>
-        </form>
-      )}
-
-
-      <section className={card}>
-        <h2 className="mb-1 font-medium">{t("dashboard:knowledge.title")}</h2>
-        <p className={`${help} mb-3`}>{t("dashboard:knowledge.help")}</p>
-
-        {/* ---- the three ways to teach the agent something, always on top ---- */}
-        {!crawlOpen ? (
-          <div className="mb-4 flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={ingesting}
-              className={btn}
-            >
-              {t("dashboard:knowledge.upload")}
-            </button>
-            <button type="button" onClick={openComposer} className={btn}>
-              {t("dashboard:knowledge.addText")}
-            </button>
-            <button type="button" onClick={openCrawl} className={btn}>
-              {t("dashboard:knowledge.crawlButton")}
-            </button>
-            {/* The real file input stays off-screen — its native "Choose files"
-                button can't be restyled to match the other two, so a plain
-                button forwards its click here instead. */}
-            <input
-              ref={fileInputRef}
-              id="doc-file"
-              type="file"
-              multiple
-              accept={limits.extensions?.join(",")}
-              disabled={ingesting}
-              onChange={(e) => {
-                const files = e.target.files;
-                // Cleared so choosing the SAME file twice still fires a
-                // change — the common case when someone fixes a document and
-                // re-uploads it.
-                const picked = files ? [...files] : [];
-                e.target.value = "";
-                uploadDocs(picked);
-              }}
-              className="hidden"
-            />
-          </div>
-        ) : (
-          <div className="mb-4 flex flex-col gap-2">
-            <input
-              type="url"
-              autoFocus
-              className={inputCls}
-              placeholder={t("dashboard:knowledge.crawlPlaceholder")}
-              value={crawlUrl}
-              onChange={(e) => setCrawlUrl(e.target.value)}
-            />
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={crawlWebsite}
-                disabled={crawling || !crawlUrl.trim()}
-                className={btn}
-              >
-                {crawling ? t("dashboard:knowledge.crawling") : t("dashboard:knowledge.crawlButton")}
-              </button>
-              <button
-                type="button"
-                onClick={closeCrawl}
-                disabled={crawling}
-                className="rounded border border-gray-300 px-4 py-2 text-sm disabled:opacity-40"
-              >
-                {t("common:action.cancel")}
-              </button>
+          <p className={`${help} mb-4`}>
+            {crawlOpen ? (
+              t("dashboard:knowledge.crawlHelp")
+            ) : (
+              <>
+                {t("dashboard:knowledge.uploadMany")}{" "}
+                {t("dashboard:knowledge.uploadHelp", {
+                  vars: {
+                    types: (limits.extensions ?? []).join(" "),
+                    max: Math.round((limits.maxBytes ?? 0) / (1024 * 1024)),
+                  },
+                })}
+              </>
+            )}
+          </p>
+          {ingestStatus && <p className="mb-4 text-sm">{ingestStatus}</p>}
+  
+          {/* ---- queued / in-progress imports ---- */}
+          {jobs.length > 0 && (
+            <div className="mb-4 rounded border border-gray-200 bg-gray-50 p-3">
+              <div className="mb-2 flex items-center justify-between">
+                <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
+                  {t("dashboard:jobs.title")}
+                </p>
+                {jobs.every((j) => j.status === "done" || j.status === "failed" || j.status === "cancelled") && (
+                  <button
+                    type="button"
+                    onClick={dismissJobs}
+                    disabled={dismissingJobs}
+                    className="text-xs text-gray-500 underline disabled:opacity-40"
+                  >
+                    {t("dashboard:jobs.dismiss")}
+                  </button>
+                )}
+              </div>
+  
+              <ul className="flex flex-col gap-2.5">
+                {jobs.map((job) => {
+                  const failed = job.status === "failed";
+                  const done = job.status === "done";
+                  const cancelled = job.status === "cancelled";
+                  const active = !failed && !done && !cancelled;
+                  return (
+                    <li key={job.id}>
+                      <div className="mb-1 flex items-baseline justify-between gap-2">
+                        <span className="truncate text-sm font-medium text-black">{job.title}</span>
+                        <span className="flex flex-none items-center gap-2">
+                          <span
+                            className={`text-xs ${
+                              failed
+                                ? "text-red-600"
+                                : done
+                                  ? "text-green-700"
+                                  : cancelled
+                                    ? "text-gray-400"
+                                    : "text-gray-500"
+                            }`}
+                          >
+                            {jobLabel(job)}
+                          </span>
+                          {/* A long import (a big PDF's OCR, an embedding queue) can
+                              run for minutes — this is the way out of it without
+                              waiting, and lib/agent/jobs.js + ingest.js make sure
+                              cancelling also removes whatever the job had already
+                              written: the row, its chunks, and any Cloudinary
+                              upload. */}
+                          {active && (
+                            <button
+                              type="button"
+                              onClick={() => cancelJobRow(job.id)}
+                              className="text-xs text-gray-500 underline"
+                            >
+                              {t("common:action.cancel")}
+                            </button>
+                          )}
+                        </span>
+                      </div>
+  
+                      {/* A REAL bar: width is the job's actual progress, never an
+                          animation pretending to be one. */}
+                      <div
+                        className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200"
+                        role="progressbar"
+                        aria-valuenow={job.progress}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={job.title}
+                      >
+                        <div
+                          className={`h-full rounded-full transition-[width] duration-500 ease-out ${
+                            failed
+                              ? "bg-red-500"
+                              : done
+                                ? "bg-green-600"
+                                : cancelled
+                                  ? "bg-gray-400"
+                                  : "bg-black"
+                          }`}
+                          style={{ width: `${failed || cancelled ? 100 : job.progress}%` }}
+                        />
+                      </div>
+  
+                      {/* OCR is markedly slower than the rest; saying why stops it
+                          reading as a stall. */}
+                      {job.stage === "ocr" && (
+                        <p className="mt-1 text-xs text-amber-700">
+                          {t("dashboard:jobs.scannedNote")}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
-          </div>
-        )}
-        <p className={`${help} mb-4`}>
-          {crawlOpen ? (
-            t("dashboard:knowledge.crawlHelp")
+          )}
+  
+          {/* ---- existing documents ---- */}
+          {docs.length === 0 ? (
+            <p className="mb-4 text-sm text-gray-400">{t("dashboard:knowledge.empty")}</p>
           ) : (
             <>
-              {t("dashboard:knowledge.uploadMany")}{" "}
-              {t("dashboard:knowledge.uploadHelp", {
-                vars: {
-                  types: (limits.extensions ?? []).join(" "),
-                  max: Math.round((limits.maxBytes ?? 0) / (1024 * 1024)),
-                },
-              })}
-            </>
-          )}
-        </p>
-        {ingestStatus && <p className="mb-4 text-sm">{ingestStatus}</p>}
-
-        {/* ---- queued / in-progress imports ---- */}
-        {jobs.length > 0 && (
-          <div className="mb-4 rounded border border-gray-200 bg-gray-50 p-3">
-            <div className="mb-2 flex items-center justify-between">
-              <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">
-                {t("dashboard:jobs.title")}
-              </p>
-              {jobs.every((j) => j.status === "done" || j.status === "failed" || j.status === "cancelled") && (
-                <button
-                  type="button"
-                  onClick={dismissJobs}
-                  disabled={dismissingJobs}
-                  className="text-xs text-gray-500 underline disabled:opacity-40"
-                >
-                  {t("dashboard:jobs.dismiss")}
-                </button>
-              )}
-            </div>
-
-            <ul className="flex flex-col gap-2.5">
-              {jobs.map((job) => {
-                const failed = job.status === "failed";
-                const done = job.status === "done";
-                const cancelled = job.status === "cancelled";
-                const active = !failed && !done && !cancelled;
-                return (
-                  <li key={job.id}>
-                    <div className="mb-1 flex items-baseline justify-between gap-2">
-                      <span className="truncate text-sm font-medium text-black">{job.title}</span>
-                      <span className="flex flex-none items-center gap-2">
-                        <span
-                          className={`text-xs ${
-                            failed
-                              ? "text-red-600"
-                              : done
-                                ? "text-green-700"
-                                : cancelled
-                                  ? "text-gray-400"
-                                  : "text-gray-500"
-                          }`}
-                        >
-                          {jobLabel(job)}
-                        </span>
-                        {/* A long import (a big PDF's OCR, an embedding queue) can
-                            run for minutes — this is the way out of it without
-                            waiting, and lib/agent/jobs.js + ingest.js make sure
-                            cancelling also removes whatever the job had already
-                            written: the row, its chunks, and any Cloudinary
-                            upload. */}
-                        {active && (
-                          <button
-                            type="button"
-                            onClick={() => cancelJobRow(job.id)}
-                            className="text-xs text-gray-500 underline"
-                          >
-                            {t("common:action.cancel")}
-                          </button>
-                        )}
-                      </span>
-                    </div>
-
-                    {/* A REAL bar: width is the job's actual progress, never an
-                        animation pretending to be one. */}
-                    <div
-                      className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200"
-                      role="progressbar"
-                      aria-valuenow={job.progress}
-                      aria-valuemin={0}
-                      aria-valuemax={100}
-                      aria-label={job.title}
-                    >
-                      <div
-                        className={`h-full rounded-full transition-[width] duration-500 ease-out ${
-                          failed
-                            ? "bg-red-500"
-                            : done
-                              ? "bg-green-600"
-                              : cancelled
-                                ? "bg-gray-400"
-                                : "bg-black"
-                        }`}
-                        style={{ width: `${failed || cancelled ? 100 : job.progress}%` }}
-                      />
-                    </div>
-
-                    {/* OCR is markedly slower than the rest; saying why stops it
-                        reading as a stall. */}
-                    {job.stage === "ocr" && (
-                      <p className="mt-1 text-xs text-amber-700">
-                        {t("dashboard:jobs.scannedNote")}
-                      </p>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        )}
-
-        {/* ---- existing documents ---- */}
-        {docs.length === 0 ? (
-          <p className="mb-4 text-sm text-gray-400">{t("dashboard:knowledge.empty")}</p>
-        ) : (
-          <>
-            <div className="mb-2 flex items-center justify-between gap-2">
-              <label className="flex items-center gap-2 text-xs text-gray-500">
-                <input
-                  type="checkbox"
-                  checked={docs.length > 0 && selectedIds.size === docs.length}
-                  onChange={toggleSelectAll}
-                />
-                {t("dashboard:knowledge.selectAll")}
-              </label>
-              {selectedIds.size > 0 && (
-                <button
-                  type="button"
-                  onClick={deleteSelected}
-                  disabled={deletingSelected}
-                  className="rounded border border-red-300 px-3 py-1 text-xs text-red-700 disabled:opacity-40"
-                >
-                  {t("dashboard:knowledge.deleteSelected", { vars: { count: selectedIds.size } })}
-                </button>
-              )}
-            </div>
-            <ul className="mb-4 flex flex-col divide-y divide-gray-200 border-y border-gray-200">
-              {docs.map((d) => (
-                <li key={d.id} className="flex flex-wrap items-center gap-2 py-2">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <label className="flex items-center gap-2 text-xs text-gray-500">
                   <input
                     type="checkbox"
-                    className="flex-none"
-                    checked={selectedIds.has(d.id)}
-                    onChange={() => toggleSelected(d.id)}
-                    aria-label={d.title}
+                    checked={docs.length > 0 && selectedIds.size === docs.length}
+                    onChange={toggleSelectAll}
                   />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium">{d.title}</p>
-                    <p className="text-xs text-gray-500">
-                      {d.status === "ready"
-                        ? t("dashboard:knowledge.chunks", { vars: { count: d.chunkCount } })
-                        : d.status === "processing"
-                          ? t("dashboard:knowledge.status.processing")
-                          : t("dashboard:knowledge.status.failed")}
-                      {d.kind === "file" && d.fileName ? ` · ${d.fileName}` : ""}
-                      {d.byteSize ? ` · ${Math.max(1, Math.round(d.byteSize / 1024))} KB` : ""}
-                    </p>
-                    {d.status === "failed" && d.error && (
-                      <p className="text-xs text-red-600">{humanizeError(d.error, t)}</p>
-                    )}
-                  </div>
-                  {/* Only documents whose STORED TEXT IS THE DOCUMENT can be
-                      edited — typed text, .txt, .md. A PDF or Word file is stored
-                      as text we extracted from it, and that extraction is lossy;
-                      offering an edit box would present our approximation as if it
-                      were their file. For those the honest action is to upload a
-                      corrected version, which replaces it. */}
-                  {/* Only for a TRANSIENT failure (quota, an outage) — see
-                      isRetryableError. A document that failed for a reason
-                      retrying can't fix (too large, no text) doesn't get this
-                      button, since it would just fail again identically. */}
-                  {d.status === "failed" && isRetryableError(d.error) && (
-                    <IconButton
-                      onClick={() => retryDoc(d.id)}
-                      disabled={busyDocIds.has(d.id)}
-                      label={t("common:action.retry")}
-                      color="blue"
-                    >
-                      <RetryIcon />
-                    </IconButton>
-                  )}
-                  {d.editable ? (
-                    <IconButton
-                      onClick={() => editDoc(d.id)}
-                      disabled={busyDocIds.has(d.id)}
-                      label={t("dashboard:knowledge.edit")}
-                      color="neutral"
-                    >
-                      <EditIcon />
-                    </IconButton>
-                  ) : (
-                    <span
-                      className="text-xs text-gray-400"
-                      title={t("dashboard:knowledge.notEditable")}
-                    >
-                      {d.kind === "url" ? "url" : (d.fileName?.split(".").pop() ?? "file")}
-                    </span>
-                  )}
-                  <IconButton
-                    onClick={() => deleteDoc(d.id)}
-                    disabled={busyDocIds.has(d.id)}
-                    label={t("common:action.delete")}
-                    color="red"
+                  {t("dashboard:knowledge.selectAll")}
+                </label>
+                {selectedIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={deleteSelected}
+                    disabled={deletingSelected}
+                    className="rounded border border-red-300 px-3 py-1 text-xs text-red-700 disabled:opacity-40"
                   >
-                    <TrashIcon />
-                  </IconButton>
-                </li>
-              ))}
-            </ul>
-          </>
-        )}
-
-      </section>
+                    {t("dashboard:knowledge.deleteSelected", { vars: { count: selectedIds.size } })}
+                  </button>
+                )}
+              </div>
+              <ul className="mb-4 flex flex-col divide-y divide-gray-200 border-y border-gray-200">
+                {docs.map((d) => (
+                  <li key={d.id} className="flex flex-wrap items-center gap-2 py-2">
+                    <input
+                      type="checkbox"
+                      className="flex-none"
+                      checked={selectedIds.has(d.id)}
+                      onChange={() => toggleSelected(d.id)}
+                      aria-label={d.title}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium">{d.title}</p>
+                      <p className="text-xs text-gray-500">
+                        {d.status === "ready"
+                          ? t("dashboard:knowledge.chunks", { vars: { count: d.chunkCount } })
+                          : d.status === "processing"
+                            ? t("dashboard:knowledge.status.processing")
+                            : t("dashboard:knowledge.status.failed")}
+                        {d.kind === "file" && d.fileName ? ` · ${d.fileName}` : ""}
+                        {d.byteSize ? ` · ${Math.max(1, Math.round(d.byteSize / 1024))} KB` : ""}
+                      </p>
+                      {d.status === "failed" && d.error && (
+                        <p className="text-xs text-red-600">{humanizeError(d.error, t)}</p>
+                      )}
+                    </div>
+                    {/* Only documents whose STORED TEXT IS THE DOCUMENT can be
+                        edited — typed text, .txt, .md. A PDF or Word file is stored
+                        as text we extracted from it, and that extraction is lossy;
+                        offering an edit box would present our approximation as if it
+                        were their file. For those the honest action is to upload a
+                        corrected version, which replaces it. */}
+                    {/* Only for a TRANSIENT failure (quota, an outage) — see
+                        isRetryableError. A document that failed for a reason
+                        retrying can't fix (too large, no text) doesn't get this
+                        button, since it would just fail again identically. */}
+                    {d.status === "failed" && isRetryableError(d.error) && (
+                      <IconButton
+                        onClick={() => retryDoc(d.id)}
+                        disabled={busyDocIds.has(d.id)}
+                        label={t("common:action.retry")}
+                        color="blue"
+                      >
+                        <RetryIcon />
+                      </IconButton>
+                    )}
+                    {d.editable ? (
+                      <IconButton
+                        onClick={() => editDoc(d.id)}
+                        disabled={busyDocIds.has(d.id)}
+                        label={t("dashboard:knowledge.edit")}
+                        color="neutral"
+                      >
+                        <EditIcon />
+                      </IconButton>
+                    ) : (
+                      <span
+                        className="text-xs text-gray-400"
+                        title={t("dashboard:knowledge.notEditable")}
+                      >
+                        {d.kind === "url" ? "url" : (d.fileName?.split(".").pop() ?? "file")}
+                      </span>
+                    )}
+                    <IconButton
+                      onClick={() => deleteDoc(d.id)}
+                      disabled={busyDocIds.has(d.id)}
+                      label={t("common:action.delete")}
+                      color="red"
+                    >
+                      <TrashIcon />
+                    </IconButton>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+  
+        </section>
+      )}
 
       {/* ---- write a new document, or edit an existing one, in a real editor ---- */}
       {(editingId || composerOpen) && (
@@ -1422,92 +1451,126 @@ export default function Home() {
         </Modal>
       )}
 
+      {tab === "collect" && (
+        <CollectPanel
+          tenantId={tenantId}
+          uiLocale={uiLocale}
+          replyLanguage={config?.replyLanguage}
+          t={t}
+          cardClass={card}
+          labelClass={label}
+          helpClass={help}
+          inputClass={inputCls}
+          buttonClass={btn}
+        />
+      )}
+
+      {tab === "call" && (
+        <>
       {/* The voice channel — the product (§1). Same brain as the chat below; it runs in
-          its own process (npm run voice), see src/lib/voice/gateway.js. */}
-      <VoiceCallPanel tenantId={tenantId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
+            its own process (npm run voice), see src/lib/voice/gateway.js. */}
+        <VoiceCallPanel tenantId={tenantId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
+        </>
+      )}
 
+      {tab === "chat" && (
       <section className={`${card} flex flex-1 flex-col`}>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="font-medium">{t("common:channel.chat")}</h2>
-          <div className="flex items-center gap-2">
-            {/* No language toggle here on purpose: this panel is rendered in the
-                INTERFACE language, and what the agent writes back is governed by
-                the reply-language setting above. */}
-            <button type="button"
-              onClick={() => { setConversationId(null); setMessages([]); }}
-              className="rounded border border-gray-300 px-3 py-1 text-sm">
-              {t("dashboard:chat.startNew")}
-            </button>
-          </div>
-        </div>
-
-        <div dir={dir} className="mb-3 flex min-h-40 flex-1 flex-col gap-2 overflow-y-auto">
-          {messages.length === 0 && (
-            <p className="text-sm text-gray-400">{t("dashboard:chat.empty")}</p>
-          )}
-          {messages.map((m, i) => (
-            <div key={i} className={m.role === "user" ? "self-end" : "self-start"}>
-              <div className={
-                m.role === "user"
-                  ? "rounded bg-black px-3 py-2 text-sm text-white"
-                  : m.role === "error"
-                    ? "rounded border border-dashed border-red-300 px-3 py-2 text-sm text-red-700"
-                    : "rounded bg-gray-100 px-3 py-2 text-sm text-black"
-              }>
-                {m.content}
-              </div>
-              {/* DEBUG METADATA — which model answered and which of the
-                  tenant's documents (if any) it drew from. This is why the
-                  test chat exists: proving a prompt/retrieval change without
-                  digging through server logs. Shown only once the reply has
-                  actually finished, and never for the user's own messages. */}
-              {m.role === "assistant" && !m.pending && m.model && (
-                <p className="mt-1 text-xs text-gray-400">
-                  {t("dashboard:chat.answeredBy", { vars: { model: m.model } })}
-                  {" · "}
-                  {m.sources?.length
-                    ? t("dashboard:chat.groundedIn", { vars: { sources: m.sources.join(", ") } })
-                    : t("dashboard:chat.noSources")}
-                  {/* What was actually SEARCHED, when that differs from what
-                      the customer typed — a follow-up like "and the Pro one?"
-                      is rewritten into a standalone query first (§6.19). A
-                      failed rewrite is shown too: it silently falls back to
-                      the raw message, and that must not be invisible. */}
-                  {m.searchQuery && (
-                    <>
-                      {" · "}
-                      {t("dashboard:chat.searchedFor", { vars: { query: m.searchQuery } })}
-                    </>
-                  )}
-                  {m.rewriteStatus === "failed" && (
-                    <>
-                      {" · "}
-                      {t("dashboard:chat.searchRewriteFailed")}
-                    </>
-                  )}
-                  {m.rewriteStatus === "skipped" && (
-                    <>
-                      {" · "}
-                      {t("dashboard:chat.searchRewriteSkipped")}
-                    </>
-                  )}
-                </p>
-              )}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-medium">{t("common:channel.chat")}</h2>
+            <div className="flex items-center gap-2">
+              {/* No language toggle here on purpose: this panel is rendered in the
+                  INTERFACE language, and what the agent writes back is governed by
+                  the reply-language setting above. */}
+              <button type="button"
+                onClick={() => { setConversationId(null); setMessages([]); }}
+                className="rounded border border-gray-300 px-3 py-1 text-sm">
+                {t("dashboard:chat.startNew")}
+              </button>
             </div>
-          ))}
-        </div>
-
-        <form onSubmit={handleSend} dir={dir} className="flex gap-2">
-          <input className={`${inputCls} flex-1`} placeholder={t("dashboard:chat.placeholder")}
-            value={input} onChange={(e) => setInput(e.target.value)} />
-          <button type="submit" disabled={sending} className={btn}>
-            {sending ? t("dashboard:chat.typing") : t("dashboard:chat.send")}
-          </button>
-        </form>
-        <p dir={dir} className="mt-2 text-xs text-gray-400">
-          {t("dashboard:chat.disclaimer")}
-        </p>
-      </section>
+          </div>
+  
+          <div dir={dir} className="mb-3 flex min-h-40 flex-1 flex-col gap-2 overflow-y-auto">
+            {messages.length === 0 && (
+              <p className="text-sm text-gray-400">{t("dashboard:chat.empty")}</p>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} className={m.role === "user" ? "self-end" : "self-start"}>
+                <div className={
+                  m.role === "user"
+                    ? "rounded bg-black px-3 py-2 text-sm text-white"
+                    : m.role === "error"
+                      ? "rounded border border-dashed border-red-300 px-3 py-2 text-sm text-red-700"
+                      : "rounded bg-gray-100 px-3 py-2 text-sm text-black"
+                }>
+                  {m.content}
+                </div>
+                {/* DEBUG METADATA — which model answered and which of the
+                    tenant's documents (if any) it drew from. This is why the
+                    test chat exists: proving a prompt/retrieval change without
+                    digging through server logs. Shown only once the reply has
+                    actually finished, and never for the user's own messages. */}
+                {m.role === "assistant" && !m.pending && m.model && (
+                  <p className="mt-1 text-xs text-gray-400">
+                    {t("dashboard:chat.answeredBy", { vars: { model: m.model } })}
+                    {" · "}
+                    {m.sources?.length
+                      ? t("dashboard:chat.groundedIn", { vars: { sources: m.sources.join(", ") } })
+                      : t("dashboard:chat.noSources")}
+                    {/* What was actually SEARCHED, when that differs from what
+                        the customer typed — a follow-up like "and the Pro one?"
+                        is rewritten into a standalone query first (§6.19). A
+                        failed rewrite is shown too: it silently falls back to
+                        the raw message, and that must not be invisible. */}
+                    {m.searchQuery && (
+                      <>
+                        {" · "}
+                        {t("dashboard:chat.searchedFor", { vars: { query: m.searchQuery } })}
+                      </>
+                    )}
+                    {m.rewriteStatus === "failed" && (
+                      <>
+                        {" · "}
+                        {t("dashboard:chat.searchRewriteFailed")}
+                      </>
+                    )}
+                    {m.rewriteStatus === "skipped" && (
+                      <>
+                        {" · "}
+                        {t("dashboard:chat.searchRewriteSkipped")}
+                      </>
+                    )}
+                    {/* What happened to a customer's request this turn (appointment,
+                        callback…): which detail the agent is asking for, or the reference
+                        it was saved under. Idle (a request COULD be taken) is not news. */}
+                    {m.collection && m.collection.state !== "idle" && (
+                      <>
+                        {" · "}
+                        {t(`dashboard:chat.request.${m.collection.state}`, {
+                          vars: {
+                            field: m.collection.field ? pick(fieldDef(config?.collect, m.collection.field)?.label, uiLocale) || m.collection.field : "",
+                            reference: m.collection.reference ?? "",
+                          },
+                        })}
+                      </>
+                    )}
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+  
+          <form onSubmit={handleSend} dir={dir} className="flex gap-2">
+            <input className={`${inputCls} flex-1`} placeholder={t("dashboard:chat.placeholder")}
+              value={input} onChange={(e) => setInput(e.target.value)} />
+            <button type="submit" disabled={sending} className={btn}>
+              {sending ? t("dashboard:chat.typing") : t("dashboard:chat.send")}
+            </button>
+          </form>
+          <p dir={dir} className="mt-2 text-xs text-gray-400">
+            {t("dashboard:chat.disclaimer")}
+          </p>
+        </section>
+      )}
     </div>
   );
 }

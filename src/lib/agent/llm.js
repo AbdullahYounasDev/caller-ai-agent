@@ -263,6 +263,44 @@ export function generateRewrite({ systemInstruction, history, timeoutMs }) {
   );
 }
 
+// ── THE DETAIL-EXTRACTION CALL (lib/collect) ────────────────────────────────
+// Like the rewrite, an optional model call that is not the customer's reply: it reads one
+// message and returns candidate form values (lib/collect/extract.js). It has its own circuit
+// breaker for the same reason the rewrite has — a degraded provider must cost a request
+// being taken nothing more than the rules-only reading, not three seconds a turn.
+
+const extractionBreaker = createCircuitBreaker({
+  threshold: REWRITE_BREAKER_THRESHOLD,
+  cooldownMs: REWRITE_BREAKER_COOLDOWN_MS,
+});
+
+/**
+ * Run the extraction under a hard timeout and its own breaker. Uses the same (optional,
+ * smaller) model as the rewrite: it too must follow "ONE line of JSON, no explanation".
+ * Throws CircuitOpenError / CallTimeoutError / the provider's error; the caller falls back
+ * to rules.
+ *
+ * @param {object} args
+ * @param {string} args.systemInstruction
+ * @param {Array<{role: "user"|"model", parts: Array<{text: string}>}>} args.history
+ * @param {number} args.timeoutMs
+ * @returns {Promise<string>}
+ */
+export function generateExtraction({ systemInstruction, history, timeoutMs }) {
+  return runGuarded(
+    extractionBreaker,
+    () =>
+      withProviderFallback(
+        (provider, name) => provider.generateReply({ systemInstruction, history, model: rewriteModelFor(name) }),
+        "extraction"
+      ),
+    { timeoutMs }
+  );
+}
+
+/** For logs and the debug route: the extraction breaker's current state. */
+export const extractionBreakerState = () => extractionBreaker.snapshot();
+
 /** For logs and the debug route: the rewrite breaker's current state. */
 export const rewriteBreakerState = () => rewriteBreaker.snapshot();
 

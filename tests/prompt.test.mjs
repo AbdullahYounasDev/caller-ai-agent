@@ -10,11 +10,11 @@ import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 
 const config = (over = {}) => ({
   businessName: "Acme Dental",
-  purpose: "We run a family dental clinic in Milan.",
+  purpose: "We run a family dental clinic in Karachi.",
   tone: "friendly",
-  timezone: "Europe/Rome",
+  timezone: "Asia/Karachi",
   hours: { mon: [["09:00", "17:00"]], sun: [] },
-  replyLanguage: "auto",
+  replyLanguage: "en",
   capabilities: {},
   escalation: null,
   ...over,
@@ -32,8 +32,8 @@ describe("ABOUT THIS BUSINESS profile (§6.20)", () => {
   test("name, purpose and hours all appear, hours formatted per day", () => {
     const p = build();
     assert.match(p, /ABOUT THIS BUSINESS:\nName: Acme Dental\n/);
-    assert.match(p, /What we do, in the business's own words: We run a family dental clinic in Milan\./);
-    assert.match(p, /Business hours \(timezone Europe\/Rome\): mon 09:00-17:00; sun closed\./);
+    assert.match(p, /What we do, in the business's own words: We run a family dental clinic in Karachi\./);
+    assert.match(p, /Business hours \(timezone Asia\/Karachi\): mon 09:00-17:00; sun closed\./);
   });
 
   test("the grounding EXCEPTION is present exactly when the profile is", () => {
@@ -62,11 +62,11 @@ describe("ABOUT THIS BUSINESS profile (§6.20)", () => {
     assert.match(purposeOnly, /What we do/);
     assert.ok(!purposeOnly.includes("Name: "));
     const hoursOnly = build({ businessName: PLACEHOLDER_BUSINESS_NAME, purpose: "", hours: "Mon-Fri 9-5" });
-    assert.match(hoursOnly, /Business hours \(timezone Europe\/Rome\): Mon-Fri 9-5\./);
+    assert.match(hoursOnly, /Business hours \(timezone Asia\/Karachi\): Mon-Fri 9-5\./);
   });
 
   test("malformed hours degrade to a readable line instead of throwing", () => {
-    assert.match(build({ hours: 42 }), /Business hours \(timezone Europe\/Rome\): not specified\./);
+    assert.match(build({ hours: 42 }), /Business hours \(timezone Asia\/Karachi\): not specified\./);
     assert.match(build({ hours: { tue: "closed for lunch" } }), /tue closed/);
     assert.match(build({ hours: { wed: [["09:00", "12:00"], ["14:00", "18:00"]] } }), /wed 09:00-12:00, 14:00-18:00/);
   });
@@ -188,27 +188,54 @@ describe("conflict rule (documents that disagree)", () => {
 });
 
 describe("language modes (§7)", () => {
-  test("auto mirrors the customer and never fixes a language", () => {
-    const p = build({ replyLanguage: "auto" });
-    assert.match(p, /THE SAME LANGUAGE THE CUSTOMER WROTE IN/);
-    assert.ok(!p.includes("always reply in"));
+  test("both languages are understood whichever one is answered in", () => {
+    for (const replyLanguage of ["en", "ur"]) {
+      const p = build({ replyLanguage });
+      assert.match(p, /may write or speak English, Urdu \(in Urdu script or in Roman letters\), or a mix of both/);
+      assert.match(p, /Understand all of it equally well/);
+    }
   });
 
-  test("a fixed language wins over whatever the customer writes", () => {
-    assert.match(build({ replyLanguage: "it" }), /always reply in Italian, whatever language the customer writes in/);
-    assert.match(build({ replyLanguage: "en" }), /always reply in English, whatever language/);
+  test("the chosen language is the one answered in, whatever the customer used", () => {
+    assert.match(build({ replyLanguage: "ur" }), /ALWAYS reply in Urdu, whatever language the customer used and even when the reference material below is in English/);
+    assert.match(build({ replyLanguage: "en" }), /ALWAYS reply in English, whatever language the customer used and even when the reference material below is in Urdu/);
   });
 
-  test("an unknown reply language falls back to English rather than naming 'undefined'", () => {
-    const p = build({ replyLanguage: "xx" });
-    assert.match(p, /always reply in English/);
-    assert.ok(!p.includes("undefined"));
+  test("there is no mirror-the-customer mode and no Italian any more", () => {
+    for (const replyLanguage of ["en", "ur", "auto", "it"]) {
+      const p = build({ replyLanguage });
+      assert.ok(!p.includes("THE SAME LANGUAGE THE CUSTOMER WROTE IN"), replyLanguage);
+      assert.ok(!p.includes("Italian"), replyLanguage);
+    }
+  });
+
+  test("an unknown or removed reply language falls back to English rather than naming 'undefined'", () => {
+    for (const replyLanguage of ["xx", "auto", "it", undefined]) {
+      const p = build({ replyLanguage });
+      assert.match(p, /ALWAYS reply in English/);
+      assert.ok(!p.includes("undefined"));
+    }
+  });
+
+  test("Urdu replies are written in Urdu script, with loanwords in script; on a call numbers are words", () => {
+    const chat = build({ replyLanguage: "ur" });
+    assert.match(chat, /Write Urdu in Urdu script, never in Roman letters/);
+    assert.match(chat, /everyday English loanwords/);
+    assert.ok(!chat.includes("write numbers, prices and times as Urdu words"), "digits are fine in a chat window");
+    assert.match(build({ replyLanguage: "ur" }, { channel: "voice" }), /write numbers, prices and times as Urdu words/);
+    assert.ok(!build({ replyLanguage: "en" }, { channel: "voice" }).includes("Write Urdu in Urdu script"));
   });
 
   test("the INTERFACE locale never leaks into the prompt", () => {
-    const p = build({ replyLanguage: "en", uiLocale: "it" });
-    assert.match(p, /always reply in English/);
-    assert.ok(!p.includes("Italian"));
+    const p = build({ replyLanguage: "en", uiLocale: "ur" });
+    assert.match(p, /ALWAYS reply in English/);
+    assert.ok(!p.includes("ALWAYS reply in Urdu"));
+  });
+
+  test("on a call the model is told the transcript may be Urdu, English or both, in either script", () => {
+    const p = build({ replyLanguage: "en" }, { channel: "voice" });
+    assert.match(p, /HEARING:/);
+    assert.match(p, /English words in Urdu script or Urdu words in Latin letters/);
   });
 });
 
@@ -310,7 +337,7 @@ describe("identity", () => {
 describe("query-rewrite prompts (§6.19)", () => {
   test("the instruction keeps the customer's language, forbids new facts, and returns standalone messages unchanged", () => {
     const s = buildQueryRewriteInstruction();
-    assert.match(s, /SAME LANGUAGE as the customer's latest message\. Italian stays Italian\. Never translate/);
+    assert.match(s, /SAME LANGUAGE AND SCRIPT as the customer's latest message: English stays English, Urdu stays Urdu, Roman Urdu stays Roman Urdu, a mix stays a mix\. Never translate/);
     assert.match(s, /Do NOT add prices, numbers, policies or product details/);
     assert.match(s, /return it EXACTLY as written/);
     assert.match(s, /Output ONLY the search query/);

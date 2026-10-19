@@ -11,25 +11,21 @@
   "action.copy": "کاپی کریں",
   "action.copied": "کاپی ہو گیا",
   "action.reload": "دوبارہ لوڈ کریں",
-
   "state.loading": "لوڈ ہو رہا ہے…",
   "state.saving": "محفوظ ہو رہا ہے…",
   "state.saved": "محفوظ ہو گیا",
   "state.empty": "یہاں ابھی کچھ نہیں ہے",
   "state.error": "کچھ غلط ہو گیا",
-
   "language.en": "English",
-  "language.it": "Italiano",
-  "language.ar": "العربية",
   "language.ur": "اردو",
   "channel.voice": "فون اور کالیں",
-  "channel.chat": "آزمائشی چیٹ",
-
   "tone.professional": "پیشہ ورانہ",
   "tone.friendly": "دوستانہ",
   "tone.concise": "مختصر",
   "tone.formal": "رسمی",
-
   "yes": "ہاں",
-  "no": "نہیں"
+  "no": "نہیں",
+  "replyLanguage.en": "ہمیشہ انگریزی میں جواب",
+  "channel.chat": "آزمائشی چیٹ",
+  "replyLanguage.ur": "ہمیشہ اردو میں جواب"
 }

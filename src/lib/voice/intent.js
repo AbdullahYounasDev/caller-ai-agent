@@ -14,7 +14,8 @@ import { humanizeTitle } from "@/lib/agent/chunk";
  * taxonomy is ever needed ("booking", "complaint"…), it belongs in an offline job over
  * call_turns — not on the call.
  *
- * Pure (tests/voice-intent.test.mjs). English + Italian, the active locales (§7).
+ * Pure (tests/voice-intent.test.mjs). English and Urdu (in Urdu script and Roman letters), the
+ * two active languages (§7).
  */
 
 export const INTENTS = {
@@ -38,12 +39,30 @@ export const OUTCOMES = {
   FAILED: "failed",
 };
 
-const HUMAN_REQUEST =
-  /\b(speak|talk|put me through|transfer me|connect me)\b.{0,30}\b(human|person|someone|somebody|agent|operator|representative|staff|manager)\b|\b(real|live) (person|human|agent)\b|\boperator\b|\b(parlare|passarmi|passami)\b.{0,30}\b(operatore|persona|qualcuno|umano|responsabile)\b|\boperatore\b/i;
-const GOODBYE =
-  /\b(bye|goodbye|good bye|see you|that'?s all|that is all|nothing else|have a (nice|good) day|arrivederci|ciao ciao|a presto|buona giornata|buona serata|è tutto|basta così|nient'?altro)\b/i;
-const GREETING_ONLY =
-  /^\s*(hi|hello|hey|good (morning|afternoon|evening)|ciao|salve|buongiorno|buonasera|pronto)[\s,.!]*(there|everyone)?[\s,.!]*$/i;
+// JavaScript's \b does not see Arabic-script letters as word characters, so Urdu patterns are
+// delimited with Unicode-aware edges instead.
+const EDGE_START = "(?<![\\p{L}\\p{M}])";
+const EDGE_END = "(?![\\p{L}\\p{M}])";
+const edged = (source) => new RegExp(`${EDGE_START}(?:${source})${EDGE_END}`, "iu");
+
+const HUMAN_REQUEST = edged(
+  // English
+  "(?:speak|talk|put me through|transfer me|connect me)\\b.{0,30}\\b(?:human|person|someone|somebody|agent|operator|representative|staff|manager)|" +
+    "(?:real|live) (?:person|human|agent)|operator|" +
+    // Urdu script: "کسی انسان سے بات", "آپریٹر", "مینیجر سے بات کرنی ہے", "کسی سے بات کروائیں"
+    "(?:انسان|بندے|شخص|کسی|مینیجر|منیجر|مالک|عملے|اسٹاف)\\s+(?:سے\\s+)?(?:بات|ملوا|ملا)|آپریٹر|" +
+    // Roman Urdu: "kisi insan se baat", "operator", "manager se baat karni hai"
+    "(?:insan|banday|bande|shakhs|kisi|manager|malik|staff)\\s+(?:se\\s+)?(?:baat|milwa|mila)"
+);
+const GOODBYE = edged(
+  "bye|goodbye|good bye|see you|that'?s all|that is all|nothing else|have a (?:nice|good) day|" +
+    "خدا حافظ|اللہ حافظ|بس اتنا ہی|بس یہی|اور کچھ نہیں|شکریہ، بس|" +
+    "khuda hafiz|allah hafiz|bas itna hi|bas yehi|aur kuch nahi|bas shukriya"
+);
+const GREETING_ONLY = new RegExp(
+  "^\\s*(?:hi|hello|hey|good (?:morning|afternoon|evening)|سلام|السلام علیکم|آداب|ہیلو|salam|assalam o alaikum|assalamualaikum|assalam alaikum|aoa)[\\s,.!۔،]*(?:there|everyone)?[\\s,.!۔،]*$",
+  "iu"
+);
 
 /**
  * @param {object} turn

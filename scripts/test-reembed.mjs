@@ -37,11 +37,11 @@ ok(src.embeddingScheme === scheme.EMBEDDING_SCHEME_VERSION, `ingest recorded emb
 // 1b. the keyword index's language is chosen per DOCUMENT at ingest (§6.3)
 const labels = async (id) => (await prisma.$queryRaw`select distinct search_config::text c from ai_engine.knowledge_chunks where source_id=${id}`).map((x) => x.c);
 ok(JSON.stringify(await labels(src.id)) === '["english"]', "English document → every chunk search_config = english");
-const it = await ingestDocument({ tenantId: T, title: "faq-it.md", text: "# Domande frequenti\n\nIl piano Growth costa 219 euro al mese e include il supporto per la clinica. Il periodo di prova non è disponibile per tutti i clienti, ma è possibile chiedere una dimostrazione alla nostra squadra. Abbiamo anche una politica di rimborso per gli abbonamenti annuali che si applica entro trenta giorni dall'acquisto, come previsto dalla legge." , kind: "text" });
-const itSrc = await prisma.knowledgeSource.findFirst({ where: { tenantId: T, title: "faq-it.md" } });
-ok(JSON.stringify(await labels(itSrc.id)) === '["italian"]', "Italian document → search_config = italian");
-const tsv = await prisma.$queryRaw`select content_tsv::text t from ai_engine.knowledge_chunks where source_id=${itSrc.id} limit 1`;
-ok(/'cost'|'clinic'|'abbonament'/.test(tsv[0].t), "content_tsv was generated with the italian stemmer (" + tsv[0].t.slice(0, 40) + "…)");
+const ur = await ingestDocument({ tenantId: T, title: "faq-ur.md", text: "# اکثر پوچھے جانے والے سوالات\n\nGrowth پلان کی قیمت ہر مہینے دو سو انیس یورو ہے اور اس میں کلینک کے لیے سپورٹ شامل ہے۔ مفت آزمائشی مدت تمام گاہکوں کو دستیاب نہیں ہوتی، لیکن آپ ہماری ٹیم سے ڈیمو مانگ سکتے ہیں۔ سالانہ سبسکرپشن کی رقم واپسی کی پالیسی خریداری کے تیس دن کے اندر لاگو ہوتی ہے۔", kind: "text" });
+const urSrc = await prisma.knowledgeSource.findFirst({ where: { tenantId: T, title: "faq-ur.md" } });
+ok(JSON.stringify(await labels(urSrc.id)) === '["simple"]', "Urdu document → search_config = simple");
+const tsv = await prisma.$queryRaw`select content_tsv::text t from ai_engine.knowledge_chunks where source_id=${urSrc.id} limit 1`;
+ok(/'پلان'|'کلینک'|'سبسکرپشن'/.test(tsv[0].t), "content_tsv was generated with the simple config (" + tsv[0].t.slice(0, 40) + "…)");
 
 // 2. re-embed: force the doc to look legacy by setting scheme -1
 const setScheme = (v) => prisma.$executeRaw`UPDATE ai_engine.knowledge_sources SET embedding_scheme=${v} WHERE id=${src.id}`;
@@ -282,7 +282,6 @@ await prisma.knowledgeSource.deleteMany({ where: { tenantId: T, title: INC } });
         SELECT c.id, c.source_title AS "sourceTitle", c.heading, c.content, s.updated_at AS "sourceUpdatedAt",
                c.embedding <=> ${lit}::vector AS distance,
                ts_rank_cd(c.content_tsv, CASE c.search_config
-                   WHEN 'italian'::regconfig THEN plainto_tsquery('italian', ${query})
                    WHEN 'simple'::regconfig  THEN plainto_tsquery('simple', ${query})
                    ELSE plainto_tsquery('english', ${query}) END) AS "keywordRank"
         FROM ai_engine.knowledge_chunks c JOIN ai_engine.knowledge_sources s ON s.id = c.source_id

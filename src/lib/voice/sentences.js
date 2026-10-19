@@ -61,11 +61,8 @@ const MIN_CHUNK_CHARS = 18;
  */
 const FIRST_CHUNK_COMMA_SLACK = 1.25;
 
-/** Words whose trailing period is NOT a sentence end. English + Italian (§7). */
-const ABBREVIATIONS = new Set([
-  "mr", "mrs", "ms", "dr", "vs", "etc", "e.g", "i.e", "approx",
-  "sig", "sigg", "dott", "prof", "ing", "avv", "geom", "pag", "tel",
-]);
+/** Words whose trailing period is NOT a sentence end (§7). */
+const ABBREVIATIONS = new Set(["mr", "mrs", "ms", "dr", "prof", "vs", "etc", "e.g", "i.e", "approx", "tel"]);
 
 /**
  * A sentence ends at . ! ? … — or Urdu's ۔ (full stop) and ؟ (question mark) —
@@ -79,9 +76,9 @@ const PAUSE = /[,;:،]\s/g;
 
 /** Words that start a new clause — the best place to break a sentence that has no comma. */
 const STRONG_JOINER =
-  / (?=(?:but|so|because|which|who|while|until|unless|whereas|although|according to|including|except|ma|perché|quindi|mentre|secondo|sebbene|لیکن|کیونکہ|جو|جب|تاکہ|اگرچہ)\s)/giu;
+  / (?=(?:but|so|because|which|who|while|until|unless|whereas|although|according to|including|except|لیکن|مگر|کیونکہ|جو|جب|تاکہ|اگرچہ)\s)/giu;
 /** Words that MAY start a clause but often join two nouns — used only when nothing better exists. */
-const WEAK_JOINER = / (?=(?:and|or|that|e|oppure|che|اور|یا|کہ)\s)/giu;
+const WEAK_JOINER = / (?=(?:and|or|that|اور|یا|کہ)\s)/giu;
 
 /** "Dr." or "e.g." — a single period after a known abbreviation. */
 function endsWithAbbreviation(text) {

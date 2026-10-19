@@ -42,3 +42,6 @@ next-env.d.ts
 
 # local voice models (npm run voice:models) — large binaries, never committed
 /models/
+
+# Tesseract language data downloaded on first OCR use (eng.traineddata is the one tracked file)
+urd.traineddata

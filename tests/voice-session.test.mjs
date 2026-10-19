@@ -309,14 +309,16 @@ describe("CallSession", () => {
     assert.equal(h.calls.length, 1);
   });
 
-  test("the business's voices are used per language, and the recogniser is chosen for the call's language", async () => {
+  test("the business's voice is used for its reply language, and the recogniser never depends on that language", async () => {
     const h = harness({
       config: { replyLanguage: "ur", voices: { ur: "kokoro:hm_omega", en: "piper:en_US-ryan-medium" } },
       transcripts: ["آپ کے اوقات کیا ہیں؟"],
       replies: [streams("ہم پیر سے جمعہ کھلے ہیں۔")],
     });
     await h.session.start();
-    assert.deepEqual(h.sttCalls, [{ replyLanguage: "ur", vocabulary: ["Nyron"] }]);
+    // The recogniser is asked for with the business's vocabulary ONLY: every call must
+    // understand Urdu and English whichever language it answers in.
+    assert.deepEqual(h.sttCalls, [{ vocabulary: ["Nyron"] }]);
     // Urdu greeting, male voice → masculine verb.
     assert.match(`${h.spoken[0].text} ${h.spoken[1].text}`, /^السلام علیکم، Nyron کو کال کرنے کا شکریہ۔ .*سکتا ہوں؟$/);
     assert.equal(h.spoken[0].voiceId, "kokoro:hm_omega");
@@ -327,22 +329,32 @@ describe("CallSession", () => {
     assert.equal(h.recorded.turns[0].language, "ur");
   });
 
-  test("a call that may be in Urdu, on a recogniser that cannot understand Urdu, says so in its timeline", async () => {
-    const h = harness({ config: { replyLanguage: "auto" } });
-    h.session.stt = { forCall: () => ({ id: "parakeet", understandsUrdu: false, transcribe: async () => ({ text: "", ms: 1 }) }) };
-    await h.session.start();
-    assert.deepEqual(h.recorded.events.find((e) => e.type === "stt.urdu_unavailable")?.data, { stt: "parakeet" });
-
-    const english = harness({ config: { replyLanguage: "en" } });
-    english.session.stt = h.session.stt;
-    await english.session.start();
-    assert.ok(!english.recorded.events.some((e) => e.type === "stt.urdu_unavailable"), "an English-only line is not warned");
+  test("a recogniser that cannot understand Urdu says so in the timeline of EVERY call, whichever language it answers in", async () => {
+    const cannot = { forCall: () => ({ id: "parakeet", understandsUrdu: false, transcribe: async () => ({ text: "", ms: 1 }) }) };
+    for (const replyLanguage of ["en", "ur"]) {
+      const h = harness({ config: { replyLanguage } });
+      h.session.stt = cannot;
+      await h.session.start();
+      assert.deepEqual(h.recorded.events.find((e) => e.type === "stt.urdu_unavailable")?.data, { stt: "parakeet" }, replyLanguage);
+    }
+    const fine = harness({ config: { replyLanguage: "en" } });
+    await fine.session.start();
+    assert.ok(!fine.recorded.events.some((e) => e.type === "stt.urdu_unavailable"), "a recogniser that hears Urdu is not warned about");
   });
 
   test("a voice id that is not a real voice for its language falls back to that language's default", async () => {
-    const h = harness({ config: { replyLanguage: "it", voices: { it: "kokoro:af_heart" } } });
+    const h = harness({ config: { replyLanguage: "ur", voices: { ur: "kokoro:af_heart" } } });
     await h.session.start();
-    assert.equal(h.spoken[0].voiceId, "kokoro:if_sara");
+    assert.equal(h.spoken[0].voiceId, "kokoro:hf_alpha");
+  });
+
+  test("a stored 'auto' or Italian reply language (older data) is spoken as English, never as an unknown language", async () => {
+    for (const replyLanguage of ["auto", "it"]) {
+      const h = harness({ config: { replyLanguage } });
+      await h.session.start();
+      assert.equal(h.spoken[0].language, "en", replyLanguage);
+      assert.equal(h.spoken[0].voiceId, "kokoro:af_heart", replyLanguage);
+    }
   });
 
   test("set-up failure (config or database down) refuses the call cleanly instead of throwing", async () => {

@@ -161,7 +161,7 @@ export async function POST(request) {
         // then fails — otherwise a failed first message orphans it.
         send(controller, "session", { conversationId });
 
-        const { reply, model, sources, searchQuery, rewriteStatus } = await respond({
+        const { reply, model, sources, searchQuery, rewriteStatus, collection } = await respond({
           tenantId,
           conversationId,
           channel: "chat",
@@ -180,7 +180,7 @@ export async function POST(request) {
         // which of the tenant's documents (if any) it was grounded in. Never
         // part of `reply` itself, so it stays out of anything that might one
         // day read the reply aloud.
-        if (!closed) send(controller, "done", { reply, model, sources, searchQuery, rewriteStatus });
+        if (!closed) send(controller, "done", { reply, model, sources, searchQuery, rewriteStatus, collection });
       } catch (err) {
         console.error("POST /api/chat failed:", err);
         if (!closed) {

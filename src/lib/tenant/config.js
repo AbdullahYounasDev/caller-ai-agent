@@ -5,6 +5,7 @@ import {
   DEFAULT_REPLY_LANGUAGE,
   isReplyLanguage,
 } from "@/lib/i18n";
+import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config";
 
 /**
  * THE TENANT CONFIG SEAM.
@@ -33,13 +34,17 @@ const DEFAULTS = {
   tone: "professional",
   timezone: "UTC",
   uiLocale: "en",
-  replyLanguage: "auto",
+  replyLanguage: DEFAULT_REPLY_LANGUAGE,
   hours: null,
   escalation: null,
   capabilities: {},
   // { [spokenLanguage]: voiceId } — empty means every language uses its default voice
   // (lib/voice/speech/voices.js voiceFor()).
   voices: {},
+  // What the agent collects for a customer's request (lib/collect/config.js). Off until the
+  // business sets it up, so an existing tenant's agent behaves exactly as before.
+  collect: emptyCollectConfig(),
+  collectVersion: 0,
 };
 
 
@@ -100,7 +105,7 @@ export function invalidateAgentConfig(tenantId) {
  * @param {object|null} row
  */
 function normalizeConfig(row) {
-  if (!row) return { ...DEFAULTS, exists: false };
+  if (!row) return { ...DEFAULTS, collect: emptyCollectConfig(), exists: false };
 
   return {
     exists: true,
@@ -111,7 +116,9 @@ function normalizeConfig(row) {
     timezone: row.timezone ?? DEFAULTS.timezone,
     // INTERFACE language: every screen the business owner reads.
     uiLocale: isSupported(row.uiLocale) ? row.uiLocale : DEFAULTS.uiLocale,
-    // What the AGENT replies in. "auto" is not a locale — see lib/i18n.
+    // What the AGENT replies in: "en" or "ur" (it always UNDERSTANDS both). A value
+    // left over from the days of "auto"/Italian degrades to the default instead of
+    // reaching the prompt.
     replyLanguage: isReplyLanguage(row.replyLanguage)
       ? row.replyLanguage
       : DEFAULT_REPLY_LANGUAGE,
@@ -119,6 +126,10 @@ function normalizeConfig(row) {
     escalation: row.escalation ?? null,
     capabilities: row.capabilities ?? {},
     voices: row.voices && typeof row.voices === "object" && !Array.isArray(row.voices) ? row.voices : {},
+    // Normalized on every read: a stored document that has drifted from the schema degrades
+    // to the nearest valid one instead of reaching the engine malformed.
+    collect: normalizeCollectConfig(row.collect),
+    collectVersion: row.collectVersion ?? 0,
     updatedAt: row.updatedAt,
   };
 }
@@ -160,6 +171,26 @@ export async function saveAgentConfig(tenantId, patch) {
     update: data,
   });
 
+  invalidateAgentConfig(tenantId);
+  return normalizeConfig(row);
+}
+
+
+/**
+ * Save what the agent collects. Separate from saveAgentConfig on purpose: this document is
+ * validated by lib/collect/config.js validateCollectConfig and versioned, and a general
+ * config edit must never be able to overwrite it half-way.
+ *
+ * @param {string} tenantId
+ * @param {object} collect an already-validated collect config
+ */
+export async function saveCollectConfig(tenantId, collect) {
+  if (!tenantId) throw new Error("saveCollectConfig requires a tenantId");
+  const row = await prisma.agentConfig.upsert({
+    where: { tenantId },
+    create: { tenantId, businessName: DEFAULTS.businessName, collect, collectVersion: 1 },
+    update: { collect, collectVersion: { increment: 1 } },
+  });
   invalidateAgentConfig(tenantId);
   return normalizeConfig(row);
 }

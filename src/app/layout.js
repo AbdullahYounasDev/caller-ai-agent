@@ -1,9 +1,10 @@
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
-// `subsets: ["latin"]` covers both active languages (English, Italian). If a
-// dormant locale is ever reactivated (ar/ur), this needs a font stack that
-// actually carries Arabic script.
+// `subsets: ["latin"]` covers English. Urdu (the other active language, right-to-left)
+// is set with a system font stack in globals.css — Latin web fonts have no Arabic
+// script, and downloading a Nastaliq face on every page load is not worth it for an
+// internal console.
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],

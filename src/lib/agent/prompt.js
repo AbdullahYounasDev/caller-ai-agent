@@ -3,6 +3,8 @@ import { t, DEFAULT_LOCALE } from "@/lib/i18n";
 import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { humanizeTitle } from "./chunk";
 import { SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
+import { digitsAsWords } from "@/lib/collect/validate";
+import { MARKER_EXAMPLE } from "@/lib/collect/marker";
 
 /**
  * Builds the system instruction. This is where a tenant's configuration stops
@@ -23,10 +25,10 @@ import { SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
 // "gather the details, promise follow-up, never claim it's done" guard instead.
 const TOOL_EXECUTION_AVAILABLE = false;
 
+// The only two languages the product speaks (§7). The agent UNDERSTANDS both whichever
+// is chosen; the chosen one is what it answers in.
 const LANGUAGE_NAMES = {
   en: "English",
-  it: "Italian",
-  ar: "Arabic",
   ur: "Urdu",
 };
 
@@ -65,25 +67,19 @@ const CHANNEL_STYLE = {
 const GENDER_WORDS = { female: "feminine", male: "masculine" };
 
 /**
- * ON A CALL, THE AGENT HAS A GENDER — the voice the business picked. In languages where
- * the speaker's gender changes the words (Urdu "میں کر سکتی ہوں" vs "کر سکتا ہوں", Italian
- * "sono lieta" vs "sono lieto"), a female voice speaking masculine forms is immediately
- * wrong to a native caller. Only the languages this call can actually be spoken in are
- * described, and the voice per language comes from the same voiceFor() the gateway
- * speaks with, so the grammar always matches the voice the caller hears.
+ * ON A CALL, THE AGENT HAS A GENDER — the voice the business picked. In Urdu the speaker's
+ * gender changes the words ("میں کر سکتی ہوں" vs "کر سکتا ہوں"), so a female voice speaking
+ * masculine forms is immediately wrong to a native caller. The voice comes from the same
+ * voiceFor() the gateway speaks with, so the grammar always matches what the caller hears.
+ * The call is spoken in the business's reply language only.
  */
 function voiceGenderInstruction(config) {
-  const languages = config.replyLanguage === "auto" ? SPOKEN_LANGUAGES : [config.replyLanguage];
-  const genders = languages.map((lang) => [lang, voiceFor(config.voices, lang).gender]);
-  const distinct = new Set(genders.map(([, g]) => g));
-  const rule =
-    distinct.size === 1
-      ? `Your voice on this call is ${[...distinct][0]}.`
-      : `Your voice on this call is ${genders.map(([lang, g]) => `${g} in ${LANGUAGE_NAMES[lang]}`).join(", ")}.`;
-  const forms = distinct.size === 1 ? `the ${GENDER_WORDS[[...distinct][0]]} forms` : "the forms that match that voice";
+  const language = SPOKEN_LANGUAGES.includes(config.replyLanguage) ? config.replyLanguage : "en";
+  const gender = voiceFor(config.voices, language).gender;
   return (
-    `VOICE: ${rule} In languages where words change with the speaker's gender (such as Urdu ` +
-    `and Italian), always use ${forms} when you speak about yourself.`
+    `VOICE: Your voice on this call is ${gender}. In languages where words change with the ` +
+    `speaker's gender (such as Urdu), always use the ${GENDER_WORDS[gender]} forms when you ` +
+    `speak about yourself.`
   );
 }
 
@@ -102,7 +98,9 @@ function voiceHearingInstruction(config) {
     "HEARING: the customer's words reach you through automatic speech recognition, which often " +
     `misspells names. A word that sounds like the business's name${name} or like a name in the ` +
     "reference material means that name: answer about it, and never say you have no information " +
-    "only because the spelling differs. If you genuinely cannot tell what was said, ask the " +
+    "only because the spelling differs. The customer may speak English, Urdu, or both in one " +
+    "sentence, and the transcript may write English words in Urdu script or Urdu words in Latin " +
+    "letters: read it for its meaning. If you genuinely cannot tell what was said, ask the " +
     "customer to repeat it."
   );
 }
@@ -112,12 +110,14 @@ function voiceHearingInstruction(config) {
  * @param {object} args.config   from lib/tenant/config.js getAgentConfig()
  * @param {string} args.channel  "chat" | "voice"
  *   NOTE: there is no `locale` parameter. The reply language comes from
- *   `config.replyLanguage` ("en" | "it" | "ur" | "auto"); the INTERFACE language is a
+ *   `config.replyLanguage` ("en" | "ur"); the INTERFACE language is a
  *   presentation concern and must never leak into the prompt.
  * @param {Array<{source: string, content: string}>} args.chunks retrieved knowledge
+ * @param {object|null} [args.collection] this turn's plan for taking a customer's request
+ *   (lib/collect/engine.js); null when the business takes none
  * @returns {string}
  */
-export function buildSystemInstruction({ config, channel, chunks = [] }) {
+export function buildSystemInstruction({ config, channel, chunks = [], collection = null }) {
   const sections = [];
 
   // --- 1. Who the agent is -------------------------------------------------
@@ -139,32 +139,35 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   }
 
   // --- 3. Language ---------------------------------------------------------
-  // Always explicit, in both modes. Retrieved context is very often in a
-  // different language from the customer's question, and without an instruction
-  // the model drifts into the language of the documents it just read.
-  if (config.replyLanguage === "auto") {
-    // "Match the customer's language" — the business made no fixed choice, so
-    // the customer's own words decide. The knowledge base is usually in one
-    // language and the customer may write in another; saying so explicitly is
-    // what stops the model answering an Italian question in English simply
-    // because the price list was English.
-    sections.push(
-      "LANGUAGE: reply in THE SAME LANGUAGE THE CUSTOMER WROTE IN. Detect it from " +
-        "their message and mirror it exactly — including if that is a language the " +
-        "reference material below is not written in; translate what you need. " +
-        "If the customer switches language mid-conversation, switch with them and " +
-        "stay switched. Never announce or comment on which language you are using."
+  // Two languages, both UNDERSTOOD, one ANSWERED. Pakistani callers switch between
+  // Urdu and English inside a sentence ("Pro plan کی fee کیا ہے؟") and write Urdu in
+  // Roman letters ("iska price kya hai"); the model has to read all of it, and the
+  // business's choice decides what comes back. Retrieved context is very often in the
+  // other language from the reply, and without an explicit instruction the model drifts
+  // into the language of the documents it just read.
+  const replyName = LANGUAGE_NAMES[config.replyLanguage] ?? LANGUAGE_NAMES.en;
+  const otherName = config.replyLanguage === "ur" ? LANGUAGE_NAMES.en : LANGUAGE_NAMES.ur;
+  const language = [
+    "LANGUAGE: the customer may write or speak English, Urdu (in Urdu script or in Roman " +
+      "letters), or a mix of both in one sentence. Understand all of it equally well. " +
+      `ALWAYS reply in ${replyName}, whatever language the customer used and even when the ` +
+      `reference material below is in ${otherName} — translate what you need. Never announce ` +
+      "or comment on which language you are using, and do not ask the customer to switch.",
+  ];
+  if (config.replyLanguage === "ur") {
+    language.push(
+      "Write Urdu in Urdu script, never in Roman letters. Write everyday English loanwords " +
+        "(clinic, appointment, doctor) in Urdu script too; keep only brand names and codes in their " +
+        "original spelling."
     );
-  } else {
-    const languageName = LANGUAGE_NAMES[config.replyLanguage] ?? LANGUAGE_NAMES.en;
-    // The business fixed a language, so it wins even when the customer writes
-    // in another one — that is the point of choosing it rather than "auto".
-    sections.push(
-      `LANGUAGE: always reply in ${languageName}, whatever language the customer ` +
-        `writes in. Reply in ${languageName} even when the reference material below ` +
-        `is in another language — translate what you need.`
-    );
+    if (channel === "voice") {
+      language.push(
+        "You are speaking: write numbers, prices and times as Urdu words, the way a person says them " +
+          "aloud (for example پندرہ سو روپے), never as digits."
+      );
+    }
   }
+  sections.push(language.join(" "));
 
   // --- 4. About this business ----------------------------------------------
   // The business profile: name + purpose + hours, always in the prompt, whether
@@ -230,6 +233,13 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
   if (config.escalation) {
     sections.push(`ESCALATION: ${formatEscalation(config.escalation)}`);
   }
+
+  // --- 6b. Taking a request (appointment, callback…) -------------------------
+  // The engine decides what happens this turn (lib/collect/engine.js); this section only
+  // tells the model what to SAY about it. It sits before the reference material so the
+  // grounding rule and the conflict rule stay the last things the model reads.
+  const collecting = collection ? buildCollectionInstruction(collection, { channel }) : null;
+  if (collecting) sections.push(collecting);
 
   // --- 7. Knowledge + the grounding rule -----------------------------------
   // Last on purpose: it's the longest section and the rule that must survive
@@ -349,20 +359,18 @@ export function buildSystemInstruction({ config, channel, chunks = [] }) {
  * says that is not generated is still agent wording, and prompt.js is where that is
  * reviewed — not in the voice code.
  *
- * Its language: the business's fixed reply language, or English when the reply language
- * is "auto" — before the caller has said a word there is nothing to mirror. The INTERFACE
- * language is deliberately not consulted (§7: it must never leak into what the agent
- * says). From the caller's first sentence on, "auto" mirrors them as usual.
+ * Its language: the business's reply language. The INTERFACE language is deliberately not
+ * consulted (§7: it must never leak into what the agent says).
  *
  * Voice-safe (no markdown, digits or URLs), and a question, so the caller knows it is
  * their turn. In Urdu the closing verb agrees with the VOICE's gender ("سکتی" / "سکتا") —
  * the same rule voiceGenderInstruction gives the model for everything after.
  *
  * @param {object} config from getAgentConfig()
- * @returns {{text: string, language: "en"|"it"|"ur"}}
+ * @returns {{text: string, language: "en"|"ur"}}
  */
 export function buildVoiceGreeting(config) {
-  const language = ["it", "ur"].includes(config?.replyLanguage) ? config.replyLanguage : "en";
+  const language = config?.replyLanguage === "ur" ? "ur" : "en";
   const name =
     config?.businessName && config.businessName !== PLACEHOLDER_BUSINESS_NAME ? config.businessName : null;
 
@@ -370,10 +378,6 @@ export function buildVoiceGreeting(config) {
   if (language === "ur") {
     const can = voiceFor(config?.voices, "ur").gender === "female" ? "سکتی" : "سکتا";
     text = `السلام علیکم، ${name ? `${name} کو ` : ""}کال کرنے کا شکریہ۔ میں آپ کی کیا مدد کر ${can} ہوں؟`;
-  } else if (language === "it") {
-    text = name
-      ? `Buongiorno, grazie per aver chiamato ${name}. Come posso aiutarla?`
-      : "Buongiorno, grazie per la chiamata. Come posso aiutarla?";
   } else {
     text = name
       ? `Hello, thanks for calling ${name}. How can I help you today?`
@@ -398,7 +402,7 @@ export function buildVoiceGreeting(config) {
  * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
  *
  * @param {"filler"|"fallback"} kind
- * @param {"en"|"it"|"ur"} language
+ * @param {"en"|"ur"} language
  * @param {number} [variant]  any integer; picks one of the phrasings
  * @returns {string}
  */
@@ -406,16 +410,14 @@ export function voiceLine(kind, language, variant = 0) {
   const lines = {
     filler: {
       en: ["Let me check that for you.", "Sure, just a moment.", "One second, please."],
-      it: ["Controllo subito.", "Un attimo, per favore.", "Un momento, verifico."],
       ur: ["جی، ایک لمحہ۔", "جی، ذرا ایک لمحہ دیجیے۔"],
     },
     fallback: {
       en: ["Sorry, I'm having trouble answering right now. Could you try again in a moment?"],
-      it: ["Mi scusi, in questo momento ho difficoltà a rispondere. Può riprovare tra poco?"],
       ur: ["معذرت، اس وقت جواب دینے میں دشواری ہو رہی ہے۔ کیا آپ تھوڑی دیر میں دوبارہ پوچھ سکتے ہیں؟"],
     },
   };
-  const options = lines[kind][["it", "ur"].includes(language) ? language : "en"];
+  const options = lines[kind][language === "ur" ? "ur" : "en"];
   return options[Math.abs(Math.trunc(variant)) % options.length];
 }
 
@@ -427,11 +429,11 @@ export function voiceLine(kind, language, variant = 0) {
  * Two rules carry the weight and both exist because of a specific way this goes
  * wrong, so neither should be softened:
  *
- *  - KEEP THE CUSTOMER'S LANGUAGE. The embedding model is multilingual and an
- *    Italian question already retrieves English documents well (eval:real,
- *    cross_language, 100% hit@1). A rewrite that quietly translated "E il
- *    Growth?" into English would not improve that, and would break the one
- *    thing — mirroring the speaker (§7) — that every downstream step assumes.
+ *  - KEEP THE CUSTOMER'S LANGUAGE. The embedding model is multilingual and a question
+ *    in one language already retrieves documents in another well (eval:real,
+ *    cross_language, 100% hit@1). A rewrite that quietly translated an Urdu follow-up
+ *    into English would not improve that, and would change what the customer said
+ *    in a step nothing downstream can check.
  *  - NEVER ADD FACTS. A rewrite is a search key, not an answer. If the model
  *    "helpfully" adds a price or a plan name the customer never mentioned, the
  *    search is steered toward whatever it invented and the grounding rule
@@ -447,9 +449,9 @@ export function buildQueryRewriteInstruction() {
     "You turn the LATEST customer message of a conversation into ONE standalone search query for a business's knowledge base.",
     "RULES:",
     "- Output ONLY the search query: a single line, no quotes, no label, no explanation.",
-    "- Resolve pronouns and elliptical phrasing (\"and the Pro one?\", \"what about Sundays?\", \"is that included?\", \"E il Growth?\") using the earlier conversation, so the query makes sense with no context at all.",
+    "- Resolve pronouns and elliptical phrasing (\"and the Pro one?\", \"what about Sundays?\", \"is that included?\", \"اور پرو والا؟\", \"aur Sunday ko?\") using the earlier conversation, so the query makes sense with no context at all.",
     "- Use ONLY words, names and facts that already appear in the conversation. Do NOT answer the question. Do NOT add prices, numbers, policies or product details that are not already there. Do NOT guess a product or plan the customer never mentioned.",
-    "- Write the query in THE SAME LANGUAGE as the customer's latest message. Italian stays Italian. Never translate it.",
+    "- Write the query in THE SAME LANGUAGE AND SCRIPT as the customer's latest message: English stays English, Urdu stays Urdu, Roman Urdu stays Roman Urdu, a mix stays a mix. Never translate it.",
     "- If the latest message is already complete and clear on its own, OR it starts a new topic unrelated to the earlier conversation, OR it is only a greeting, thanks or acknowledgement, return it EXACTLY as written.",
   ].join("\n");
 }
@@ -531,4 +533,228 @@ function formatEscalation(escalation) {
     parts.push("A route to a human exists — offer it, and the system will handle the handoff.");
   }
   return parts.join(" ") || "Offer a human when you cannot help.";
+}
+
+
+// ── TAKING A REQUEST (lib/collect) ─────────────────────────────────────────
+
+/** Why an answer could not be used, as guidance to the model — never shown to the customer verbatim. */
+const PROBLEM_GUIDANCE = {
+  invalid_phone: "it is not a valid phone number (a Pakistani mobile number has eleven digits, for example 0300 1234567)",
+  invalid_email: "it is not a valid email address",
+  invalid_name: "it does not look like a name",
+  not_a_number: "it is not a number",
+  out_of_range: "it is outside what is allowed ({min} to {max})",
+  not_an_option: "it is not one of the choices",
+  not_yes_no: "it is not a clear yes or no",
+  invalid_datetime: "the day and time could not be worked out",
+  in_past: "that time has already passed",
+  too_far: "that is too far ahead (more than a year)",
+  closed: "the business is closed then ({day}) — say so, mention the opening hours from ABOUT THIS BUSINESS, and ask for another time",
+  empty: "nothing usable was said",
+};
+
+function problemSentence(problem) {
+  const template = PROBLEM_GUIDANCE[problem.reason] ?? "it could not be used";
+  const text = template.replace(/\{(\w+)\}/g, (_, key) => problem.vars?.[key] ?? "");
+  return `The customer's last answer for "${problem.field.label}" could not be used: ${text}. Say so kindly in one short sentence and ask for it again.`;
+}
+
+/** A detail as one line of the instruction. On a call, a phone number is spelled digit by digit. */
+function lineText(line, { channel, language }) {
+  const spoken = channel === "voice" && line.type === "phone" ? ` (say it digit by digit: ${digitsAsWords(line.display, language)})` : "";
+  return `- ${line.label}: ${line.display}${spoken}`;
+}
+
+/**
+ * The section of the system instruction for this turn's REQUEST PLAN (lib/collect/engine.js
+ * `advanceCollection`). Null for no plan.
+ *
+ * Four rules run through every state and are repeated because each one is a lie a model
+ * tells otherwise: it NEVER says a request is booked, confirmed or guaranteed (a person
+ * confirms — §6.11); it asks ONE thing per turn (a caller cannot answer three questions
+ * at once); it keeps the customer's own wording out of its mouth ("mirroring" a misheard
+ * phone number is how wrong records are made); and it answers a side question first
+ * rather than ignoring it.
+ *
+ * @param {object|null} plan
+ * @param {{channel: string}} options
+ * @returns {string|null}
+ */
+export function buildCollectionInstruction(plan, { channel }) {
+  if (!plan) return null;
+  const language = plan.language === "ur" ? "ur" : "en";
+  const replyName = LANGUAGE_NAMES[language];
+  const never =
+    "You cannot book, confirm or cancel anything yourself: a team member confirms every request, so never say it is " +
+    "booked, confirmed or guaranteed.";
+
+  if (plan.state === "idle") {
+    if (!plan.offers?.length) return null;
+    const list = plan.offers.map((o) => `${o.label} (code ${o.type})`).join("; ");
+    const first = plan.offers.map((o) => `for ${o.type}: "${o.firstQuestion}"`).join("; ");
+    return (
+      `REQUESTS YOU CAN TAKE: ${list}. ${never} If the customer clearly wants one of these, say in one short sentence ` +
+      `that you can take their details now, then ask the first question (${first}) in ${replyName}, ` +
+      `and begin your whole reply with the marker ${MARKER_EXAMPLE} (using that request's code) — nothing before it. ` +
+      "The marker is removed before the customer sees it. Never use it for any other reason, and never mention it."
+    );
+  }
+
+  const header = `TAKING A REQUEST — ${plan.typeLabel}. ${never} This is what you do THIS turn, and nothing else about the request:`;
+  const lineCtx = { channel, language };
+
+  switch (plan.state) {
+    case "ask": {
+      const ask = plan.ask;
+      const out = [header];
+      if (plan.collected?.length) out.push(`Details already collected (do not ask for these again):\n${plan.collected.map((l) => lineText(l, lineCtx)).join("\n")}`);
+      if (plan.problem) out.push(problemSentence(plan.problem));
+      if (plan.extractionFailed) out.push("The last answer could not be processed just now: if the customer gave you something, politely ask them to say it once more.");
+      if (plan.firstAsk) out.push("This is the first question: start with a short friendly sentence saying you can take their details.");
+      let task = `Ask ONLY for: ${ask.label}${ask.required ? "" : " (optional — they may say no or skip it)"}. The business's preferred wording is "${ask.question}": keep its meaning and say it naturally in ${replyName}.`;
+      if (ask.have?.date) task += ` The customer already gave the day (${ask.have.date}): ask only for the time.`;
+      if (ask.have?.time) task += ` The customer already gave the time (${ask.have.time}): ask only for the day.`;
+      if (ask.options?.length) task += ` The choices are: ${ask.options.join(", ")}. Say them if the customer seems unsure.`;
+      out.push(task);
+      out.push("Ask exactly ONE question. If the customer also asked something else, answer that first in one sentence from the reference material, then ask your question.");
+      return out.join("\n");
+    }
+    case "readback": {
+      const out = [header, `All the details are collected. Read them back to the customer in one short, natural message, then ask whether everything is correct:\n${plan.lines.map((l) => lineText(l, lineCtx)).join("\n")}`];
+      if (plan.corrected?.length) out.push(`The customer just corrected: ${plan.corrected.map((l) => l.label).join(", ")}. Say you have updated it.`);
+      if (plan.problem) out.push(problemSentence(plan.problem));
+      if (plan.reconfirm) out.push("The customer said something else instead of confirming: answer it first in one sentence from the reference material, then ask again whether the details are correct.");
+      out.push("Do NOT say the request has been saved or sent yet. Ask only whether it is correct (yes or no); if something is wrong they will tell you what.");
+      return out.join("\n");
+    }
+    case "change":
+      return [
+        header,
+        `The customer says something in the details is wrong. Ask which one to correct. The details are:\n${plan.lines.map((l) => lineText(l, lineCtx)).join("\n")}`,
+        "Ask only that, in one short sentence.",
+      ].join("\n");
+    case "submitted":
+      return [
+        header,
+        `The customer confirmed. Their request has been SAVED with the request number ${plan.reference}, and now waits for a team member to confirm it.`,
+        channel === "voice"
+          ? "Say that it is recorded and that the team will get in touch to confirm. Do not read the request number aloud unless the customer asks for it."
+          : `Say that it is recorded, that the team will confirm it shortly, and give the request number ${plan.reference}.`,
+        "Do NOT say it is booked, confirmed or guaranteed, and do not promise a specific time beyond what the customer asked for. Then ask if there is anything else.",
+      ].join("\n");
+    case "submit_failed":
+      return [header, "The request could NOT be saved just now. Apologise briefly, say a team member will follow up, and offer to try again in a moment. Do not claim it was saved."].join("\n");
+    case "cancelled":
+      return [header, "The customer stopped the request, and nothing was saved. Acknowledge that in one short sentence and offer other help."].join("\n");
+    case "stuck":
+      return [
+        header,
+        `You could not get a usable answer for "${plan.field.label}" after two tries, so the request was NOT saved. Apologise briefly and say a team member can follow up with them; ask if there is anything else you can help with.`,
+      ].join("\n");
+    default:
+      return null;
+  }
+}
+
+/**
+ * SYSTEM INSTRUCTION for the extraction call (lib/collect/extract.js) — like the query
+ * rewrite, a model call that never speaks to a customer. Its only output is a JSON object
+ * of candidate values, and every one of them is judged by validate.js before it is kept.
+ *
+ * The rules that carry the weight: ONLY what the customer actually said (a model that
+ * "helpfully" fills a phone number from an example produces a wrong record nobody can
+ * see), and dates resolved against a stated clock and the opening hours (an ambiguous
+ * "five o'clock" is read the way that falls inside opening hours).
+ *
+ * @param {object} args
+ * @param {Array<object>} args.fields    the fields still missing (lib/collect/config.js typeFields)
+ * @param {object} args.config           for choice options
+ * @param {number} args.nowMs
+ * @param {string} args.timezone
+ * @param {unknown} args.hours
+ * @param {"en"|"ur"} args.language
+ */
+export function buildExtractionInstruction({ fields, config, nowMs, timezone, hours, language }) {
+  const now = zonedParts(nowMs, timezone);
+  const describe = (f) => {
+    const label = f.label?.en || f.label?.ur;
+    if (f.type === "choice") {
+      const list = f.source ? config?.[f.source] ?? [] : f.options ?? [];
+      const options = list.length
+        ? `answer with ONE of these ids: ${list.map((o) => `${o.id} (${[o.label?.en, o.label?.ur].filter(Boolean).join(" / ")})`).join("; ")}`
+        : "free text";
+      return `- ${f.id} — ${label} — ${options}`;
+    }
+    const how = {
+      phone: "the digits as the customer said them",
+      email: "the address as said",
+      number: "digits only",
+      yesno: "yes or no",
+      datetime: 'NOT in "values": use "date" and "time" below',
+      text: "as spoken or written, in its own script",
+      longtext: "a short phrase, in the customer's own words",
+    }[f.type];
+    return `- ${f.id} — ${label} — ${how}`;
+  };
+  const hasWhen = fields.some((f) => f.type === "datetime");
+
+  const parts = [
+    "You read ONE customer message and pull out details for a request form. You never speak to the customer.",
+    `FORM FIELDS (return a field only if the customer gave a value for it in the latest message):\n${fields.map(describe).join("\n")}`,
+    "RULES:",
+    '- Output ONLY one JSON object, no other text: {"values":{"<field id>":"<value>"},"date":null,"time":null}',
+    '- "values" may contain ONLY the field ids listed above, and ONLY details the customer actually gave in the latest message (or earlier in this same conversation). Leave out every field they did not give. Never guess, never invent, never copy an example.',
+    "- The customer writes or speaks English, Urdu in Urdu script, Roman Urdu, or a mix. Keep names and free text exactly as given, in their own script.",
+    '- When the customer says no to a field or has nothing to give, leave it out; do not write "no" or "none" as a value.',
+  ];
+  if (hasWhen) {
+    parts.push(
+      `DATES — today is ${now.dayName} ${now.date}, and the time now is ${now.time} in ${timezone || "UTC"}.`,
+      'Fill "date" (YYYY-MM-DD) when the customer gave a day, and "time" (HH:MM, 24-hour) when they gave a time; leave either null when not given. Resolve relative days from today: tomorrow = کل / kal, the day after tomorrow = پرسوں / parson, today = آج / aaj, and a weekday name means its NEXT occurrence (Friday = جمعہ / Juma, Saturday = ہفتہ / Hafta, Sunday = اتوار / Itwaar).',
+      `Morning = صبح / subah, noon = دوپہر / dopahar, evening = شام / shaam, night = رات / raat. "5 baje" or "at five" with no am/pm: choose the reading that falls INSIDE the opening hours (${hours ? formatHours(hours) : "not specified — assume daytime"}); if both do, use pm for 1 to 7 and am for 8 to 11.`
+    );
+  } else {
+    parts.push('"date" and "time" are always null for this form.');
+  }
+  return parts.join("\n");
+}
+
+/**
+ * The user turn for the extraction call.
+ * @param {object} args
+ * @param {Array<{role: string, content: string}>} args.history prior turns, oldest first
+ * @param {string} args.message
+ * @param {{label?: {en?: string}, id?: string}|null} [args.asking] the question just asked
+ */
+export function buildExtractionInput({ history, message, asking }) {
+  const clip = (text, max = 300) => {
+    const flat = String(text ?? "").replace(/\s+/g, " ").trim();
+    return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+  };
+  const recent = (history ?? []).slice(-4);
+  const transcript = recent.length ? recent.map((m) => `${m.role === "assistant" ? "Assistant" : "Customer"}: ${clip(m.content)}`).join("\n") : "(none)";
+  return (
+    `EARLIER IN THIS CONVERSATION:\n${transcript}\n\n` +
+    `THE QUESTION JUST ASKED WAS ABOUT: ${asking ? `${asking.label?.en || asking.id} (${asking.id})` : "nothing in particular"}\n\n` +
+    `LATEST CUSTOMER MESSAGE:\n${clip(message, 600)}\n\n` +
+    "JSON:"
+  );
+}
+
+const DAY_NAMES = { sun: "Sunday", mon: "Monday", tue: "Tuesday", wed: "Wednesday", thu: "Thursday", fri: "Friday", sat: "Saturday" };
+
+/** The wall clock in a zone, for the extraction prompt. Mirrors lib/collect/validate.js zonedNow without importing it back. */
+function zonedParts(nowMs, timezone) {
+  let parts;
+  try {
+    parts = new Intl.DateTimeFormat("en-GB", { timeZone: timezone || "UTC", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(new Date(nowMs));
+  } catch {
+    return zonedParts(nowMs, "UTC");
+  }
+  const get = (type) => parts.find((p) => p.type === type)?.value ?? "00";
+  const date = `${get("year")}-${get("month")}-${get("day")}`;
+  const [y, m, d] = date.split("-").map(Number);
+  const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
+  return { date, time: `${get("hour")}:${get("minute")}`, dayName: DAY_NAMES[key] };
 }

@@ -20,7 +20,7 @@ import { engineKeyFor } from "./engine";
  * TTS voice sound rushed and mechanical.
  *
  * @typedef {{
- *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"it"|"ur"}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string}>,
+ *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"ur"}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string}>,
  *   prepare(voiceIds: string[]): Promise<void>,
  * }} TextToSpeech
  */

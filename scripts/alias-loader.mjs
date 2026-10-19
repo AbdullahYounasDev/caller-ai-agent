@@ -15,8 +15,9 @@ import path from "node:path";
 
 const SRC = path.resolve("src");
 
-// Test seam: scripts/test-reembed-register.mjs passes { stubLlm: <file URL> } so the
-// ingest code runs against a fake embedder (no quota spent). Absent in every real run.
+// Test seam: scripts/test-reembed-register.mjs and scripts/test-collect-register.mjs pass
+// { stubLlm: <file URL> } so the ingest / retrieval / reply code runs against a fake model
+// (no quota spent). Absent in every real run.
 let stubLlm = null;
 export function initialize(data) {
   stubLlm = data?.stubLlm ?? null;
@@ -38,7 +39,8 @@ function resolved(url) {
 }
 
 export async function resolve(specifier, context, next) {
-  if (stubLlm && specifier === "./llm" && (context.parentURL?.endsWith("/ingest.js") || context.parentURL?.endsWith("/retrieve.js"))) {
+  const LLM_USERS = ["/ingest.js", "/retrieve.js", "/respond.js", "/query.js"];
+  if (stubLlm && specifier === "./llm" && LLM_USERS.some((file) => context.parentURL?.endsWith(file))) {
     return { url: stubLlm, shortCircuit: true };
   }
   if (specifier.startsWith("@/")) {
