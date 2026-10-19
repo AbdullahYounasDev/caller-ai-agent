@@ -5,6 +5,7 @@ import {
   buildSystemInstruction,
   buildQueryRewriteInstruction,
   buildQueryRewriteInput,
+  buildCollectionInstruction,
 } from "@/lib/agent/prompt";
 import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 
@@ -354,5 +355,48 @@ describe("query-rewrite prompts (§6.19)", () => {
     const assistantLine = out.split("\n").find((l) => l.startsWith("Assistant:"));
     assert.ok(assistantLine.endsWith("…"));
     assert.ok(assistantLine.length <= "Assistant: ".length + 401);
+  });
+});
+
+describe("the request plan: saved first, read back after", () => {
+  const lines = [
+    { id: "name", label: "Name", display: "Ahmed", type: "text" },
+    { id: "phone", label: "Phone number", display: "0300 1234567", type: "phone" },
+  ];
+  const saved = { state: "saved", language: "en", type: "appointment", typeLabel: "Appointment", reference: "AP-4K7Q2", lines, corrected: [], justSaved: true };
+
+  test("a request saved this turn is announced, with its number in chat and without it on a call", () => {
+    const chat = buildCollectionInstruction(saved, { channel: "chat" });
+    assert.match(chat, /just been SAVED with the request number AP-4K7Q2/);
+    assert.match(chat, /Give the request number AP-4K7Q2/);
+    assert.match(chat, /ask whether everything is correct/);
+    const voice = buildCollectionInstruction(saved, { channel: "voice" });
+    assert.match(voice, /Do not read the request number aloud/);
+    assert.match(voice, /say it digit by digit/);
+  });
+
+  test("it never claims the request is booked or confirmed", () => {
+    for (const plan of [saved, { ...saved, justSaved: false }, { state: "closed", language: "en", type: "appointment", typeLabel: "Appointment", reference: "AP-4K7Q2" }]) {
+      assert.match(buildCollectionInstruction(plan, { channel: "chat" }), /never say it is\s+booked/);
+    }
+  });
+
+  test("an optional question after the save does not announce the save a second time", () => {
+    const ask = { state: "ask", language: "en", type: "appointment", typeLabel: "Appointment", collected: lines, ask: { label: "Anything else", question: "Anything else?", required: false }, saved: { reference: "AP-4K7Q2", justSaved: false } };
+    assert.match(buildCollectionInstruction(ask, { channel: "chat" }), /do not announce it again/);
+    assert.match(buildCollectionInstruction({ ...ask, saved: { reference: "AP-4K7Q2", justSaved: true } }, { channel: "chat" }), /just been SAVED/);
+  });
+
+  test("a correction is acknowledged only when the row really was updated", () => {
+    const fixed = buildCollectionInstruction({ ...saved, justSaved: false, corrected: [lines[1]] }, { channel: "chat" });
+    assert.match(fixed, /Say you have updated it/);
+    const failed = buildCollectionInstruction({ ...saved, justSaved: false, corrected: [lines[1]], updateFailed: true }, { channel: "chat" });
+    assert.match(failed, /could NOT be updated/);
+    assert.doesNotMatch(failed, /Say you have updated it/);
+  });
+
+  test("withdrawing and a failed update say what happened and nothing more", () => {
+    assert.match(buildCollectionInstruction({ state: "withdrawn", language: "en", typeLabel: "Appointment", reference: "AP-4K7Q2" }, { channel: "chat" }), /withdrew their request.*cancelled/);
+    assert.match(buildCollectionInstruction({ state: "update_failed", language: "en", typeLabel: "Appointment" }, { channel: "chat" }), /do not claim it was changed/);
   });
 });

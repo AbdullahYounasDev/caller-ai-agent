@@ -9,7 +9,7 @@ import { advanceCollection, draftFromMarker } from "@/lib/collect/engine";
 import { createExtractor } from "@/lib/collect/extract";
 import { createMarkerFilter, stripMarker } from "@/lib/collect/marker";
 import { writeDraft } from "@/lib/collect/store";
-import { createRecord } from "@/lib/standins/records";
+import { createRecord, updateRecordDetails, withdrawRecord } from "@/lib/standins/records";
 
 const MAX_HISTORY_MESSAGES = 20;
 const MAX_CONTEXT_CHUNKS = 5;
@@ -295,7 +295,7 @@ export async function respond({
           state: collection.plan.state,
           type: collection.plan.type ?? markedType ?? null,
           field: collection.plan.ask?.id ?? null,
-          reference: collection.plan.reference ?? null,
+          reference: collection.plan.reference ?? collection.plan.saved?.reference ?? null,
         }
       : null,
   };
@@ -323,6 +323,8 @@ async function takeRequest({ tenantId, conversationId, channel, config, userMess
         extract: extractDetails,
         submit: (record) =>
           createRecord(tenantId, { ...record, conversationId, channel, timezone: config.timezone, configVersion: config.collectVersion }),
+        update: (recordId, record) => updateRecordDetails(tenantId, recordId, record),
+        withdraw: (recordId) => withdrawRecord(tenantId, recordId),
       },
     });
     // Not awaited here: the write runs while the model generates, and respond() awaits it

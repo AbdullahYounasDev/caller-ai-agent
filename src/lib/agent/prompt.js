@@ -566,6 +566,17 @@ function lineText(line, { channel, language }) {
   return `- ${line.label}: ${line.display}${spoken}`;
 }
 
+/** The sentence that says a request is already saved, once, when it was saved THIS turn. */
+function savedNote(plan, channel) {
+  const saved = plan.saved;
+  if (!saved?.reference) return "";
+  const number = channel === "voice" ? "Do not read the request number aloud unless the customer asks for it." : `Give the request number ${saved.reference}.`;
+  if (saved.justSaved) {
+    return `The request has just been SAVED with the request number ${saved.reference} and now waits for a team member to confirm it. Say so in one short sentence: that it is recorded and the team will confirm. ${number}`;
+  }
+  return `The request is already saved (number ${saved.reference}); do not announce it again.`;
+}
+
 /**
  * The section of the system instruction for this turn's REQUEST PLAN (lib/collect/engine.js
  * `advanceCollection`). Null for no plan.
@@ -609,6 +620,8 @@ export function buildCollectionInstruction(plan, { channel }) {
       const ask = plan.ask;
       const out = [header];
       if (plan.collected?.length) out.push(`Details already collected (do not ask for these again):\n${plan.collected.map((l) => lineText(l, lineCtx)).join("\n")}`);
+      if (plan.saved) out.push(savedNote(plan, channel));
+      if (plan.corrected?.length) out.push(`The customer just corrected: ${plan.corrected.map((l) => l.label).join(", ")}. ${plan.updateFailed ? "The saved request could NOT be updated just now: say a team member will correct it, and do not claim it was updated." : "Say you have updated it."}`);
       if (plan.problem) out.push(problemSentence(plan.problem));
       if (plan.extractionFailed) out.push("The last answer could not be processed just now: if the customer gave you something, politely ask them to say it once more.");
       if (plan.firstAsk) out.push("This is the first question: start with a short friendly sentence saying you can take their details.");
@@ -620,28 +633,29 @@ export function buildCollectionInstruction(plan, { channel }) {
       out.push("Ask exactly ONE question. If the customer also asked something else, answer that first in one sentence from the reference material, then ask your question.");
       return out.join("\n");
     }
-    case "readback": {
-      const out = [header, `All the details are collected. Read them back to the customer in one short, natural message, then ask whether everything is correct:\n${plan.lines.map((l) => lineText(l, lineCtx)).join("\n")}`];
-      if (plan.corrected?.length) out.push(`The customer just corrected: ${plan.corrected.map((l) => l.label).join(", ")}. Say you have updated it.`);
+    case "saved": {
+      const out = [header, savedNote({ ...plan, saved: plan }, channel)];
+      out.push(`Read the details back to the customer in one short, natural message and ask whether everything is correct. If something is wrong they can tell you right now and you will update it:\n${plan.lines.map((l) => lineText(l, lineCtx)).join("\n")}`);
+      if (plan.corrected?.length) out.push(`The customer just corrected: ${plan.corrected.map((l) => l.label).join(", ")}. ${plan.updateFailed ? "The saved request could NOT be updated just now: say a team member will correct it, and do not claim it was updated." : "Say you have updated it."}`);
       if (plan.problem) out.push(problemSentence(plan.problem));
-      if (plan.reconfirm) out.push("The customer said something else instead of confirming: answer it first in one sentence from the reference material, then ask again whether the details are correct.");
-      out.push("Do NOT say the request has been saved or sent yet. Ask only whether it is correct (yes or no); if something is wrong they will tell you what.");
+      if (plan.reconfirm) out.push("The customer said something else instead of answering: answer it first in one sentence from the reference material, then ask again whether the details are correct.");
       return out.join("\n");
     }
+    case "closed":
+      return [
+        header,
+        `The customer is satisfied with the details. The request (number ${plan.reference}) is already recorded and a team member will confirm it. Thank them in one short sentence${channel === "voice" ? "" : `, mention the request number ${plan.reference} once if you have not`}, and ask whether there is anything else you can help with.`,
+        "Do NOT say it is booked, confirmed or guaranteed.",
+      ].join("\n");
+    case "withdrawn":
+      return [header, `The customer withdrew their request (number ${plan.reference}) and it has been cancelled. Acknowledge that in one short sentence and offer other help.`].join("\n");
+    case "update_failed":
+      return [header, "The saved request could NOT be changed just now. Apologise briefly and say a team member will correct it; do not claim it was changed."].join("\n");
     case "change":
       return [
         header,
         `The customer says something in the details is wrong. Ask which one to correct. The details are:\n${plan.lines.map((l) => lineText(l, lineCtx)).join("\n")}`,
         "Ask only that, in one short sentence.",
-      ].join("\n");
-    case "submitted":
-      return [
-        header,
-        `The customer confirmed. Their request has been SAVED with the request number ${plan.reference}, and now waits for a team member to confirm it.`,
-        channel === "voice"
-          ? "Say that it is recorded and that the team will get in touch to confirm. Do not read the request number aloud unless the customer asks for it."
-          : `Say that it is recorded, that the team will confirm it shortly, and give the request number ${plan.reference}.`,
-        "Do NOT say it is booked, confirmed or guaranteed, and do not promise a specific time beyond what the customer asked for. Then ask if there is anything else.",
       ].join("\n");
     case "submit_failed":
       return [header, "The request could NOT be saved just now. Apologise briefly, say a team member will follow up, and offer to try again in a moment. Do not claim it was saved."].join("\n");

@@ -261,10 +261,12 @@
   "records.updateFailed": "That could not be changed. Reload and try again.",
   "chat.request.idle": "Can take a request",
   "chat.request.ask": "Request: asking for “{field}”",
-  "chat.request.readback": "Request: reading it back",
   "chat.request.change": "Request: correcting a detail",
-  "chat.request.submitted": "Request saved as {reference}",
   "chat.request.cancelled": "Request: cancelled",
   "chat.request.stuck": "Request: stopped, nothing saved",
-  "chat.request.submit_failed": "Request: could not be saved"
+  "chat.request.submit_failed": "Request: could not be saved",
+  "chat.request.saved": "Request saved as {reference}",
+  "chat.request.closed": "Request: details confirmed",
+  "chat.request.withdrawn": "Request: withdrawn by the customer",
+  "chat.request.update_failed": "Request: could not be updated"
 }

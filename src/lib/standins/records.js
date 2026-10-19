@@ -105,6 +105,45 @@ export async function createRecord(tenantId, input) {
   }
 }
 
+/**
+ * The customer corrected a detail after the request was saved: rewrite the row — but only
+ * while it is still "requested". Once a person has confirmed it, the agent must not quietly
+ * change what the team acted on; the caller is told a team member will adjust it.
+ *
+ * @param {string} tenantId
+ * @param {string} id
+ * @param {{values: Record<string, string>, summary?: string, scheduledAt?: string|null}} patch
+ * @returns {Promise<{ok: boolean, reason?: "not_found"|"locked"}>}
+ */
+export async function updateRecordDetails(tenantId, id, patch) {
+  if (!tenantId) throw new Error("updateRecordDetails requires a tenantId");
+  const current = await prisma.record.findFirst({ where: { tenantId, id }, select: { status: true } });
+  if (!current) return { ok: false, reason: "not_found" };
+  if (current.status !== "requested") return { ok: false, reason: "locked" };
+  const customer = await upsertCustomer(tenantId, {
+    name: patch.values.name ?? null,
+    phone: patch.values.phone ?? null,
+    email: patch.values.email ?? null,
+  });
+  // Conditional on still being "requested", so a staff confirmation landing at the same moment wins.
+  const { count } = await prisma.record.updateMany({
+    where: { id, tenantId, status: "requested" },
+    data: { data: patch.values, summary: patch.summary ?? "", scheduledLocal: patch.scheduledAt ?? null, customerId: customer.id },
+  });
+  if (!count) return { ok: false, reason: "locked" };
+  emitEngineEvent({ type: "record.updated", tenantId, data: { recordId: id, status: "requested", detailsChanged: true } });
+  return { ok: true };
+}
+
+/** The customer withdrew their own request ("forget it"): cancel it, but only while it is still "requested". */
+export async function withdrawRecord(tenantId, id) {
+  if (!tenantId) throw new Error("withdrawRecord requires a tenantId");
+  const { count } = await prisma.record.updateMany({ where: { id, tenantId, status: "requested" }, data: { status: "cancelled" } });
+  if (!count) return { ok: false, reason: "locked" };
+  emitEngineEvent({ type: "record.updated", tenantId, data: { recordId: id, status: "cancelled" } });
+  return { ok: true };
+}
+
 const SELECT = {
   id: true,
   reference: true,

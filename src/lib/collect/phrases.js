@@ -153,6 +153,25 @@ export function confirmationOf(message) {
   return null;
 }
 
+// ── closing ─────────────────────────────────────────────────────────────
+
+const THANKS = edged("thanks?|thank you|thx|bye|goodbye|shukriya|shukria|شکریہ|خدا حافظ|اللہ حافظ|khuda hafiz|allah hafiz");
+const NOTHING_MORE = edged("no (?:thanks|thank you)|nothing else|that'?s all|that is all|that'?s it|nahi (?:shukriya|bas)|نہیں شکریہ|بس");
+
+/**
+ * After a request is saved and read back: "thanks", "that's all", "no thanks" end it — a
+ * customer who says these is not asking for a change. "Thanks, but the number is wrong" is
+ * not closing (the denial wins).
+ * @param {string} message
+ * @returns {boolean}
+ */
+export function isClosing(message) {
+  const text = String(message ?? "").trim();
+  if (!text || text.split(/\s+/).length > 8) return false;
+  if (NOTHING_MORE.test(text)) return true;
+  return THANKS.test(text) && confirmationOf(text) !== "no";
+}
+
 // ── asking for a person ─────────────────────────────────────────────────
 
 /** True when the message looks like a QUESTION rather than an answer. */

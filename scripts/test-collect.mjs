@@ -28,7 +28,7 @@ const stub = await import("./test-collect-stub.mjs");
 const { respond } = await import("@/lib/agent/respond");
 const { saveAgentConfig, saveCollectConfig, getAgentConfig, invalidateAgentConfig } = await import("@/lib/tenant/config");
 const { presetConfig, validateCollectConfig } = await import("@/lib/collect/config");
-const { createRecord, listRecords, getRecord, updateRecordStatus } = await import("@/lib/standins/records");
+const { createRecord, listRecords, getRecord, updateRecordStatus, updateRecordDetails, withdrawRecord } = await import("@/lib/standins/records");
 const { onEngineEvent } = await import("@/lib/standins/events");
 
 const A = "__collect_test_a__";
@@ -82,7 +82,8 @@ ok((await getAgentConfig(A, { skipCache: true })).collect.services.map((s) => s.
 // ── an appointment, end to end ─────────────────────────────────────────────
 const conv = await newConversation(A);
 stub.state.reply = (n) => `Reply ${n}.`;
-stub.state.extraction = () => ({ values: {}, date: "2026-12-02", time: "17:00" }); // a Wednesday
+const WEDNESDAY_FIVE = () => ({ values: {}, date: "2026-12-02", time: "17:00" }); // a Wednesday
+stub.state.extraction = () => ({ values: {}, date: null, time: null });
 let r = await say(A, conv, "What are your opening hours?");
 ok(r.result.collection?.state === "idle" && /REQUESTS YOU CAN TAKE/.test(r.instruction), "a question starts nothing; the model is told what it may offer");
 ok((await draftOf(conv)) === null, "…and no draft exists");
@@ -97,26 +98,35 @@ r = await say(A, conv, "my name is Ahmed Khan");
 r = await say(A, conv, "0300 1234567");
 ok(r.result.collection.field === "service" && /Scaling and polishing, Root canal/.test(r.instruction), "the owner's list of services is offered");
 r = await say(A, conv, "root canal");
-r = await say(A, conv, "tomorrow at five");
-ok(r.result.collection.state === "readback" && /Ahmed Khan/.test(r.instruction) && /03001234567/.test(r.instruction), "everything in: read back with the details");
-ok(!/saved with the request number/.test(r.instruction), "…and the model is NOT yet told anything was saved");
-ok((await prisma.record.count({ where: { tenantId: A } })) === 0, "nothing is in the records table before the customer says yes");
-
 events.length = 0;
-r = await say(A, conv, "yes that's right");
+stub.state.extraction = WEDNESDAY_FIVE;
+r = await say(A, conv, "tomorrow at five");
+stub.state.extraction = () => ({ values: {}, date: null, time: null });
 const rows = await prisma.record.findMany({ where: { tenantId: A } });
-ok(rows.length === 1 && rows[0].status === "requested" && /^AP-[A-Z0-9]{5}$/.test(rows[0].reference), `a yes saves ONE record, as 'requested' (${rows[0]?.reference})`);
+ok(r.result.collection.state === "saved" && /Ahmed Khan/.test(r.instruction) && /03001234567/.test(r.instruction), "the last detail is in: the details are read back");
+ok(/saved with the request number/i.test(r.instruction) && /waits for a team member to confirm/.test(r.instruction) && /never say it is booked/i.test(r.instruction), "the model is told it is recorded, not booked");
+ok(rows.length === 1 && rows[0].status === "requested" && /^AP-[A-Z0-9]{5}$/.test(rows[0].reference), `it is SAVED at once, with no yes needed, as 'requested' (${rows[0]?.reference})`);
 ok(rows[0].data.phone === "+923001234567" && rows[0].data.service === "root_canal" && rows[0].scheduledLocal === "2026-12-02T17:00" && rows[0].timezone === "Asia/Karachi", "stored values are validated: phone in international form, the owner's option id, local time + zone");
 ok(rows[0].conversationId === conv && rows[0].channel === "chat" && rows[0].language === "en" && rows[0].configVersion === 2, "it knows its conversation, channel, language and the version of the questions it was taken under");
-ok(r.result.collection.state === "submitted" && r.result.collection.reference === rows[0].reference, "respond() reports the reference");
-ok(/waits for a team member to confirm/.test(r.instruction) && /Do NOT say it is booked/.test(r.instruction), "the model is told it is recorded, not booked");
-ok((await draftOf(conv)) === null, "the draft is cleared");
+ok(r.result.collection.reference === rows[0].reference, "respond() reports the reference");
+ok((await draftOf(conv))?.stage === "saved", "the draft stays, so a correction can find the row");
 const customer = await prisma.customer.findFirst({ where: { tenantId: A } });
 ok(customer?.phone === "+923001234567" && customer.name === "Ahmed Khan", "the customer was recorded, found by phone number");
 ok(events.some((e) => e.type === "record.submitted" && e.tenantId === A && e.data.reference === rows[0].reference && !JSON.stringify(e).includes("Ahmed")), "a record.submitted event was emitted, carrying ids and no personal details");
 
+// ── a correction after saving UPDATES the row ──────────────────────────────
+r = await say(A, conv, "no, my phone number is 0333 1112233");
+const afterFix = await prisma.record.findMany({ where: { tenantId: A } });
+ok(afterFix.length === 1 && afterFix[0].id === rows[0].id && afterFix[0].data.phone === "+923331112233", "a correction rewrites the SAME row — still one record");
+ok(r.result.collection.state === "saved" && /updated it/i.test(r.instruction), "the model is told to say it updated it");
+ok((await prisma.customer.findMany({ where: { tenantId: A, phone: "+923331112233" } })).length === 1, "the customer follows the new number");
+r = await say(A, conv, "thanks, that's all");
+ok(r.result.collection.state === "closed" && (await draftOf(conv)) === null, "thanks closes it and clears the draft");
+ok((await prisma.record.count({ where: { tenantId: A } })) === 1, "…without creating anything");
+
 // ── the same confirmation twice is one record ──────────────────────────────
 const again = await createRecord(A, { submissionKey: rows[0].submissionKey, type: "appointment", values: rows[0].data, summary: "x", scheduledAt: null, language: "en" });
+rows[0].data = afterFix[0].data;
 ok(!again.created && again.reference === rows[0].reference && (await prisma.record.count({ where: { tenantId: A } })) === 1, "saving the same confirmation again returns the same record");
 
 // ── the model's start marker ───────────────────────────────────────────────
@@ -144,12 +154,16 @@ ok(r.result.collection.state === "ask" && /براہِ کرم اپنا نام ب�
 await say(B, conv3, "میرا نام احمد ہے", { channel: "voice" });
 r = await say(B, conv3, "۰۳۰۰ ۱۲۳۴۵۶۷", { channel: "voice" });
 ok((await draftOf(conv3)).values.phone === "+923001234567", "Urdu digits become a phone number");
-for (const m of ["نہیں", "میری رپورٹ کے بارے میں", "نہیں", "نہیں"]) r = await say(B, conv3, m, { channel: "voice" });
-ok(r.result.collection.state === "readback" && /صفر تین صفر صفر/.test(r.instruction), "on a call the number is read out digit by digit, in Urdu words");
-r = await say(B, conv3, "جی ہاں", { channel: "voice" });
-const cb = await prisma.record.findFirst({ where: { tenantId: B } });
-ok(cb?.type === "callback" && cb.channel === "voice" && cb.language === "ur" && /^CB-/.test(cb.reference), `an Urdu callback was saved from a call (${cb?.reference})`);
+ok((await prisma.record.count({ where: { tenantId: B } })) === 0, "a required detail (the reason) is still missing: nothing saved yet");
+await say(B, conv3, "نہیں", { channel: "voice" });
+r = await say(B, conv3, "میری رپورٹ کے بارے میں", { channel: "voice" });
+const savedEarly = await prisma.record.findFirst({ where: { tenantId: B } });
+ok(savedEarly?.type === "callback" && r.result.collection.state === "ask" && /^CB-/.test(savedEarly.reference), `the callback is saved the moment its required details are in — before the optional questions (${savedEarly?.reference})`);
 ok(/Do not read the request number aloud/.test(r.instruction), "on a call the reference is not read out unless asked");
+for (const m of ["نہیں", "نہیں"]) r = await say(B, conv3, m, { channel: "voice" });
+const cb = await prisma.record.findFirst({ where: { tenantId: B } });
+ok(r.result.collection.state === "saved" && /صفر تین صفر صفر/.test(r.instruction), "on a call the number is read out digit by digit, in Urdu words");
+ok(cb.id === savedEarly.id && cb.channel === "voice" && cb.language === "ur" && cb.data.reason === "میری رپورٹ کے بارے میں" && (await prisma.record.count({ where: { tenantId: B } })) === 1, "the optional answer UPDATED the same row (still one record, from a call, in Urdu)");
 
 // ── tenants are walled off ─────────────────────────────────────────────────
 const idA = rows[0].id;
@@ -168,6 +182,9 @@ await updateRecordStatus(A, idA, "confirmed");
 await updateRecordStatus(A, idA, "done");
 ok((await updateRecordStatus(A, idA, "cancelled")).reason === "invalid_transition", "a finished request cannot be cancelled");
 ok((await updateRecordStatus(A, idA, "bogus")).reason === "invalid_status", "an unknown status is refused");
+ok((await updateRecordDetails(A, idA, { values: { name: "X" } })).reason === "locked", "the agent cannot rewrite a request a person has already worked on");
+ok((await withdrawRecord(A, idA)).reason === "locked" && (await prisma.record.findUnique({ where: { id: idA } })).status === "done", "…or withdraw it");
+ok((await updateRecordDetails(B, idA, { values: { name: "X" } })).reason === "not_found", "…and another tenant cannot touch it at all");
 const counts = (await listRecords(A)).counts;
 ok(counts.done === 1 && counts.requested === 0, `status counts for the badges: ${JSON.stringify(counts)}`);
 

@@ -25,6 +25,8 @@ const agent = (over = {}) => ({ replyLanguage: "en", timezone: "Asia/Karachi", h
 /** A whole conversation against the engine, with the model and the database faked. */
 function conversation({ collect = dental(), agentConfig = agent(), extract = null } = {}) {
   const saved = [];
+  const updates = [];
+  const withdrawn = [];
   let draft = null;
   let clock = NOW;
   let ids = 0;
@@ -38,10 +40,21 @@ function conversation({ collect = dental(), agentConfig = agent(), extract = nul
       saved.push(row);
       return row;
     },
+    update: async (id, record) => {
+      updates.push({ id, ...record });
+      Object.assign(saved.find((s) => s.id === id), record);
+      return { ok: true };
+    },
+    withdraw: async (id) => {
+      withdrawn.push(id);
+      return { ok: true };
+    },
   };
   const history = [];
   return {
     saved,
+    updates,
+    withdrawn,
     get draft() {
       return draft;
     },
@@ -59,7 +72,7 @@ function conversation({ collect = dental(), agentConfig = agent(), extract = nul
 }
 
 describe("a customer books an appointment, step by step", () => {
-  test("rules alone take a whole appointment, one question at a time, and only a yes saves it", async () => {
+  test("rules alone take a whole appointment, one question at a time, and it is saved the moment the last detail is in", async () => {
     const c = conversation();
 
     let r = await c.say("What are your opening hours?");
@@ -88,9 +101,10 @@ describe("a customer books an appointment, step by step", () => {
     r = await c.say("root canal");
     assert.equal(c.draft.values.service, "root_canal");
     assert.equal(r.plan.ask.id, "datetime", "the model is needed for a day and time");
+    assert.equal(c.saved.length, 0, "a required detail is still missing: nothing saved yet");
   });
 
-  test("a day and time from the model completes the form and it is read back — nothing is saved yet", async () => {
+  test("the last required detail saves the request at once, with a reference, then it is read back", async () => {
     const asked = [];
     const c = conversation({
       extract: async (request) => {
@@ -99,33 +113,38 @@ describe("a customer books an appointment, step by step", () => {
       },
     });
     for (const m of ["book an appointment", "Ahmed Khan", "03001234567", "scaling"]) await c.say(m);
+    assert.equal(c.saved.length, 0);
     const r = await c.say("tomorrow at 5");
     assert.equal(c.draft.values.datetime, "2026-10-22T17:00");
-    assert.equal(r.plan.state, "readback");
-    assert.equal(c.draft.stage, "confirming");
+    assert.equal(r.plan.state, "saved");
+    assert.equal(r.plan.justSaved, true);
+    assert.equal(r.plan.reference, "AP-1ABCD");
+    assert.equal(c.draft.stage, "saved", "the draft stays so a correction can find the row");
+    assert.equal(c.draft.recordId, "rec-1");
     assert.deepEqual(r.plan.lines.map((l) => l.id), ["name", "phone", "service", "datetime"]);
     assert.equal(r.plan.lines.find((l) => l.id === "service").display, "Scaling and polishing");
-    assert.equal(c.saved.length, 0, "nothing is saved before a yes");
-    assert.ok(asked.length >= 1);
-  });
-
-  test("a yes saves it once, with a reference, and the draft is gone", async () => {
-    const c = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
-    for (const m of ["book an appointment", "Ahmed Khan", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
-    const r = await c.say("yes, that's right");
-    assert.equal(r.plan.state, "submitted");
-    assert.equal(r.plan.reference, "AP-1ABCD");
-    assert.equal(c.draft, null);
-    assert.equal(c.saved.length, 1);
+    assert.equal(c.saved.length, 1, "saved without waiting for a yes");
     const row = c.saved[0];
     assert.equal(row.type, "appointment");
     assert.deepEqual(row.values, { name: "Ahmed Khan", phone: "+923001234567", service: "scaling_and_polishing", datetime: "2026-10-22T17:00" });
     assert.equal(row.scheduledAt, "2026-10-22T17:00");
     assert.equal(row.language, "en");
     assert.match(row.summary, /Ahmed Khan · Scaling and polishing · Thursday, 22 October 2026/);
+    assert.ok(asked.length >= 1);
   });
 
-  test("everything in one sentence needs only the confirmation", async () => {
+  test("a customer who just says thanks leaves the saved request alone and ends it", async () => {
+    const c = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
+    for (const m of ["book an appointment", "Ahmed Khan", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+    const r = await c.say("okay thank you");
+    assert.equal(r.plan.state, "closed");
+    assert.equal(r.plan.reference, "AP-1ABCD");
+    assert.equal(c.draft, null);
+    assert.equal(c.saved.length, 1);
+    assert.deepEqual(c.updates, []);
+  });
+
+  test("everything in one sentence is saved in that same turn", async () => {
     const c = conversation({
       extract: async (req) => {
         assert.ok(req.fields.length >= 3);
@@ -135,8 +154,10 @@ describe("a customer books an appointment, step by step", () => {
     const r = await c.say("Hi I am Sara, call 0321 5551234, root canal on Friday at 11 please, book an appointment");
     assert.equal(c.draft.values.phone, "+923215551234", "the number is found by rule");
     assert.equal(c.draft.values.service, "root_canal");
-    assert.equal(r.plan.state, "readback", "all four fields arrived at once");
-    assert.equal((await c.say("ji haan")).plan.state, "submitted");
+    assert.equal(r.plan.state, "saved", "all four fields arrived at once");
+    assert.equal(c.saved.length, 1);
+    assert.equal((await c.say("ji haan")).plan.state, "closed");
+    assert.equal(c.saved.length, 1, "the yes saves nothing more");
   });
 });
 
@@ -197,7 +218,7 @@ describe("wrong, missing and unusable answers", () => {
     again.draft = c.draft;
     r = await again.say("3:30 pm");
     assert.equal(again.draft.values.datetime, "2026-10-22T15:30");
-    assert.equal(r.plan.state, "readback");
+    assert.equal(r.plan.state, "saved");
   });
 
   test("when the model is down the rules still take everything they can, and the turn says so", async () => {
@@ -224,102 +245,176 @@ describe("wrong, missing and unusable answers", () => {
 
 describe("optional questions", () => {
   const withNotes = () => conversation({ collect: dentalFull(), extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
+  const toNotes = async (c) => {
+    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling"]) await c.say(m);
+    return c.say("tomorrow at 5");
+  };
+
+  test("the request is saved BEFORE the optional question is asked, so a hang-up loses nothing", async () => {
+    const c = withNotes();
+    const r = await toNotes(c);
+    assert.equal(r.plan.state, "ask");
+    assert.equal(r.plan.ask.id, "notes");
+    assert.equal(c.saved.length, 1);
+    assert.equal(r.plan.saved.justSaved, true);
+    assert.equal(r.plan.saved.reference, "AP-1ABCD");
+  });
 
   test("an optional question can be declined in English, Urdu or Roman Urdu — and is not asked again", async () => {
     for (const decline of ["no", "نہیں", "koi nahi", "skip it", "rehne do"]) {
       const c = withNotes();
-      for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+      await toNotes(c);
       assert.equal(c.draft.asking, "notes", decline);
       const r = await c.say(decline);
-      assert.equal(r.plan.state, "readback", decline);
+      assert.equal(r.plan.state, "saved", decline);
+      assert.equal(r.plan.justSaved, false, "it was announced when it was saved");
       assert.ok(c.draft.skipped.includes("notes"), decline);
+      assert.equal(c.saved.length, 1, decline);
     }
   });
 
-  test("an optional question that is answered is kept", async () => {
+  test("an optional answer updates the saved row instead of creating another", async () => {
     const c = withNotes();
-    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+    await toNotes(c);
     const r = await c.say("I am scared of the dentist, please be gentle");
     assert.equal(c.draft.values.notes, "I am scared of the dentist, please be gentle");
-    assert.equal(r.plan.state, "readback");
+    assert.equal(r.plan.state, "saved");
     assert.equal(r.plan.lines.at(-1).id, "notes");
+    assert.equal(c.saved.length, 1);
+    assert.equal(c.updates.length, 1);
+    assert.equal(c.updates[0].values.notes, "I am scared of the dentist, please be gentle");
   });
 
   test("an optional question that is simply ignored is not repeated", async () => {
     const c = withNotes();
-    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+    await toNotes(c);
     const r = await c.say("what time do you close?");
-    assert.equal(r.plan.state, "readback", "it moved on instead of asking for notes a second time");
+    assert.equal(r.plan.state, "saved", "it moved on instead of asking for notes a second time");
+    assert.equal(c.saved.length, 1);
+  });
+
+  test("'forget it' while an optional question is open withdraws the saved request", async () => {
+    const c = withNotes();
+    await toNotes(c);
+    const r = await c.say("cancel it");
+    assert.equal(r.plan.state, "withdrawn");
+    assert.deepEqual(c.withdrawn, ["rec-1"]);
+    assert.equal(c.draft, null);
   });
 });
 
-describe("confirming", () => {
-  async function atReadback(extra = {}) {
+describe("after it is saved: correcting, closing and withdrawing", () => {
+  async function saved(extra = {}) {
     const c = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }), ...extra });
     for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
-    assert.equal(c.draft.stage, "confirming");
+    assert.equal(c.draft.stage, "saved");
     return c;
   }
 
-  test("'no' asks which detail is wrong; the corrected value is read back again", async () => {
-    const c = await atReadback();
-    let r = await c.say("no");
-    assert.equal(r.plan.state, "change");
-    assert.equal(c.draft.stage, "collecting");
-    assert.deepEqual(r.plan.fields.map((f) => f.id), ["name", "phone", "service", "datetime"]);
-    r = await c.say("my phone number is 0333 1112233");
-    assert.equal(c.draft.values.phone, "+923331112233");
-    assert.equal(r.plan.state, "readback");
-    assert.equal(c.saved.length, 0);
-  });
-
-  test("a correction in the same message as the 'no' is applied at once", async () => {
-    const c = await atReadback();
+  test("a correction updates the saved row — it never makes a second one", async () => {
+    const c = await saved();
     const r = await c.say("no, the phone number is 0333 1112233");
     assert.equal(c.draft.values.phone, "+923331112233");
-    assert.equal(r.plan.state, "readback");
+    assert.equal(r.plan.state, "saved");
     assert.deepEqual(r.plan.corrected.map((l) => l.id), ["phone"]);
+    assert.equal(c.saved.length, 1);
+    assert.equal(c.updates.length, 1);
+    assert.equal(c.updates[0].id, "rec-1");
+    assert.equal(c.updates[0].values.phone, "+923331112233");
+    assert.equal(c.saved[0].values.phone, "+923331112233");
   });
 
-  test("a question instead of an answer is answered, then the confirmation is asked again", async () => {
-    const c = await atReadback();
+  test("'no' asks which detail is wrong; the next message corrects it", async () => {
+    const c = await saved();
+    let r = await c.say("no");
+    assert.equal(r.plan.state, "change");
+    assert.deepEqual(r.plan.fields.map((f) => f.id), ["name", "phone", "service", "datetime"]);
+    r = await c.say("the time is wrong");
+    assert.equal(r.plan.state, "change", "still asking which / what the new value is");
+    r = await c.say("my phone number is 0333 1112233");
+    assert.equal(c.draft.values.phone, "+923331112233");
+    assert.equal(r.plan.state, "saved");
+    assert.equal(c.updates.length, 1);
+  });
+
+  test("an unusable correction changes nothing and says why", async () => {
+    const c = await saved();
+    c.draft = structuredClone(c.draft);
+    const bad = conversation({ extract: async () => ({ values: { phone: "12 34" }, date: null, time: null }) });
+    bad.draft = c.draft;
+    bad.saved.push(...c.saved);
+    const r = await bad.say("no, the phone number is wrong, it is twelve thirty four");
+    assert.equal(bad.draft.values.phone, "+923001234567");
+    assert.equal(r.plan.problem.reason, "invalid_phone");
+    assert.deepEqual(bad.updates, []);
+  });
+
+  test("a question instead of an answer is answered, then the details are checked again", async () => {
+    const c = await saved();
     const r = await c.say("do you take cards?");
-    assert.equal(r.plan.state, "readback");
+    assert.equal(r.plan.state, "saved");
     assert.equal(r.plan.reconfirm, true);
-    assert.equal(c.saved.length, 0);
+    assert.equal(c.saved.length, 1);
   });
 
-  test("cancelling at the read-back saves nothing", async () => {
-    const c = await atReadback();
+  test("'forget it' after the read-back withdraws the request", async () => {
+    const c = await saved();
     const r = await c.say("forget it");
-    assert.equal(r.plan.state, "cancelled");
+    assert.equal(r.plan.state, "withdrawn");
+    assert.deepEqual(c.withdrawn, ["rec-1"]);
     assert.equal(c.draft, null);
-    assert.equal(c.saved.length, 0);
   });
 
-  test("a failed save keeps the draft so the next 'yes' tries again, and saves it exactly once", async () => {
-    const c = await atReadback();
-    let failures = 1;
-    const realSubmit = c.saved;
-    const original = c.say;
-    // make the very first submit throw
-    const wrapped = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
-    wrapped.draft = c.draft;
-    let calls = 0;
-    const result = await advanceCollection({
+  test("a weak 'maybe later' never withdraws a saved request", async () => {
+    const c = await saved();
+    const r = await c.say("ok, talk later");
+    assert.notEqual(r.plan.state, "withdrawn");
+    assert.deepEqual(c.withdrawn, []);
+  });
+
+  test("a second, different request in the same conversation starts afresh", async () => {
+    const c = await saved();
+    const r = await c.say("please call me back too");
+    assert.equal(r.plan.type, "callback");
+    assert.equal(r.plan.state, "ask");
+    assert.equal(c.saved.length, 1, "the first stays; the second is not saved until it is complete");
+  });
+
+  test("a row a person already confirmed cannot be changed by the agent", async () => {
+    const c = await saved();
+    const locked = await advanceCollection({
       collect: dental(),
       agent: agent(),
       draft: c.draft,
-      message: "yes",
-      nowMs: NOW,
-      deps: { newId: () => "x", extract: null, submit: async (rec) => { calls++; if (failures-- > 0) throw new Error("db down"); return { id: "r1", reference: "AP-OK" }; } },
+      message: "no, the phone number is 0333 1112233",
+      nowMs: NOW + 1000,
+      deps: { newId: () => "x", update: async () => ({ ok: false, reason: "locked" }), withdraw: async () => ({ ok: false }) },
     });
-    assert.equal(result.plan.state, "submit_failed");
-    assert.equal(result.draft.stage, "confirming");
-    const retry = await advanceCollection({ collect: dental(), agent: agent(), draft: result.draft, message: "yes", nowMs: NOW + 1000, deps: { newId: () => "x", submit: async () => { calls++; return { id: "r1", reference: "AP-OK" }; } } });
-    assert.equal(retry.plan.state, "submitted");
-    assert.equal(calls, 2);
-    void realSubmit; void original;
+    assert.equal(locked.plan.state, "update_failed");
+  });
+
+  test("a failed save is retried on the customer's next message, under the same key, exactly once", async () => {
+    const c = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
+    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling"]) await c.say(m);
+    let failures = 1;
+    const keys = [];
+    const deps = {
+      newId: () => "x",
+      extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }),
+      submit: async (rec) => {
+        keys.push(rec.submissionKey);
+        if (failures-- > 0) throw new Error("db down");
+        return { id: "r1", reference: "AP-OK" };
+      },
+    };
+    const failed = await advanceCollection({ collect: dental(), agent: agent(), draft: c.draft, message: "tomorrow at 5", nowMs: NOW, deps });
+    assert.equal(failed.plan.state, "submit_failed");
+    assert.equal(failed.draft.recordId, undefined);
+    const retry = await advanceCollection({ collect: dental(), agent: agent(), draft: failed.draft, message: "hello?", nowMs: NOW + 1000, deps });
+    assert.equal(retry.plan.state, "saved");
+    assert.equal(retry.plan.reference, "AP-OK");
+    assert.equal(keys.length, 2);
+    assert.equal(new Set(keys).size, 1, "the same submission key both times");
   });
 });
 
@@ -394,9 +489,9 @@ describe("Urdu", () => {
     r = await c.say("نہیں");
     assert.equal(r.plan.ask.id, "reference");
     r = await c.say("نہیں");
-    assert.equal(r.plan.state, "readback");
+    assert.equal(r.plan.state, "saved");
     const done = await c.say("جی ہاں");
-    assert.equal(done.plan.state, "submitted");
+    assert.equal(done.plan.state, "closed");
     assert.equal(c.saved[0].language, "ur");
     assert.equal(c.saved[0].values.reason, "میری رپورٹ کے بارے میں");
   });
