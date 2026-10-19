@@ -261,10 +261,12 @@
   "records.updateFailed": "یہ تبدیل نہیں ہو سکا۔ صفحہ دوبارہ لوڈ کر کے کوشش کریں۔",
   "chat.request.idle": "درخواست لے سکتا ہے",
   "chat.request.ask": "درخواست: “{field}” پوچھ رہا ہے",
-  "chat.request.readback": "درخواست: دہرا کر تصدیق لے رہا ہے",
   "chat.request.change": "درخواست: کوئی تفصیل درست کر رہا ہے",
-  "chat.request.submitted": "درخواست محفوظ ہوئی: {reference}",
   "chat.request.cancelled": "درخواست: منسوخ",
   "chat.request.stuck": "درخواست: رک گئی، کچھ محفوظ نہیں ہوا",
-  "chat.request.submit_failed": "درخواست: محفوظ نہیں ہو سکی"
+  "chat.request.submit_failed": "درخواست: محفوظ نہیں ہو سکی",
+  "chat.request.saved": "درخواست محفوظ ہوئی: {reference}",
+  "chat.request.closed": "درخواست: تفصیلات کی تصدیق ہو گئی",
+  "chat.request.withdrawn": "درخواست: گاہک نے واپس لے لی",
+  "chat.request.update_failed": "درخواست: اپ ڈیٹ نہیں ہو سکی"
 }

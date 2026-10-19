@@ -1765,7 +1765,8 @@ a mid-sentence pause with the one after it; a per-tenant greeting; a local Urdu 
 **What exists:** the owner ticks, in the console's "What your agent collects" tab, which details
 the agent must ask for (name, phone, service, date and time, party size, reason…), per kind of
 request (appointment, call-back); the agent then takes those details in conversation — chat or
-voice — validates them, reads them back, and saves a request. A "Collected" tab lists what was
+voice — validates them, **saves the request the moment every required detail is in**, then reads it back
+and updates the saved row if the customer corrects something. A "Collected" tab lists what was
 taken. Backend responsibilities that are stood in for are in
 [`docs/handoff-to-backend.md`](docs/handoff-to-backend.md).
 
@@ -1794,16 +1795,28 @@ taken. Backend responsibilities that are stood in for are in
   appointment" starts nothing — the agent has no bookings to look up). A model fallback:
   `[[START appointment]]` at the start of a reply (`marker.js`) — stripped from the stream, the
   transcript and the voice before anyone sees or hears it.
-- **Never saved without a read-back and a yes.** The customer confirms the summary; a "no" opens
-  correction, where the customer may name any field; after MAX_MISSES unanswered tries the engine
-  gives up politely instead of looping. "Never mind" cancels (narrowly — a false cancel loses a
-  minute of the customer's work); an optional question may simply be declined.
+- **Saved FIRST, read back AFTER — there is no "say yes to save" step.** It used to wait for a
+  spoken yes, and a caller who said "thanks" and hung up (or a model that wandered off the plan)
+  left nothing behind. Now `advanceCollection` calls `deps.submit` as soon as every REQUIRED field
+  has a value — before the optional questions, which then follow and each answer UPDATES the saved
+  row (`deps.update`). Stages: `collecting` → (`recordId` set on save) → `saved` once nothing is
+  left to ask. In `saved` the customer is told the number and the details are read back; a
+  correction ("no, the phone is …") rewrites the SAME row, never a second one; "thanks"/"that's all"
+  (`phrases.js isClosing`) or a yes closes it and clears the draft; "no" asks which detail is wrong;
+  a different request ("call me back too") starts a fresh draft. After MAX_MISSES unanswered tries the
+  engine gives up politely (only possible before the save — afterwards every required field is in).
+- **Taking back is narrow.** "Cancel it"/"forget it" (the STRONG cancel phrases only — a weak
+  "maybe later" must never undo a request) calls `deps.withdraw`, which cancels the row ONLY while it
+  is still `requested`. A person's confirm locks the row: `updateRecordDetails` and `withdrawRecord`
+  are conditional on `status = requested`, so the agent cannot quietly rewrite what the team already
+  acted on — the customer is told a team member will adjust it (`update_failed`).
 - **The result is a `requested` record, never a booking.** `standins/records.js createRecord`
-  is idempotent on `submissionKey` (a retried turn is the same row and reference); the customer is
-  told the team will confirm; only a person moves it on (`PATCH /api/records/:id`, console only).
+  is idempotent on `submissionKey` (a retried turn is the same row and reference; a failed save is
+  retried on the customer's next message under the same key); the customer is told the team will
+  confirm; only a person moves it on (`PATCH /api/records/:id`, console only).
 - **Draft:** the in-progress details live in `conversations.collect_draft`, expire after 30
   minutes (`DRAFT_TTL_MS`), and are rolled back if the reply fails (so a failed turn is repeated,
-  not half-applied). Dates are checked in the business's time zone against its opening hours; a
+  not half-applied — a repeated save finds the same row by its submission key). Dates are checked in the business's time zone against its opening hours; a
   time is a wall-clock string (`scheduledLocal`), not an instant.
 - **Urdu specifics:** digits in Urdu/Arabic-Indic form and spoken digits are normalised; yes/no
   is token-based ("جی نہیں" is NO — "ji" is a filler); regexes use Unicode word edges, never `\b`.
@@ -1812,7 +1825,7 @@ taken. Backend responsibilities that are stood in for are in
 
 **Verified:** `npm test` (435 unit tests, incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
-converse → read-back → save → idempotent retry → status workflow), screenshots of both tabs in
+converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
 every provider; real Pakistani callers through the voice path; the extraction call's latency
 against a real provider (it runs in parallel with retrieval, but nobody has timed it).

@@ -15,10 +15,12 @@ tables directly.
   (appointment, call-back), custom fields, its services and staff list, an industry preset as the
   starting point. Stored as one JSON document, `agent_configs.collect`, versioned
   (`collect_version`, +1 per save). English and Urdu wording for every label and question.
-* In a conversation (chat or voice) the engine asks for the missing details one at a time,
+* In a conversation (chat or voice) the engine asks for the missing details one at a time and
   validates each (phone → international form, email, number range, a date/time inside the
-  opening hours in the business's time zone, a choice from the business's own list), reads
-  everything back, and only after the customer says yes **saves a request**.
+  opening hours in the business's time zone, a choice from the business's own list). **The
+  request is saved as soon as every required detail is in** — the engine then reads it back, and a
+  correction by the customer updates the same record (it never creates a second one). Optional
+  answers asked after the save update it too.
 * **The AI never books anything.** A saved request has status `requested`; the customer is told
   "we've noted it, the team will confirm" and is given a reference (`AP-4K7Q2` / `CB-9XM3T`). A
   person confirms it in the dashboard. This is deliberate (CLAUDE.md §6.11).
@@ -31,7 +33,7 @@ tables directly.
 | Stand-in (engine) | Table(s) | What the real backend does | Engine change when it arrives |
 | --- | --- | --- | --- |
 | `standins/customers.js` — `upsertCustomer(tenantId, {name, phone, email})` | `ai_engine.customers`, unique `(tenant_id, phone)` | Owns end-customers (`end_customers`), de-duplicated by phone | Point `upsertCustomer` at the backend; engine keeps passing the same three fields and gets an id back |
-| `standins/records.js` — `createRecord / listRecords / getRecord / updateRecordStatus` | `ai_engine.records` | Owns bookings/call-back requests, the staff screen, the status workflow (`requested → confirmed → done`, `cancelled`) | `createRecord` becomes a call (or event) to the backend; `GET/PATCH /api/records*` in the engine are test-console routes and go away — the dashboard talks to the backend |
+| `standins/records.js` — `createRecord / updateRecordDetails / withdrawRecord / listRecords / getRecord / updateRecordStatus` | `ai_engine.records` | Owns bookings/call-back requests, the staff screen, the status workflow (`requested → confirmed → done`, `cancelled`) | `createRecord` becomes a call (or event) to the backend; `GET/PATCH /api/records*` in the engine are test-console routes and go away — the dashboard talks to the backend |
 | `standins/events.js` — `emitEngineEvent({type, tenantId, data})` | none (in-process listeners) | Receives engine → backend events (`record.submitted`, `record.updated`) | Replace the body with the signed, retried, outbox-backed POST described in `backend-events.openapi.yaml`. Call sites do not change |
 | `tenant/config.js` reading `agent_configs` (incl. `collect`) | `ai_engine.agent_configs` | Stores the **versioned** agent config the dashboard edits | Make `getAgentConfig()` read from the backend; `saveCollectConfig()` becomes a pass-through. The JSON shapes below are the contract |
 | `tenant/registry.js` `assertTenantServiceable()` | none | Suspension, plan, quota | Edit that one function; routes already call `requireServiceableTenant()` |
@@ -82,6 +84,12 @@ Validation errors come back translated in the requested `locale`.
 `scheduledLocal` is a wall-clock string in the business's time zone, not an instant: turning it
 into an instant (and checking the slot is actually free) is the backend's decision, because only
 the backend knows the calendar.
+
+**Updates while it is still `requested`:** the engine may update a saved request's `data`, `summary`
+and `scheduledLocal` (the customer corrected a detail) or withdraw it (status `cancelled`, only on
+a strong "cancel it"). Both are refused once the status is anything but `requested`, so the real
+backend must keep that rule: a person's confirm freezes what the customer can change from the
+conversation. Each emits `record.updated` (`detailsChanged: true` for a detail edit).
 
 **Events** (envelope `{ id, type, tenantId, occurredAt, data }`): `record.submitted`
 (`recordId, recordType, reference, conversationId`) and `record.updated` (`recordId, status`).
