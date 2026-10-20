@@ -39,8 +39,8 @@ code disagree, **the code wins** — fix this file in the same change (same rule
 | Agent settings (name, tone, hours, language, voices…) | reads, uses in the prompt | **stores, versions, edits via dashboard** (B2) |
 | "What the agent collects" settings | defines the catalogue + validates | **stores the document** (B3) |
 | Customers and requests (appointments, call-backs), staff screen, status workflow | proposes / saves / corrects while `requested` | **owns the data and the workflow** (B4) |
-| Knowledge files: upload UI, **file storage (Cloudinary)**, limits, document list | reads, splits, embeds, searches | **owns storage, limits, UI** (B5) |
-| Integration secrets (Gemini, Groq, Cloudinary, Twilio…) | consumes | **stores, hands to engine** (B6) |
+| Knowledge files: upload UI, **original-file storage (Cloudinary or other)**, limits, document list | receives the file/text, extracts, splits, embeds, searches; keeps extracted text only | **owns the original file, storage, limits, UI** (B5) |
+| Integration secrets | **keeps its own AI keys** (Gemini, Groq…) in its deployment | **keeps its own** (storage, billing, WhatsApp/SMS, Twilio account); only `INTERNAL_API_KEY` + event-signing secret are shared (B6) |
 | Events engine → backend (outbox) | produces | **receives** (B7) |
 | Usage metering (minutes, messages, requests) | reports events | **counts, bills** (B8) |
 | Customer notifications (WhatsApp / SMS) | emits the event | **sends** (B9) — decision needed |
@@ -209,7 +209,7 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   - **File storage = Cloudinary** (`src/lib/agent/storage.js`, `resource_type: raw`, folder
     `caller-ai-agent/{tenantId}`), best-effort, original file only — **never what the agent answers from**.
     Env: `CLOUDINARY_CLOUD_NAME/API_KEY/API_SECRET` (all three or none; without them uploads still work, the
-    original just isn't kept).
+    original just isn't kept). It was added for the test console; under the decided split below it is not needed.
   - Limits in code: **10 MB per file** (`MAX_UPLOAD_BYTES`), types `pdf docx txt md csv`, **≤20 files per
     request**, **≤400 chunks per document**.
   - Routes (console): `GET|POST /api/knowledge`, `GET|PUT|DELETE /api/knowledge/:id`,
@@ -218,33 +218,67 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
 - **What the engine keeps (not the backend's):** text extraction, OCR (scanned PDFs, English+Urdu), heading-aware
   chunking, embeddings (Gemini, 768-d), vector+keyword retrieval, the background job queue and progress.
   A document is **replaced, never appended** (same title ⇒ overwrite and re-embed only changed chunks).
-- **Backend provides:** the upload UI, plan limits, and the **file storage**. Two workable splits — pick one:
-  - **(A) Backend stores, engine processes (recommended).** Backend accepts the file, stores the original
-    (its own Cloudinary account), then calls the engine to ingest:
-    `POST /api/knowledge?tenantId=…` multipart `file` (repeatable) **or** `{ "title","text" }` **or** `{ "url" }`.
-    Responses today: files/URL → `202 { "jobs": [{ "id","title" }], "rejected": [{ "title","reason" }] }`
-    (`400` if every file was rejected); typed text → `201|200 { "document": {…, "replaced": bool } }`.
-    The backend then polls `GET /api/knowledge/jobs/:id` → `{ "job": { id, status: queued|processing|done|failed|cancelled,
-    stage: extracting|ocr|chunking|embedding, progress: 0-100, itemsDone, itemsTotal, error } }`.
-  - **(B) Engine keeps Cloudinary** (today). Backend only supplies Cloudinary credentials (B6). Simpler, but the
-    storage and its cost sit outside the platform.
+- **DECIDED SPLIT — the backend stores the original file; the engine only processes it.**
+  1. **Cloudinary (or any file storage) is the backend's.** The backend keeps the original uploaded file in
+     **its own** storage account, with its own limits and cost. The **engine does not need Cloudinary and the
+     backend does not need to give it Cloudinary credentials** — see B6.
+  2. **The engine keeps only what it answers from:** the extracted text and its embeddings (rows in
+     `knowledge_sources` / `knowledge_chunks`). It never needs the original file again, and re-chunking works
+     from the stored text.
+  3. **Flow:** owner uploads in the dashboard → backend checks plan limits, stores the original → backend calls the
+     engine to ingest:
+     `POST /api/knowledge?tenantId=…` multipart `file` (repeatable) **or** `{ "title","text" }` **or** `{ "url" }`.
+     Responses today: files/URL → `202 { "jobs": [{ "id","title" }], "rejected": [{ "title","reason" }] }`
+     (`400` if every file was rejected); typed text → `201|200 { "document": {…, "replaced": bool } }`.
+     The backend then follows progress with `GET /api/knowledge/jobs/:id` →
+     `{ "job": { id, status: queued|processing|done|failed|cancelled, stage: extracting|ocr|chunking|embedding,
+     progress: 0-100, itemsDone, itemsTotal, error } }`.
+  4. **Replace and delete:** a document with an existing title is **replaced** (never appended);
+     `DELETE /api/knowledge/:id` removes the text and chunks. The backend deletes its own stored original at the
+     same time.
+  5. **TODAY (no change needed for now):** the engine's code still uploads a copy to Cloudinary **if** the three
+     `CLOUDINARY_*` variables are set, and skips it silently if they are not. **Leave them unset in the deployed
+     engine.** Nothing breaks: uploads, search and answers work exactly the same without them. The Cloudinary
+     code stays in the repo for now and is removed later, when the backend's storage is live.
 - **Document list the dashboard needs:** `GET /api/knowledge?tenantId=…` →
   `{ "sources": [{ id, title, kind: text|file|url, status: processing|ready|failed, error, fileName, mimeType,
   byteSize, chunkCount, createdAt, updatedAt, editable }], "limits": { maxBytes, extensions } }`.
   (The original file's Cloudinary URL is stored on the row but is not returned by the list; ask if the dashboard needs a download link.) `editable` is decided by the engine (only typed text, `.txt`, `.md`) — the UI must not re-implement it.
 - **Expected errors:** `400` bad body/too many files, `409` editing a non-editable document, `404` unknown
   document, `403/429` tenant not serviceable (B1).
-- **Engine change (option A):** delete `storage.js` usage for uploads and the console UI; keep ingest/job code.
+- **Engine change later:** remove the optional `storage.js` upload and the console UI; keep the ingest/job code. Not needed to go live.
 
 ### B6 — Integration secrets
 
-- **What:** API keys and credentials per environment (and later per tenant): Gemini (chat + embeddings, required),
-  Groq (fast chat + Urdu speech recognition), OpenRouter (optional), Cloudinary (B5), Twilio (B11),
-  `INTERNAL_API_KEY`, `VOICE_SESSION_SECRET`.
-- **Engine today:** read from environment variables (`.env`, documented in `CLAUDE.md` §10).
-- **Backend provides:** a secure store and a way to hand secrets to the engine at start-up (env injection is
-  fine) — secrets must never be returned by any API, logged, or stored in `agent_configs`.
-- **Open decision:** platform-wide keys (simplest) vs. per-tenant keys. The engine today assumes platform-wide.
+**DECIDED APPROACH (for now): each side keeps its own secrets; the engine's secrets stay inside the engine's
+deployment.** Nothing is passed between the systems, and no secret is stored in a database table or returned by an
+API. We revisit this only if a concrete need appears (for example businesses bringing their own accounts).
+
+- **Engine secrets — set on the engine's deployment** (environment variables or the host's secret manager; never in
+  git, never in `agent_configs`). Only what the AI work itself needs:
+
+  | Secret | Used for | Required |
+  | --- | --- | --- |
+  | `GEMINI_API_KEY` | chat model and **embeddings** (embeddings are Gemini-only) | **yes** |
+  | `GROQ_API_KEY` | fast chat model and Urdu speech recognition (Whisper) | for voice / Urdu |
+  | `OPENROUTER_API_KEY` | optional fallback chat provider | no |
+  | `INTERNAL_API_KEY` | authenticates calls between the backend and the engine | **yes** |
+  | `VOICE_SESSION_SECRET` | signs the one-minute voice-call tickets (falls back to `INTERNAL_API_KEY`) | recommended |
+  | event-signing secret (B7) | HMAC on engine → backend events | when B7 is built |
+  | Twilio webhook signature secret | verifying incoming phone-call webhooks | when B11 is built |
+
+  Provider and model choices (`LLM_PROVIDER`, `GEMINI_CHAT_MODEL`, …) are plain environment settings, listed in
+  `CLAUDE.md` §10.
+- **Backend secrets — stay on the backend:** file storage / Cloudinary (B5), billing and payment keys, the
+  WhatsApp/SMS provider (B9), the Twilio **account** keys used to buy and manage numbers (B11), his own database
+  and auth secrets. **The engine does not need any of these.**
+- **Shared by both sides — one value, configured on both:** `INTERNAL_API_KEY` and the event-signing secret.
+  Agree them out of band and rotate them together.
+- **`CLOUDINARY_*` on the engine: leave unset.** The engine works without them (see B5).
+- **Rules:** secrets are never logged, never returned by any route, never stored in `agent_configs` or any table a
+  dashboard can read.
+- **Revisit later (not now):** per-business keys, and whether the backend should inject engine secrets at deploy
+  time. The engine today assumes **platform-wide keys paid by the platform**.
 
 ### B7 — Events: engine → backend (outbox)
 
@@ -363,8 +397,13 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.
 7. Later: speech models on a server and a paid LLM key (infrastructure, not code).
 
-**Decisions I need from you:** the B5 split (A or B); who sends WhatsApp/SMS (B9); platform-wide vs per-tenant
-keys (B6); whether events carry customer details (B7); the usage-event shape (B8); which `/internal` routes first.
+**Decided:** (1) the backend stores the original files (Cloudinary or other) — the engine keeps only extracted text
+and embeddings, and runs without `CLOUDINARY_*` (B5); (2) secrets stay where they are used — AI keys in the engine's
+deployment, storage/billing/messaging/Twilio-account keys on the backend, only `INTERNAL_API_KEY` and the
+event-signing secret shared (B6).
+
+**Still open — decisions I need from you:** who sends WhatsApp/SMS (B9); whether events carry customer details (B7);
+the usage-event shape (B8); which `/internal` routes come first.
 
 ---
 
