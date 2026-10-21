@@ -1709,6 +1709,26 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   a code, an English phrase) is spoken with the English voice, because the Urdu voice would spell
   it out as gibberish (`spoken-language.js`). A sentence with no letters keeps the previous one's
   language. The greeting is in the reply language — the UI language is never consulted (§7).
+- **Turn quality — five fixes found on real calls** (tests: voice-session, voice-continuation, collect-engine):
+  1. **No document search for a checklist answer.** While a request is open, a message the RULES read as
+     the answer to the question just asked ("0300 1234567", a name, "root canal", "tomorrow at five", "yes",
+     "thanks") skips retrieval (`collect/engine.js readsAsAnswer` → respond.js, `searchTrigger: "skipped"`).
+     Conservative on purpose: a question, a message over 10 words (16 for a phone number said digit by digit)
+     or anything the rules cannot place is still searched. Saves ~1–2 s and an embedding per such turn, and the
+     turn is logged `conversational`, not "unanswered" (`classifyTurn requestState`).
+  2. **A sentence cut by a pause is one message** (`voice/transcript-clean.js looksUnfinished`, `CONTINUATION`
+     in `config.js`). A transcript ending on a joining word or comma ("…with", "…اور", ",") is held 1.2 s
+     (after the 0.5 s of VAD silence); if the caller carries on, the halves are joined (`utterance.merged`),
+     else the held half is answered as it is. A finished sentence never waits.
+  3. **Doubled transcripts are collapsed** (`collapseRepeats`): a phrase of 3+ words written twice by the
+     recogniser reaches the brain once (`stt.deduped`). "No, no, no" and "very very good" are left alone.
+  4. **No "one moment" filler while collecting details** (`turn.collecting`, set from the `retrieved` stage's
+     `collectionState`): "Let me check that for you" before "Thanks, I've noted your number" sounded wrong.
+  5. **An interrupted reply is stored as what was heard** (`respond.js trimLastReply`, called by the session
+     after a barge-in): the brain persists the whole generated reply; the spoken part replaces it (or it is
+     dropped if nothing was spoken), so the next turn never builds on words the caller did not hear.
+  **Not done:** echo of the agent's own voice through speakers (4–13 "interruptions" per call without
+  headphones) needs an echo guard tested on real audio.
 - **Limits** (`config.js`): 15 min per call, 90 s of caller silence ends it, 3 concurrent calls per
   tenant, 6 per gateway (a CPU budget for this machine, not a business rule), 20 s max utterance.
 - **Wire protocol** (`protocol.js`, imported by both sides): binary frames are PCM16 audio, text

@@ -3,7 +3,8 @@ import { SentenceChunker } from "./sentences";
 import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, OUTCOMES } from "./intent";
 import { median } from "./recorder";
-import { BARGE_IN, FILLER, LIMITS } from "./config";
+import { BARGE_IN, CONTINUATION, FILLER, LIMITS, VAD } from "./config";
+import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
@@ -91,6 +92,7 @@ export class CallSession {
     this.responseTimes = [];
     this.lastLanguage = null;
     this.timers = {};
+    this.holding = null;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -191,6 +193,7 @@ export class CallSession {
     this.ended = true;
     for (const timer of Object.values(this.timers)) this.clearTimer(timer);
     if (this.currentTurn) this.currentTurn.cancelled = true;
+    this.holding?.deliver(null);
     this.vad?.reset();
 
     this.setState(CALL_STATES.ENDED);
@@ -241,6 +244,13 @@ export class CallSession {
         this.bargedThisSpeech = false;
         this.armIdleTimer();
         this.log("speech.started");
+        // The caller is carrying on after a pause: wait for the rest instead of giving up on it.
+        if (this.holding) {
+          const hold = this.holding;
+          this.clearTimer(hold.timer);
+          // Safety net: speech that never turns into an utterance must not hold the turn forever.
+          hold.timer = this.setTimer(() => hold.deliver(null), (VAD.maxSpeechSeconds + 2) * 1000);
+        }
         if (!this.agentBusy()) this.setState(CALL_STATES.HEARING);
       } else if (event.type === "ongoing") {
         if (!this.bargedThisSpeech && this.agentBusy() && event.speechMs >= BARGE_IN.minSpeechMs) {
@@ -269,6 +279,8 @@ export class CallSession {
     const speechEndedAt = this.now();
     this.log("speech.ended", { durationMs });
     this.armIdleTimer();
+    // The previous half of a sentence is waiting for more: this IS the rest of it.
+    if (this.holding) return this.holding.deliver({ samples, durationMs, speechEndedAt });
     // Turns run strictly one after another: the brain persists each user/assistant pair
     // in order, and a reply must never be spoken over the next question's reply.
     this.turnQueue(() => this.runTurn({ samples, durationMs, speechEndedAt }));
@@ -287,14 +299,40 @@ export class CallSession {
       this.settleState();
       return;
     }
-    const text = transcript.text;
-    if (!/\p{L}/u.test(text) || text.length < LIMITS.minTranscriptChars) {
+    if (!this.isSpeech(transcript.text)) {
       // The VAD let a noise through. Not a turn: nothing is persisted, nothing answered.
       this.log("stt.empty", { ms: transcript.ms, durationMs });
       this.settleState();
       return;
     }
     if (this.ended) return;
+
+    // A sentence the caller left unfinished ("…with", "…اور") is held for a moment: if the
+    // rest follows it is ONE message, not two turns each answered on its own.
+    let merged = 0;
+    while (merged < CONTINUATION.maxMerges && looksUnfinished(transcript.text)) {
+      const more = await this.awaitContinuation();
+      if (!more) break;
+      let extra;
+      try {
+        extra = await this.transcriber.transcribe(more.samples);
+      } catch (err) {
+        console.error("[voice] STT failed on a continuation:", err);
+        break;
+      }
+      if (!this.isSpeech(extra.text)) break;
+      this.log("utterance.merged", { first: transcript.text.slice(0, 80), second: extra.text.slice(0, 80) });
+      transcript = { ...transcript, text: `${transcript.text.trim()} ${extra.text.trim()}`, ms: transcript.ms + extra.ms };
+      durationMs += more.durationMs;
+      speechEndedAt = more.speechEndedAt;
+      merged++;
+    }
+    if (this.ended) return;
+
+    // One utterance sometimes comes back with the same phrase written twice.
+    const cleaned = collapseRepeats(transcript.text);
+    if (cleaned.collapsed) this.log("stt.deduped", { before: transcript.text.slice(0, 120), after: cleaned.text.slice(0, 120) });
+    const text = cleaned.text;
 
     const index = ++this.turnIndex;
     const turn = this.newTurn(index);
@@ -332,9 +370,13 @@ export class CallSession {
         onChunk: (delta) => chunker.push(delta).forEach(say),
         onStage: (stage, data) => {
           if (stage === "retrieved") {
+            // Taking a customer's details is not a lookup: a "let me check that for you" in the
+            // middle of it sounds wrong, and the next sentence is a fixed question anyway.
+            if (data.collectionState && data.collectionState !== "idle") turn.collecting = true;
             this.log("retrieval.completed", {
               turn: index,
               ms: data.ms,
+              skipped: data.skipped || undefined,
               sources: data.sources,
               searchQuery: data.searchQuery !== text ? data.searchQuery : null,
               rewrite: data.rewriteStatus,
@@ -359,12 +401,22 @@ export class CallSession {
     await turn.speaking;
     this.clearTimer(filler);
 
+    // The brain stored the WHOLE reply. If the caller cut it off, only the part that was
+    // actually sent to them is what they heard: keep that, so the next turn does not build on
+    // words nobody heard (the model would think the caller already knows them).
+    if (turn.interrupted && !error) {
+      await this.brain
+        .trimLastReply?.({ tenantId: this.tenantId, conversationId: this.recorder.conversationId, spokenText: turn.spoken.join(" ") })
+        ?.catch((err) => console.error("[voice] could not trim the stored reply:", err));
+    }
+
     const classification = classifyTurn({
       callerText: text,
       sources: result?.sources ?? [],
       trigger: result?.searchTrigger ?? null,
       rewriteStatus: result?.rewriteStatus ?? null,
       failed: Boolean(error),
+      requestState: result?.collection?.state ?? null,
     });
     const responseMs = turn.firstAudioAt != null ? Math.round(turn.firstAudioAt - speechEndedAt) : null;
     if (responseMs != null) this.responseTimes.push(responseMs);
@@ -420,6 +472,31 @@ export class CallSession {
 
     if (this.currentTurn === turn) this.currentTurn = null;
     this.settleState();
+  }
+
+  /** Is this transcript a real utterance (letters, long enough) and not noise? */
+  isSpeech(text) {
+    return /\p{L}/u.test(text) && text.length >= LIMITS.minTranscriptChars;
+  }
+
+  /**
+   * Wait a moment for the caller to carry on a sentence they left unfinished.
+   * @returns {Promise<{samples: Float32Array, durationMs: number, speechEndedAt: number}|null>}
+   *   the next utterance, or null when nothing came (the held half is then answered as it is)
+   */
+  awaitContinuation() {
+    return new Promise((resolve) => {
+      const finish = (value) => {
+        this.clearTimer(hold.timer);
+        if (this.holding === hold) this.holding = null;
+        resolve(value);
+      };
+      const hold = {
+        deliver: (utterance) => finish(utterance),
+        timer: this.setTimer(() => finish(null), CONTINUATION.holdMs),
+      };
+      this.holding = hold;
+    });
   }
 
   newTurn(index) {
@@ -489,7 +566,7 @@ export class CallSession {
       // heard in about a second. A "one moment" now just delays it and makes a simple
       // question sound hard (measured on two live calls: the filler fired 0.9 s before the
       // answer, every time). The filler is for a model that has produced NOTHING yet.
-      if (turn.sentences.length > 0) return;
+      if (turn.sentences.length > 0 || turn.collecting) return;
       const language = this.lastLanguage ?? "en";
       this.log("filler.spoken", { turn: turn.index });
       const line = voiceLine("filler", language, turn.index);

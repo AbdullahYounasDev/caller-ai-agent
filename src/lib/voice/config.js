@@ -81,6 +81,21 @@ export const FILLER = {
   afterMs: 2500,
 };
 
+export const CONTINUATION = {
+  /**
+   * A transcript that stops mid-thought ("I want to book an appointment with…", ending on a
+   * joining word or a comma) is held this long, after the 0.5 s of silence that already
+   * ended the turn, to see whether the caller carries on. If they do, the two halves are
+   * ONE message; if not, the held half is answered as usual. Only unfinished-looking
+   * transcripts pay it (voice/transcript-clean.js looksUnfinished) — a complete sentence
+   * never waits. 1.2 s covers the pause people actually take to find a word; longer makes a
+   * caller who really did stop wait for nothing.
+   */
+  holdMs: 1200,
+  /** Halves that may be joined into one message. */
+  maxMerges: 2,
+};
+
 export const TTS = {
   /** Speaking rate. 1.0 is each voice's natural pace. It used to be 1.05 ("phone agents
    *  sound better a touch quicker") — callers heard it as rushed. Do not raise it

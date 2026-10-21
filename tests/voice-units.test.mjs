@@ -117,6 +117,16 @@ describe("SentenceChunker — streaming text into speakable sentences", () => {
 });
 
 describe("classifyTurn — intent and outcome, rule-based", () => {
+  test("giving details to a booking is conversation, not an unanswered question", () => {
+    assert.equal(classifyTurn({ callerText: "0300 1234567", sources: [], requestState: "ask" }).outcome, OUTCOMES.CONVERSATIONAL);
+    assert.equal(classifyTurn({ callerText: "yes", sources: [], requestState: "saved" }).outcome, OUTCOMES.CONVERSATIONAL);
+    // …but a question with no answer in the documents, with nothing being collected, still is.
+    assert.equal(classifyTurn({ callerText: "Do you sell bikes?", sources: [], requestState: "idle" }).outcome, OUTCOMES.NO_KNOWLEDGE);
+    assert.equal(classifyTurn({ callerText: "Do you sell bikes?", sources: [] }).outcome, OUTCOMES.NO_KNOWLEDGE);
+    // and a failed turn is still failed.
+    assert.equal(classifyTurn({ callerText: "0300", sources: [], requestState: "ask", failed: true }).outcome, OUTCOMES.FAILED);
+  });
+
   test("a grounded question is answered; an ungrounded one is the business's gap list", () => {
     assert.deepEqual(classifyTurn({ callerText: "How much is the Pro plan?", sources: ["03-pricing.docx"] }), {
       intent: INTENTS.QUESTION,

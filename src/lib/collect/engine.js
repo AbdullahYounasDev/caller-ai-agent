@@ -1,7 +1,7 @@
 import { pick } from "./catalog";
 import { enabledRecordTypes, recordTypeLabel, typeFields } from "./config";
 import { displayValue, digitsAsWords, validateValue, formatDate } from "./validate";
-import { confirmationOf, detectStartType, isCancel, isClosing, isSkip } from "./phrases";
+import { confirmationOf, detectStartType, isCancel, isClosing, isSkip, looksLikeQuestion } from "./phrases";
 import { heuristicAnswer, volunteeredValue } from "./extract";
 
 /**
@@ -81,6 +81,52 @@ export function summarise(draft, fields, ctx) {
   parts.push(byId.get("datetime") ?? byId.get("callback_window"));
   const text = parts.filter(Boolean).join(" · ");
   return text || lines.map((l) => l.display).slice(0, 3).join(" · ");
+}
+
+/**
+ * Is this message, while a request is open, simply the ANSWER to what the agent just asked
+ * (or a "yes"/"thanks" to the read-back) — so searching the business's documents for it
+ * would only cost a second and an embedding for nothing? Judged by rules alone, before any
+ * model call, and deliberately conservative: it says yes only when the rules positively
+ * READ the message as an answer, never merely because a request happens to be open. A
+ * question ("do you have parking?"), a long message or anything the rules cannot place
+ * still gets its search, so a side question during booking is answered from the documents.
+ *
+ * @param {object} args
+ * @param {object} args.collect
+ * @param {{replyLanguage?: string, timezone?: string, hours?: unknown}} args.agent
+ * @param {object|null} args.draft   the conversation's stored draft
+ * @param {string} args.message
+ * @param {number} args.nowMs
+ * @returns {boolean}
+ */
+export function readsAsAnswer({ collect, agent, draft, message, nowMs }) {
+  if (!isLiveDraft(draft, { nowMs, collect })) return false;
+  const text = String(message ?? "").trim();
+  const count = words(text);
+  if (!text || count > 16 || /[?؟]/.test(text) || looksLikeQuestion(text)) return false;
+
+  const fields = typeFields(collect, draft.type);
+  const ctx = { config: collect, timezone: agent?.timezone || "UTC", hours: agent?.hours ?? null, nowMs, language: agent?.replyLanguage === "ur" ? "ur" : "en" };
+
+  // After the save the agent is checking the details: "yes", "thanks", a correction.
+  if (draft.stage === "saved" || draft.stage === "confirming") {
+    if (count > 10) return false;
+    if (isClosing(text) || confirmationOf(text) != null || isCancel(text, { askingOptional: true })) return true;
+    return fields.some((f) => volunteeredValue(f, text) != null);
+  }
+
+  const asking = draft.asking ? fields.find((f) => f.id === draft.asking) : null;
+  if (!asking) return false;
+  // A number said digit by digit ("zero three zero zero …") is a dozen words long and still only an
+  // answer; anything else that long may hold a question the documents should see.
+  if (count > 10 && asking.type !== "phone") return false;
+  if (isCancel(text, { askingOptional: !asking.required })) return true;
+  if (!asking.required && isSkip(text)) return true;
+  // A day and time ("tomorrow at five") needs the model to read it, but it is short, plain and
+  // never a question about the business — the commonest slow turn of a booking.
+  if (asking.type === "datetime") return count <= 8;
+  return heuristicAnswer(asking, text, ctx) != null;
 }
 
 function idlePlan(collect, language, types) {
