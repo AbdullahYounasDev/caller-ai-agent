@@ -5,7 +5,7 @@ import { buildSystemInstruction } from "./prompt";
 import { generateReply, generateReplyStream, generateExtraction } from "./llm";
 import { randomUUID } from "node:crypto";
 import { enabledRecordTypes } from "@/lib/collect/config";
-import { advanceCollection, draftFromMarker } from "@/lib/collect/engine";
+import { advanceCollection, draftFromMarker, readsAsAnswer } from "@/lib/collect/engine";
 import { createExtractor } from "@/lib/collect/extract";
 import { createMarkerFilter, stripMarker } from "@/lib/collect/marker";
 import { writeDraft } from "@/lib/collect/store";
@@ -116,13 +116,22 @@ export async function respond({
   // Taking a customer's request (an appointment, a callback — lib/collect) runs ALONGSIDE
   // retrieval: it needs the same history and nothing from the search, and retrieval is the
   // slower of the two (an embedding round trip), so it adds no latency to a turn.
+  //
+  // A message that is just the ANSWER to the question the agent asked ("0300 1234567" to "what is
+  // your phone number?", "yes", "thanks") is not searched at all: it cost 1–2 s of a phone call
+  // and an embedding text for a result the answer could not use (seen live: "searched for
+  // 'appointment confirmation phone number' — no answer in your documents"). Judged by rules,
+  // conservatively (collect/engine.js readsAsAnswer): a side question still gets its search.
+  const skipSearch = readsAsAnswer({ collect: config.collect, agent: config, draft: conversation?.collectDraft ?? null, message: userMessage, nowMs: Date.now() });
   const [turn, collection] = await Promise.all([
-    retrieveForTurn({
-      tenantId,
-      message: userMessage,
-      history: earlierTurns,
-      topK: MAX_CONTEXT_CHUNKS,
-    }),
+    skipSearch
+      ? Promise.resolve({ chunks: [], searchQuery: userMessage, trigger: "skipped", rewrite: null })
+      : retrieveForTurn({
+          tenantId,
+          message: userMessage,
+          history: earlierTurns,
+          topK: MAX_CONTEXT_CHUNKS,
+        }),
     takeRequest({ tenantId, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
   ]);
   const chunks = turn.chunks;
@@ -135,6 +144,10 @@ export async function respond({
     rewriteStatus: turn.rewrite?.status ?? null,
     rewriteMs: turn.rewrite?.ms ?? null,
     ms: retrievalMs,
+    skipped: skipSearch,
+    // What the request taking decided this turn — the voice session uses it to keep the
+    // "one moment" filler away from turns that are only collecting details.
+    collectionState: collection.plan?.state ?? null,
   });
 
   // 4. Record the language this conversation is being held in.
@@ -337,4 +350,29 @@ async function takeRequest({ tenantId, conversationId, channel, config, userMess
     console.error("[collect] taking a request failed; replying without it:", err);
     return { plan: null, draftWrite: null };
   }
+}
+
+/**
+ * The caller cut the agent off mid-reply: replace the stored reply with what was actually
+ * said to them (voice/session.js). respond() persists the WHOLE generated reply, and the next
+ * turn's history would otherwise show the model words the caller never heard — "as I said,
+ * the fee is 500" about a fee that was never spoken. If nothing was spoken, the reply is
+ * removed (consecutive user turns are tolerated by every provider, §6.17).
+ *
+ * @param {object} args
+ * @param {string} args.tenantId
+ * @param {string} args.conversationId
+ * @param {string} args.spokenText the part of the reply that was sent to the caller
+ * @returns {Promise<void>}
+ */
+export async function trimLastReply({ tenantId, conversationId, spokenText }) {
+  const last = await prisma.message.findFirst({
+    where: { tenantId, conversationId, role: "assistant" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true },
+  });
+  if (!last) return;
+  const spoken = String(spokenText ?? "").trim();
+  if (spoken) await prisma.message.update({ where: { id: last.id }, data: { content: spoken } });
+  else await prisma.message.delete({ where: { id: last.id } });
 }

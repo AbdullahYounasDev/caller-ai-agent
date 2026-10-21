@@ -60,8 +60,9 @@ const newConversation = (tenantId, channel = "chat") => prisma.conversation.crea
 async function say(tenantId, conversationId, userMessage, { channel = "chat" } = {}) {
   const chunks = [];
   stub.state.instructions.length = 0;
-  const result = await respond({ tenantId, conversationId, channel, userMessage, onChunk: (c) => chunks.push(c) });
-  return { result, streamed: chunks.join(""), instruction: stub.state.instructions.at(-1) ?? "" };
+  let retrieved = null;
+  const result = await respond({ tenantId, conversationId, channel, userMessage, onChunk: (c) => chunks.push(c), onStage: (stage, data) => stage === "retrieved" && (retrieved = data) });
+  return { result, streamed: chunks.join(""), instruction: stub.state.instructions.at(-1) ?? "", retrieved };
 }
 const draftOf = (id) => prisma.conversation.findUnique({ where: { id }, select: { collectDraft: true } }).then((c) => c.collectDraft);
 
@@ -95,7 +96,9 @@ let draft = await draftOf(conv);
 ok(draft?.type === "appointment" && draft.stage === "collecting" && draft.asking === "name", "the draft is saved between messages");
 
 r = await say(A, conv, "my name is Ahmed Khan");
+ok(r.retrieved?.skipped === true && r.retrieved.collectionState === "ask", "the answer to a checklist question is NOT searched in the documents");
 r = await say(A, conv, "0300 1234567");
+ok(r.retrieved?.skipped === true && r.result.searchTrigger === "skipped", "…nor is the phone number");
 ok(r.result.collection.field === "service" && /Scaling and polishing, Root canal/.test(r.instruction), "the owner's list of services is offered");
 r = await say(A, conv, "root canal");
 events.length = 0;
@@ -208,6 +211,27 @@ stub.state.extraction = null;
 for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling"]) r = await say(A, conv6, m);
 r = await say(A, conv6, "kal shaam paanch baje");
 ok(r.result.reply.length > 0 && r.result.collection.state === "ask" && /could not be processed/.test(r.instruction), "extraction down: the reply still comes, asking for the answer again");
+
+// ── a side question in the middle of a booking IS searched ─────────────────
+const conv7 = await newConversation(A);
+await say(A, conv7, "I want to book an appointment");
+r = await say(A, conv7, "do you take cards?");
+ok(r.retrieved?.skipped === false, "a question asked during a booking still gets its document search");
+r = await say(A, conv7, "Ahmed Khan");
+ok(r.retrieved?.skipped === true && r.result.collection.field === "phone", "…and the booking carries on, again without a search");
+
+// ── a spoken reply cut off by the caller is stored as what was heard ───────
+const { trimLastReply } = await import("@/lib/agent/respond");
+const conv8 = await newConversation(A);
+stub.state.reply = "We open at nine. We close at six. On Saturdays we close at one.";
+await say(A, conv8, "What are your hours?");
+await trimLastReply({ tenantId: A, conversationId: conv8, spokenText: "We open at nine." });
+const lastAssistant = (await prisma.message.findMany({ where: { conversationId: conv8, role: "assistant" }, orderBy: { createdAt: "desc" } }))[0];
+ok(lastAssistant.content === "We open at nine.", "an interrupted reply keeps only the part the caller heard");
+await trimLastReply({ tenantId: A, conversationId: conv8, spokenText: "" });
+ok((await prisma.message.count({ where: { conversationId: conv8, role: "assistant" } })) === 0, "a reply of which nothing was heard is dropped");
+await trimLastReply({ tenantId: B, conversationId: conv8, spokenText: "x" }); // another tenant: no effect, no error
+ok(true, "trimming is scoped to the tenant");
 
 await wipe();
 await prisma.agentConfig.deleteMany({ where: { tenantId: "__collect_test_c__" } });

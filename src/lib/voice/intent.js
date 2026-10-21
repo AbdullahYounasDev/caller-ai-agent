@@ -71,9 +71,10 @@ const GREETING_ONLY = new RegExp(
  * @param {null|"heuristic"|"empty"} [turn.trigger] whether the follow-up step fired (§6.19)
  * @param {string|null} [turn.rewriteStatus]
  * @param {boolean} [turn.failed]
+ * @param {string|null} [turn.requestState] what taking a request did this turn (respond().collection.state)
  * @returns {{intent: string, outcome: string, topic: string|null}}
  */
-export function classifyTurn({ callerText, sources = [], trigger = null, rewriteStatus = null, failed = false }) {
+export function classifyTurn({ callerText, sources = [], trigger = null, rewriteStatus = null, failed = false, requestState = null }) {
   const text = String(callerText ?? "").trim();
 
   let intent = INTENTS.QUESTION;
@@ -89,6 +90,9 @@ export function classifyTurn({ callerText, sources = [], trigger = null, rewrite
   if (failed) outcome = OUTCOMES.FAILED;
   else if (intent === INTENTS.HUMAN_REQUEST) outcome = OUTCOMES.HANDOFF_REQUESTED;
   else if (sources.length) outcome = OUTCOMES.ANSWERED;
+  // Giving a phone number to a booking is not a question the documents failed to answer: it
+  // used to be logged "unanswered" (and was searched for nothing — respond.js skips that now).
+  else if (requestState && requestState !== "idle") outcome = OUTCOMES.CONVERSATIONAL;
   else if ([INTENTS.GREETING, INTENTS.ACKNOWLEDGEMENT, INTENTS.GOODBYE].includes(intent)) {
     outcome = OUTCOMES.CONVERSATIONAL;
   } else outcome = OUTCOMES.NO_KNOWLEDGE;

@@ -77,7 +77,9 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
   };
 
   const calls = [];
+  const trims = [];
   const brain = {
+    trimLastReply: async (args) => trims.push(args),
     invalidateAgentConfig: () => {},
     getAgentConfig: async () => ({ businessName: "Nyron", replyLanguage: "en", ...config }),
     respond: async (args) => {
@@ -109,8 +111,17 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
     sttCalls,
     recorded,
     calls,
+    trims,
     vad,
     advance: (ms) => (now += ms),
+    /** Move the clock on and run every timer that has come due (and was not cleared). */
+    tick: (ms) => {
+      now += ms;
+      for (const timer of timers.filter((t) => !t.cleared && t.at <= now)) {
+        timer.cleared = true;
+        timer.fn();
+      }
+    },
     /** Feed the VAD's verdict for the next audio frame. */
     hear: (...events) => {
       vad.next = events;
@@ -365,5 +376,147 @@ describe("CallSession", () => {
     assert.equal(await h.session.start(), false);
     assert.equal(h.sent.closed, END_REASONS.SETUP_FAILED);
     assert.equal(h.notified(SERVER.ERROR)[0].code, ERROR_CODES.INTERNAL);
+  });
+
+  // ── turn quality: the five fixes ──────────────────────────────────────────
+
+  test("a sentence the caller left unfinished is held, and the rest that follows is ONE message", async () => {
+    const h = harness({
+      transcripts: ["I want to book an appointment with", "Doctor Ayesha on Monday at ten."],
+      replies: [streams("Of course. May I have your name?")],
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.calls.length, 0, "the first half is waiting, not being answered");
+
+    h.advance(400); // a short pause, well inside the hold
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 1, "one brain call for both halves");
+    assert.equal(h.calls[0].userMessage, "I want to book an appointment with Doctor Ayesha on Monday at ten.");
+    assert.equal(h.recorded.turns.length, 1);
+    assert.ok(h.recorded.events.some((e) => e.type === "utterance.merged"));
+  });
+
+  test("an unfinished sentence nobody continues is answered as it is, after the hold", async () => {
+    const h = harness({ transcripts: ["I would like to know about the prices and"], replies: [streams("Our prices start at fifty.")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.calls.length, 0);
+    h.tick(1300);
+    await h.settle();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].userMessage, "I would like to know about the prices and");
+  });
+
+  test("a complete sentence never waits", async () => {
+    const h = harness({ transcripts: ["What are your opening hours?"], replies: [streams("Nine to six.")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 1);
+  });
+
+  test("a phrase the recogniser wrote twice reaches the brain (and the log) once", async () => {
+    const h = harness({ transcripts: ["Yes, book it now. Yes, book it now."], replies: [streams("Done.")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls[0].userMessage, "Yes, book it now.");
+    assert.equal(h.recorded.turns[0].callerText, "Yes, book it now.");
+    assert.ok(h.recorded.events.some((e) => e.type === "stt.deduped"));
+  });
+
+  test("no 'one moment' filler on a turn that is only collecting a customer's details", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      transcripts: ["zero three zero zero one two three four five six seven"],
+      replies: [
+        async ({ onChunk, onStage }) => {
+          onStage("retrieved", { sources: [], searchQuery: null, rewriteStatus: null, ms: 0, skipped: true, collectionState: "ask" });
+          await gate; // a slow model: nothing has been said yet
+          onChunk("Thanks. And which day suits you?");
+          return { reply: "Thanks. And which day suits you?", sources: [], collection: { state: "ask" }, timings: {} };
+        },
+      ],
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    h.tick(3000); // far past FILLER.afterMs
+    await new Promise((r) => setImmediate(r));
+    assert.ok(!h.recorded.events.some((e) => e.type === "filler.spoken"), "no filler while taking details");
+    release();
+    await h.settle();
+    assert.equal(h.recorded.turns[0].outcome, "conversational", "a phone number is not an 'unanswered' question");
+  });
+
+  test("the filler still plays on an ordinary slow turn", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      transcripts: ["Tell me about your refund policy please."],
+      replies: [
+        async ({ onChunk, onStage }) => {
+          onStage("retrieved", { sources: ["refunds.md"], searchQuery: null, rewriteStatus: null, ms: 0, collectionState: null });
+          await gate;
+          onChunk("Refunds take five days.");
+          return { reply: "Refunds take five days.", sources: ["refunds.md"], timings: {} };
+        },
+      ],
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    h.tick(3000);
+    assert.ok(h.recorded.events.some((e) => e.type === "filler.spoken"));
+    release();
+    await h.settle();
+  });
+
+  test("after an interruption only the part that was spoken is kept as the agent's reply", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      transcripts: ["What are your hours?"],
+      replies: [
+        async ({ onChunk }) => {
+          onChunk("We open at nine every weekday. ");
+          await gate;
+          onChunk("We close at six.");
+          return { reply: "We open at nine every weekday. We close at six.", sources: ["hours.md"], timings: {} };
+        },
+      ],
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    release();
+    await h.settle();
+    assert.deepEqual(h.trims, [{ tenantId: "t1", conversationId: "conv-1", spokenText: "We open at nine every weekday." }]);
+  });
+
+  test("a reply nobody interrupted is stored whole", async () => {
+    const h = harness({ transcripts: ["What are your hours?"], replies: [streams("Nine to six.")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.deepEqual(h.trims, []);
   });
 });

@@ -1,7 +1,7 @@
 import "./helpers/no-db.mjs";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { advanceCollection, newDraft, isLiveDraft, DRAFT_TTL_MS, MAX_RETRIES, summarise, collectedLines } from "@/lib/collect/engine";
+import { advanceCollection, newDraft, isLiveDraft, readsAsAnswer, DRAFT_TTL_MS, MAX_RETRIES, summarise, collectedLines } from "@/lib/collect/engine";
 import { normalizeCollectConfig, presetConfig, typeFields } from "@/lib/collect/config";
 
 // Wednesday 2026-10-21, 10:00 in Karachi.
@@ -515,5 +515,73 @@ describe("summaries and lines", () => {
     const ctx = { config: collect, timezone: "UTC", hours: null, nowMs: NOW, language: "en" };
     assert.equal(summarise(draft, fields, ctx), "Bilal · Invoice · after 5");
     assert.deepEqual(collectedLines(draft, fields, ctx).map((l) => l.id), ["name", "phone", "reason", "callback_window"]);
+  });
+});
+
+describe("readsAsAnswer — a message that is only the answer is not worth a document search", () => {
+  const check = (draft, message, collect = dental()) => readsAsAnswer({ collect, agent: agent(), draft, message, nowMs: NOW });
+  const askingNow = async (...messages) => {
+    const c = conversation();
+    for (const m of messages) await c.say(m);
+    return c;
+  };
+
+  test("no open request: every message is searched as usual", async () => {
+    assert.equal(check(null, "Ahmed Khan"), false);
+    assert.equal(check(null, "0300 1234567"), false);
+  });
+
+  test("the answer to the question just asked skips the search", async () => {
+    let c = await askingNow("book an appointment");
+    assert.equal(c.draft.asking, "name");
+    assert.equal(check(c.draft, "my name is Ahmed Khan"), true);
+    c = await askingNow("book an appointment", "Ahmed Khan");
+    assert.equal(c.draft.asking, "phone");
+    assert.equal(check(c.draft, "0300 1234567"), true);
+    assert.equal(check(c.draft, "zero three zero zero one two three four five six seven"), true);
+    c = await askingNow("book an appointment", "Ahmed Khan", "03001234567");
+    assert.equal(c.draft.asking, "service");
+    assert.equal(check(c.draft, "root canal"), true);
+  });
+
+  test("a day and time (short, plain) skips the search", async () => {
+    const c = await askingNow("book an appointment", "Ahmed Khan", "03001234567", "scaling");
+    assert.equal(c.draft.asking, "datetime");
+    assert.equal(check(c.draft, "tomorrow at five"), true);
+    assert.equal(check(c.draft, "Monday ten am"), true);
+    assert.equal(check(c.draft, "kal shaam paanch baje"), true);
+  });
+
+  test("a question while a detail is open is still searched", async () => {
+    const c = await askingNow("book an appointment", "Ahmed Khan");
+    for (const q of ["what is your address?", "do you take cards", "How much does it cost", "آپ کا پتہ کیا ہے؟", "kitna kharcha hoga"]) {
+      assert.equal(check(c.draft, q), false, q);
+    }
+  });
+
+  test("a long message, or one the rules cannot place, is still searched", async () => {
+    const c = await askingNow("book an appointment", "Ahmed Khan");
+    assert.equal(check(c.draft, "my number is 03001234567 and I also wanted to ask about the insurance plans you work with"), false);
+    assert.equal(check(c.draft, "what about the weather"), false);
+  });
+
+  test("after it is saved, 'yes', 'thanks' and a correction skip the search; a new question does not", async () => {
+    const c = conversation({ extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
+    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+    assert.equal(c.draft.stage, "saved");
+    for (const m of ["yes", "ji haan", "thanks", "that's all", "no, my phone is 0333 1112233", "cancel it"]) assert.equal(check(c.draft, m), true, m);
+    for (const m of ["what time do you close?", "do you have parking"]) assert.equal(check(c.draft, m), false, m);
+  });
+
+  test("a declined optional question skips the search", async () => {
+    const c = conversation({ collect: dentalFull(), extract: async () => ({ values: {}, date: "2026-10-22", time: "17:00" }) });
+    for (const m of ["book an appointment", "Ahmed", "03001234567", "scaling", "tomorrow at 5"]) await c.say(m);
+    assert.equal(c.draft.asking, "notes");
+    assert.equal(readsAsAnswer({ collect: dentalFull(), agent: agent(), draft: c.draft, message: "no", nowMs: NOW }), true);
+  });
+
+  test("an expired draft is no reason to skip", async () => {
+    const c = await askingNow("book an appointment", "Ahmed Khan");
+    assert.equal(readsAsAnswer({ collect: dental(), agent: agent(), draft: c.draft, message: "0300 1234567", nowMs: NOW + DRAFT_TTL_MS + 1 }), false);
   });
 });
