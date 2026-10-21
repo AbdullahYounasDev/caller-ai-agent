@@ -56,6 +56,18 @@ export function createBrowserTransport(ws) {
     close() {
       if (open()) ws.close(1000, "call ended");
     },
+    /**
+     * Pass the call to a person. A browser has no phone line, so the test console SIMULATES it:
+     * it is told who the call is going to (role and name — never the number) and the call then
+     * ends as "transferred". A phone transport implements this for real (dial the contact,
+     * bridge the two legs, say the summary to the person first) and resolves
+     * { connected: false, reason: "busy" | "no_answer" | "failed" } when nobody picks up, so the
+     * session can offer the caller a call-back instead of leaving them on a dead line.
+     */
+    async transfer(contact, { summary, reason }) {
+      json(SERVER.TRANSFER, { contact: { role: contact.role, name: contact.name }, simulated: true, reason: reason ?? null, summary: summary ?? "" });
+      return { connected: true, simulated: true };
+    },
   };
 }
 

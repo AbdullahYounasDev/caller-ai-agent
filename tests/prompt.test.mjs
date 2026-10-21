@@ -6,6 +6,7 @@ import {
   buildQueryRewriteInstruction,
   buildQueryRewriteInput,
   buildCollectionInstruction,
+  buildHandoffInstruction,
 } from "@/lib/agent/prompt";
 import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 
@@ -305,24 +306,99 @@ describe("capabilities and the TOOL_EXECUTION_AVAILABLE guard (§6.11)", () => {
   });
 });
 
-describe("escalation", () => {
-  test("object form: asks-for-human default on, unsure opt-in", () => {
-    const p = build({ escalation: { whenAgentUnsure: true } });
-    assert.match(p, /ESCALATION: If the customer asks for a human, agree immediately/);
-    assert.match(p, /offer a human rather than guessing/);
-    assert.ok(!build({ escalation: { whenUserAsks: false } }).includes("agree immediately and stop"));
+describe("escalation (human handoff)", () => {
+  const handoff = { enabled: true, contacts: [{ id: "c1", role: "Senior doctor", name: "Dr Ayesha", phone: "+923001234567" }] };
+
+  test("when handoff is on, the model is told it cannot transfer anyone itself", () => {
+    const p = build({ escalation: handoff });
+    assert.match(p, /PASSING THE CALLER TO A PERSON: you cannot transfer anyone yourself/);
+    assert.match(p, /never read out a phone number/);
+    assert.match(p, /connect me to a person/);
   });
 
-  test("contact details are never handed to the model to read out", () => {
-    const p = build({ escalation: { email: "boss@acme.example", phone: "+39 02 0000000" } });
-    assert.ok(!p.includes("boss@acme.example"));
-    assert.ok(!p.includes("+39 02 0000000"));
-    assert.match(p, /A route to a human exists/);
+  test("phone numbers are never handed to the model to read out", () => {
+    const p = build({ escalation: handoff });
+    assert.ok(!p.includes("+923001234567"));
+    assert.ok(!p.includes("0300 1234567"));
   });
 
-  test("string form passes through; absent → no section", () => {
-    assert.match(build({ escalation: "Call the owner." }), /ESCALATION: Call the owner\./);
-    assert.ok(!build({ escalation: null }).includes("ESCALATION"));
+  test("off, or on with nobody to hand to: no section at all", () => {
+    assert.ok(!build({ escalation: { enabled: false, contacts: handoff.contacts } }).includes("PASSING THE CALLER"));
+    assert.ok(!build({ escalation: { enabled: true, contacts: [] } }).includes("PASSING THE CALLER"));
+    assert.ok(!build({ escalation: null }).includes("PASSING THE CALLER"));
+  });
+});
+
+describe("buildHandoffInstruction — the model words what the system decided", () => {
+  test("rephrase: say so honestly, ask for another way, no mention of a person", () => {
+    const text = buildHandoffInstruction({ kind: "rephrase" }, { channel: "voice" });
+    assert.match(text, /could not make out/);
+    assert.match(text, /put it another way/);
+    assert.match(text, /Do not mention a person or a transfer/);
+  });
+
+  test("handoff: names who, never a number, no goodbye on a call", () => {
+    const plan = { kind: "handoff", reason: "asked", contact: { role: "Senior doctor", name: "Dr Ayesha" } };
+    const voice = buildHandoffInstruction(plan, { channel: "voice" });
+    assert.match(voice, /being connected to our Senior doctor, Dr Ayesha right now/);
+    assert.match(voice, /Do not say goodbye/);
+    assert.match(voice, /do not give a phone number/);
+    assert.doesNotMatch(buildHandoffInstruction(plan, { channel: "chat" }), /Do not say goodbye/);
+  });
+
+  test("each reason has its own opening", () => {
+    const base = { kind: "handoff", contact: { role: "Manager", name: "" } };
+    assert.match(buildHandoffInstruction({ ...base, reason: "asked" }, { channel: "chat" }), /asked for a person/);
+    assert.match(buildHandoffInstruction({ ...base, reason: "frustrated" }, { channel: "chat" }), /apologise briefly/);
+    assert.match(buildHandoffInstruction({ ...base, reason: "topic" }, { channel: "chat" }), /wants a person to handle/);
+    assert.match(buildHandoffInstruction({ ...base, reason: "not_understood" }, { channel: "chat" }), /could not understand or help/);
+    assert.match(buildHandoffInstruction({ ...base, reason: "asked" }, { channel: "chat" }), /our Manager/);
+  });
+
+  test("unavailable: never claims a transfer, offers a call-back only when the business takes them", () => {
+    const withCallback = buildHandoffInstruction({ kind: "unavailable", callback: true }, { channel: "voice" });
+    assert.match(withCallback, /closed right now/);
+    assert.match(withCallback, /call them back/);
+    assert.match(withCallback, /Do not say you are connecting them/);
+    assert.doesNotMatch(buildHandoffInstruction({ kind: "unavailable", callback: false }, { channel: "voice" }), /call them back/);
+  });
+
+  test("no plan, no section; an unknown kind adds nothing", () => {
+    assert.equal(buildHandoffInstruction(null, { channel: "chat" }), null);
+    assert.equal(buildHandoffInstruction({ kind: "nope" }, { channel: "chat" }), null);
+  });
+
+  test("the plan is placed in the system instruction", () => {
+    const p = buildSystemInstruction({
+      config: { businessName: "Acme", tone: "professional", replyLanguage: "en", escalation: { enabled: true, contacts: [{ role: "Manager", name: "Bilal", phone: "+923001234567" }] } },
+      channel: "voice",
+      handoff: { kind: "handoff", reason: "asked", contact: { role: "Manager", name: "Bilal" } },
+    });
+    assert.match(p, /PASSING THE CALLER ON: The caller asked for a person\./);
+    assert.ok(!p.includes("+923001234567"));
+  });
+});
+
+describe("how the agent helps — solution-oriented and never hurried", () => {
+  test("every prompt carries both halves of the rule, on chat and on a call", () => {
+    for (const channel of ["chat", "voice"]) {
+      const p = buildSystemInstruction({ config: { businessName: "Acme", tone: "professional", replyLanguage: "en" }, channel });
+      assert.match(p, /HOW YOU HELP: Be solution-oriented/);
+      assert.match(p, /never rush, hurry, interrupt or talk down to anyone/);
+      assert.match(p, /ask once whether there is anything else/);
+    }
+  });
+});
+
+describe("the request-start marker in the prompt is a real code", () => {
+  test("it is spelled out per request type, never as a placeholder", () => {
+    const p = buildCollectionInstruction(
+      { state: "idle", language: "en", offers: [{ type: "appointment", label: "Appointment", firstQuestion: "May I have your name?" }, { type: "callback", label: "Callback", firstQuestion: "May I have your name?" }] },
+      { channel: "voice" }
+    );
+    assert.match(p, /\[\[START appointment\]\] for Appointment, \[\[START callback\]\] for Callback/);
+    assert.doesNotMatch(p, /START code/);
+    assert.doesNotMatch(p, /\(code /);
   });
 });
 

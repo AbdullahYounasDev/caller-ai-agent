@@ -51,8 +51,6 @@ export const BARGE_IN = {
 export const LIMITS = {
   /** Hard ceiling on one call. Protects the shared model quota from a forgotten tab. */
   maxCallMs: 15 * 60_000,
-  /** No caller speech for this long ends the call. */
-  idleMs: 90_000,
   /** Calls one tenant may hold at once — local models share this machine's CPU. */
   maxConcurrentCallsPerTenant: 3,
   /** Calls the whole gateway serves at once. A CPU budget, not a business rule: each
@@ -62,6 +60,43 @@ export const LIMITS = {
   minTranscriptChars: 2,
   /** How long a signed session ticket stays usable to OPEN a socket. */
   sessionTicketTtlMs: 60_000,
+};
+
+/**
+ * SILENCE ON THE LINE. The agent never hangs up on someone without asking first:
+ *   caller silent for `checkInAfterMs`  →  the agent asks "Are you still there?"
+ *   still silent `endAfterCheckInMs` later  →  it says a polite goodbye and ends the call.
+ * Any sound from the caller at any point cancels both (it is measured from the end of whatever
+ * the agent last said, never while the agent is speaking or thinking). A caller who hangs up
+ * themselves is simply the end of the call; none of this runs.
+ *
+ * 15 s is long enough for someone looking up an address or a card number and short enough that
+ * a dropped line is noticed; the second window gives a real person time to answer a question.
+ */
+export const SILENCE = {
+  checkInAfterMs: 15_000,
+  endAfterCheckInMs: 10_000,
+};
+
+/**
+ * ENDING A CALL THAT HAS COME TO ITS CONCLUSION. When the caller says goodbye ("that's all,
+ * thank you", "bye") and the agent has said its own goodbye, the call ends after this short
+ * pause of quiet — long enough that a caller who adds "oh, one more thing" is not cut off.
+ * Only short messages count (a long sentence that happens to contain "that's all" is not a
+ * goodbye), and never in the middle of taking a request.
+ */
+export const CLOSING = {
+  afterGoodbyeMs: 2_500,
+  maxGoodbyeWords: 8,
+};
+
+/**
+ * Speech the recogniser could not turn into words: the caller DID talk (this long) and we got
+ * nothing. Short blips are noise (a cough, a click); anything longer is a person we failed to
+ * hear, and ignoring them in silence is the worst thing an agent can do.
+ */
+export const UNHEARD = {
+  minSpeechMs: 1_000,
 };
 
 export const FILLER = {

@@ -6,6 +6,10 @@ import { generateReply, generateReplyStream, generateExtraction } from "./llm";
 import { randomUUID } from "node:crypto";
 import { enabledRecordTypes } from "@/lib/collect/config";
 import { advanceCollection, draftFromMarker, readsAsAnswer } from "@/lib/collect/engine";
+import { planHandoff } from "@/lib/handoff/turn";
+import { handoffAvailable } from "@/lib/handoff/config";
+import { decideHandoff, readHandoffState, newHandoffState, summariseForPerson } from "@/lib/handoff/decide";
+import { emitEngineEvent } from "@/lib/standins/events";
 import { createExtractor } from "@/lib/collect/extract";
 import { createMarkerFilter, stripMarker } from "@/lib/collect/marker";
 import { writeDraft } from "@/lib/collect/store";
@@ -91,7 +95,7 @@ export async function respond({
     }),
     prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { locale: true, collectDraft: true },
+      select: { locale: true, collectDraft: true, handoffState: true },
     }),
   ]);
   // `desc` fetched the NEWEST N messages, newest first — reversed here so the
@@ -170,8 +174,24 @@ export async function respond({
       .catch(() => {});
   }
 
+  // 4b. Should this caller be passed to a person? Decided by rules (lib/handoff) from what the turn
+  // already produced; the state (how many times in a row the agent could not help) is saved with
+  // the turn and restored if the turn fails, like the request draft.
+  const handoffTurn = planHandoff({
+    config,
+    storedState: conversation?.handoffState ?? null,
+    message: userMessage,
+    earlierTurns,
+    sources,
+    collection: collection.plan,
+    nowMs: Date.now(),
+  });
+  const handoffWrite = handoffTurn.changed
+    ? prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: handoffTurn.state } }).catch((err) => console.error("[handoff] could not save the state:", err))
+    : null;
+
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
-  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan });
+  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan, handoff: handoffTurn.plan });
 
   // 6. Shape stored history into Gemini's `contents` format.
   let history = priorMessages.map((m) => ({
@@ -248,6 +268,10 @@ export async function respond({
       await collection.draftWrite;
       await writeDraft(conversationId, conversation?.collectDraft ?? null).catch(() => {});
     }
+    if (handoffWrite) {
+      await handoffWrite;
+      await prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: conversation?.handoffState ?? null } }).catch(() => {});
+    }
     throw err;
   }
   if (passOn) passOn(markers.end());
@@ -256,20 +280,37 @@ export async function respond({
 
   // The model recognised a request the rules missed: start the draft so the NEXT message is
   // taken as the answer to the question this reply just asked.
-  if (markedType && collection.plan?.state === "idle") {
-    const draft = draftFromMarker({ collect: config.collect, type: markedType, nowMs: Date.now(), id: randomUUID() });
+  // Only a request type the business really has counts: a model that copies a placeholder
+  // ("[[START code]]") starts nothing.
+  const startedType = markedType && enabledRecordTypes(config.collect).includes(markedType) ? markedType : null;
+  if (startedType && collection.plan?.state === "idle") {
+    const draft = draftFromMarker({ collect: config.collect, type: startedType, nowMs: Date.now(), id: randomUUID() });
     if (draft) collection.draftWrite = writeDraft(conversationId, draft).catch((err) => console.error("[collect] could not start a draft:", err));
   }
   await collection.draftWrite;
+  await handoffWrite;
 
   // 8. Persist the reply.
   await prisma.message.create({
     data: { conversationId, tenantId, channel, role: "assistant", content: assistantReply },
   });
 
+  // Tell whoever is listening for it (the backend, later): a caller was passed on, or could not be.
+  if (handoffTurn.result && handoffTurn.result.kind !== "handed_off") {
+    emitEngineEvent({
+      type: handoffTurn.result.kind === "handoff" ? "handoff.requested" : "handoff.unavailable",
+      tenantId,
+      data: { conversationId, channel, reason: handoffTurn.result.reason ?? null, contactId: handoffTurn.result.contacts?.[0]?.id ?? null },
+    });
+  }
+
   return {
     reply: assistantReply,
     locale: conversationLocale,
+    // Present when this turn passes the caller on (or cannot): { kind, reason, contacts, summary }.
+    // `contacts` carries the phone numbers, so this goes to ADAPTERS only — the voice session
+    // places the transfer from it; the chat route strips it before anything reaches a browser.
+    handoff: handoffTurn.result,
     // DEBUG METADATA, not part of the reply itself — the test chat displays
     // these alongside the bubble so a human can tell what answered and from
     // what, without digging through logs. Voice will simply ignore both:
@@ -306,7 +347,7 @@ export async function respond({
     collection: collection.plan
       ? {
           state: collection.plan.state,
-          type: collection.plan.type ?? markedType ?? null,
+          type: collection.plan.type ?? startedType ?? null,
           field: collection.plan.ask?.id ?? null,
           reference: collection.plan.reference ?? collection.plan.saved?.reference ?? null,
         }
@@ -375,4 +416,58 @@ export async function trimLastReply({ tenantId, conversationId, spokenText }) {
   const spoken = String(spokenText ?? "").trim();
   if (spoken) await prisma.message.update({ where: { id: last.id }, data: { content: spoken } });
   else await prisma.message.delete({ where: { id: last.id } });
+}
+
+/**
+ * Speech the recogniser could not read (voice/session.js onUnheard): count it toward passing
+ * the caller on, exactly like any other time the agent failed to understand. Returns what the
+ * session should do — { kind: "handoff", contacts, summary, reason } to pass the call on, or
+ * { kind: "rephrase" } to ask the caller to repeat — or null when the business has no one to
+ * hand to (the session then just asks again). No model call, no reply: only rules and state.
+ *
+ * @param {{tenantId: string, conversationId: string}} args
+ */
+export async function noteUnheard({ tenantId, conversationId }) {
+  const [config, conversation] = await Promise.all([
+    getAgentConfig(tenantId),
+    prisma.conversation.findUnique({ where: { id: conversationId }, select: { handoffState: true } }),
+  ]);
+  if (!handoffAvailable(config.escalation)) return null;
+
+  const before = readHandoffState(conversation?.handoffState);
+  const { state, action } = decideHandoff({
+    config: config.escalation,
+    agent: config,
+    state: before,
+    message: "",
+    turn: { question: false, hasSources: false, collecting: false },
+    nowMs: Date.now(),
+    callbackAvailable: enabledRecordTypes(config.collect).includes("callback"),
+    unheard: true,
+  });
+  if (JSON.stringify(state) !== JSON.stringify(before)) {
+    await prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: state } }).catch((err) => console.error("[handoff] could not save the state:", err));
+  }
+  if (!action) return null;
+  if (action.kind !== "handoff") return { kind: action.kind };
+
+  const recent = await prisma.message.findMany({ where: { conversationId, role: "user" }, orderBy: { createdAt: "desc" }, take: 3, select: { content: true } });
+  const result = {
+    kind: "handoff",
+    reason: action.reason,
+    contacts: action.contacts,
+    summary: summariseForPerson({ reason: action.reason, callerMessages: recent.map((m) => m.content).reverse() }),
+  };
+  emitEngineEvent({ type: "handoff.requested", tenantId, data: { conversationId, channel: "voice", reason: action.reason, contactId: action.contacts[0]?.id ?? null } });
+  return result;
+}
+
+/**
+ * A transfer could not be completed (nobody answered): the conversation goes on, so it must not
+ * stay marked "passed on" — the caller may still be offered a call-back.
+ *
+ * @param {{tenantId: string, conversationId: string}} args
+ */
+export async function handoffFailed({ conversationId }) {
+  await prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: newHandoffState() } }).catch((err) => console.error("[handoff] could not reset the state:", err));
 }

@@ -6,6 +6,7 @@ import {
   isReplyLanguage,
 } from "@/lib/i18n";
 import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config";
+import { emptyHandoffConfig, normalizeHandoffConfig } from "@/lib/handoff/config";
 
 /**
  * THE TENANT CONFIG SEAM.
@@ -36,7 +37,8 @@ const DEFAULTS = {
   uiLocale: "en",
   replyLanguage: DEFAULT_REPLY_LANGUAGE,
   hours: null,
-  escalation: null,
+  // Who a caller may be passed to, and when (lib/handoff/config.js). Off until the owner sets it up.
+  escalation: emptyHandoffConfig(),
   capabilities: {},
   // { [spokenLanguage]: voiceId } — empty means every language uses its default voice
   // (lib/voice/speech/voices.js voiceFor()).
@@ -105,7 +107,7 @@ export function invalidateAgentConfig(tenantId) {
  * @param {object|null} row
  */
 function normalizeConfig(row) {
-  if (!row) return { ...DEFAULTS, collect: emptyCollectConfig(), exists: false };
+  if (!row) return { ...DEFAULTS, collect: emptyCollectConfig(), escalation: emptyHandoffConfig(), exists: false };
 
   return {
     exists: true,
@@ -123,7 +125,7 @@ function normalizeConfig(row) {
       ? row.replyLanguage
       : DEFAULT_REPLY_LANGUAGE,
     hours: row.hours ?? null,
-    escalation: row.escalation ?? null,
+    escalation: normalizeHandoffConfig(row.escalation),
     capabilities: row.capabilities ?? {},
     voices: row.voices && typeof row.voices === "object" && !Array.isArray(row.voices) ? row.voices : {},
     // Normalized on every read: a stored document that has drifted from the schema degrades
@@ -162,6 +164,9 @@ export async function saveAgentConfig(tenantId, patch) {
   for (const key of writable) {
     if (patch[key] !== undefined) data[key] = patch[key];
   }
+  // Stored in its normalised form (international phone numbers, trimmed text): what is read
+  // back is exactly what the transfer will dial.
+  if (data.escalation !== undefined) data.escalation = normalizeHandoffConfig(data.escalation);
 
   const row = await prisma.agentConfig.upsert({
     where: { tenantId },

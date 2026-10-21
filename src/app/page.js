@@ -8,6 +8,7 @@ import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
 import { VoiceCallPanel } from "./voice/VoiceCallPanel";
 import { VoicePicker } from "./voice/VoicePicker";
 import { CollectPanel } from "./collect/CollectPanel";
+import { HandoffPanel } from "./handoff/HandoffPanel";
 import { fieldDef } from "@/lib/collect/config";
 import { pick } from "@/lib/collect/catalog";
 
@@ -353,6 +354,7 @@ export default function Home() {
             replyLanguage: config.replyLanguage,
             capabilities: config.capabilities,
             voices: config.voices,
+            escalation: config.escalation,
           }),
         }
       );
@@ -902,6 +904,7 @@ export default function Home() {
                     searchQuery: payload.searchQuery,
                     rewriteStatus: payload.rewriteStatus,
                     collection: payload.collection,
+                    handoff: payload.handoff,
                   },
                 ];
               }
@@ -917,6 +920,7 @@ export default function Home() {
                       searchQuery: payload.searchQuery,
                       rewriteStatus: payload.rewriteStatus,
                       collection: payload.collection,
+                      handoff: payload.handoff,
                     },
                   ];
             });
@@ -1044,6 +1048,17 @@ export default function Home() {
               labelClass={label}
               helpClass={help}
               inputClass={inputCls}
+            />
+  
+            <HandoffPanel
+              key={`${tenantId}:${config.updatedAt ?? 0}`}
+              value={config.escalation}
+              onChange={(escalation) => patchConfig({ escalation })}
+              t={t}
+              labelClass={label}
+              helpClass={help}
+              inputClass={inputCls}
+              buttonClass="rounded border border-gray-300 px-3 py-1.5 text-sm"
             />
   
             {SHOW_CAPABILITIES && (
@@ -1542,6 +1557,15 @@ export default function Home() {
                     {/* What happened to a customer's request this turn (appointment,
                         callback…): which detail the agent is asking for, or the reference
                         it was saved under. Idle (a request COULD be taken) is not news. */}
+                    {/* The conversation is being passed to a person (or could not be). */}
+                    {m.handoff && (
+                      <>
+                        {" · "}
+                        {t(`dashboard:chat.handoff.${m.handoff.kind}`, {
+                          vars: { who: [m.handoff.contact?.role, m.handoff.contact?.name].filter(Boolean).join(" — ") },
+                        })}
+                      </>
+                    )}
                     {m.collection && m.collection.state !== "idle" && (
                       <>
                         {" · "}

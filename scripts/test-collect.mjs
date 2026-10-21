@@ -233,10 +233,102 @@ ok((await prisma.message.count({ where: { conversationId: conv8, role: "assistan
 await trimLastReply({ tenantId: B, conversationId: conv8, spokenText: "x" }); // another tenant: no effect, no error
 ok(true, "trimming is scoped to the tenant");
 
+// ── passing a caller to a person ───────────────────────────────────────────
+const H = "__collect_test_handoff__";
+const CONTACTS = [
+  { role: "Representative", name: "Bilal", phone: "0300 1234567" },
+  { role: "Senior doctor", name: "Dr Ayesha", phone: "0321 5551234" },
+];
+await saveAgentConfig(H, { businessName: "Smile Care", timezone: "Asia/Karachi", hours: null, escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"] } });
+const stored = (await getAgentConfig(H, { skipCache: true })).escalation;
+ok(stored.enabled && stored.contacts[0].phone === "+923001234567" && stored.contacts[1].phone === "+923215551234", "saved phone numbers are stored in international form");
+const prismaRow = await prisma.agentConfig.findUnique({ where: { tenantId: H } });
+ok(prismaRow.escalation.contacts[0].phone === "+923001234567", "…in the database too, so what is dialled is what was stored");
+
+events.length = 0;
+const hc1 = await newConversation(H);
+stub.state.reply = "Of course, I am connecting you to our Senior doctor, Dr Ayesha.";
+r = await say(H, hc1, "I want to speak to the senior doctor please");
+ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "asked", "asking for a person passes the call on");
+ok(r.result.handoff.contacts[0].role === "Senior doctor" && r.result.handoff.contacts[1].role === "Representative", "the contact the caller named is tried first, the others follow");
+ok(r.result.handoff.contacts[0].phone === "+923215551234" && /asked to speak to a person/.test(r.result.handoff.summary), "the transport gets the number and a summary for the person");
+ok(/PASSING THE CALLER ON/.test(r.instruction) && /our Senior doctor, Dr Ayesha/.test(r.instruction), "the model is told to announce who");
+ok(!r.instruction.includes("3215551234") && !r.instruction.includes("+92321"), "…and never sees the phone number");
+ok(events.some((e) => e.type === "handoff.requested" && e.data.reason === "asked" && e.data.contactId && !JSON.stringify(e).includes("3215551234")), "a handoff.requested event carries ids, never the number");
+ok((await prisma.conversation.findUnique({ where: { id: hc1 } })).handoffState?.status === "handed_off", "the conversation is remembered as passed on");
+r = await say(H, hc1, "hello? can I speak to a person");
+ok(r.result.handoff?.kind === "handed_off", "a second request is not forwarded twice");
+
+const hc2 = await newConversation(H);
+stub.state.reply = "I'm sorry, I did not catch that. Could you say it another way?";
+r = await say(H, hc2, "xyzzy plugh quux frobnicate");
+ok(r.result.handoff?.kind === "rephrase" && /UNDERSTANDING/.test(r.instruction) && /put it another way/.test(r.instruction), "first time it cannot help: it says so and asks to rephrase");
+ok((await prisma.conversation.findUnique({ where: { id: hc2 } })).handoffState.misses === 1, "the miss is counted");
+r = await say(H, hc2, "wibble wobble flump zork");
+ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "not_understood", "the second time in a row it passes the call on");
+ok(r.result.handoff.contacts[0].id && /could not understand or answer/.test(r.result.handoff.summary), "…with a summary saying why");
+
+const hc3 = await newConversation(H);
+stub.state.reply = "Hello!";
+await say(H, hc3, "xyzzy plugh quux frobnicate");
+r = await say(H, hc3, "hello there");
+ok(r.result.handoff === null, "a greeting in between resets the count: misses must be in a row");
+ok((await prisma.conversation.findUnique({ where: { id: hc3 } })).handoffState.misses === 0, "…and the stored count is back to zero");
+
+const hc4 = await newConversation(H);
+r = await say(H, hc4, "I have a complaint about my bill");
+ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "topic", "an owner's always-forward topic passes the call on");
+
+// unheard speech (the voice session reports it)
+const { noteUnheard, handoffFailed } = await import("@/lib/agent/respond");
+const hc5 = await newConversation(H, "voice");
+let u = await noteUnheard({ tenantId: H, conversationId: hc5 });
+ok(u?.kind === "rephrase", "speech that could not be read: first time, ask to repeat");
+u = await noteUnheard({ tenantId: H, conversationId: hc5 });
+ok(u?.kind === "handoff" && u.contacts.length === 2 && /could not understand/.test(u.summary), "second time in a row: pass the call on");
+await handoffFailed({ tenantId: H, conversationId: hc5 });
+ok((await prisma.conversation.findUnique({ where: { id: hc5 } })).handoffState.status === null, "a transfer nobody answered leaves the conversation open for a call-back");
+ok((await noteUnheard({ tenantId: A, conversationId: hc5 })) === null, "a business with no one to hand to gets null (the session just asks again)");
+
+// closed: no transfer is promised
+await saveAgentConfig(H, { hours: { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] } });
+const hc6 = await newConversation(H);
+stub.state.reply = "I'm sorry, nobody is available right now.";
+r = await say(H, hc6, "I want to speak to a person");
+ok(r.result.handoff?.kind === "unavailable" && /NOBODY IS AVAILABLE/.test(r.instruction) && !/connected to/.test(r.instruction), "outside opening hours no transfer is promised");
+ok(!("contacts" in r.result.handoff), "…and no numbers are handed to the transport");
+await saveAgentConfig(H, { hours: null, escalation: { enabled: true, contacts: CONTACTS, outsideHours: "forward" } });
+await saveAgentConfig(H, { hours: { mon: [], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] } });
+const hc7 = await newConversation(H);
+r = await say(H, hc7, "I want to speak to a person");
+ok(r.result.handoff?.kind === "handoff", "'forward anyway' forwards even when closed");
+
+// a generation that fails leaves the handoff state as it was
+const hc8 = await newConversation(H);
+await saveAgentConfig(H, { hours: null });
+stub.state.reply = () => { throw new Error("stub: model down"); };
+let failed = false;
+try { await say(H, hc8, "I want to speak to a person"); } catch { failed = true; }
+ok(failed && (await prisma.conversation.findUnique({ where: { id: hc8 } })).handoffState === null, "a failed reply does not leave the call marked as passed on");
+stub.state.reply = (n) => `Reply ${n}.`;
+
+// the start marker mid-reply never reaches the customer (the real call: "[[START code]]")
+const hc9 = await newConversation(A);
+stub.state.reply = "We can help with that pain right away. There is an extra fee of one thousand rupees. [[START code]]May I have your name, please?";
+r = await say(A, hc9, "I have a severe toothache");
+ok(!/\[\[|START/.test(r.streamed) && !/\[\[|START/.test(r.result.reply), "a marker in the middle of a reply is removed from the stream and the reply");
+ok(r.result.reply.endsWith("May I have your name, please?") && /fee of one thousand rupees\. May/.test(r.result.reply), "…leaving ordinary text");
+ok((await draftOf(hc9)) === null, "…and the made-up code 'code' starts no request");
+const hc10 = await newConversation(A);
+stub.state.reply = "Sure. [[START appointment]]May I have your name?";
+r = await say(A, hc10, "doctor sahib se milwa dein");
+ok(!/\[\[/.test(r.streamed) && (await draftOf(hc10))?.type === "appointment", "a real code mid-reply still starts the request, and is still never shown");
+stub.state.reply = (n) => `Reply ${n}.`;
+
 await wipe();
-await prisma.agentConfig.deleteMany({ where: { tenantId: "__collect_test_c__" } });
-await prisma.message.deleteMany({ where: { tenantId: "__collect_test_c__" } });
-await prisma.conversation.deleteMany({ where: { tenantId: "__collect_test_c__" } });
+await prisma.agentConfig.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
+await prisma.message.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
+await prisma.conversation.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
 await prisma.$disconnect();
 console.log(fails ? `\n${fails} FAILED` : "\nall passed");
 process.exit(fails ? 1 : 0);

@@ -69,5 +69,17 @@
   "collect.customTooMany": "آپ زیادہ سے زیادہ {max} اپنی تفصیلات شامل کر سکتے ہیں۔",
   "records.notFound": "یہ درخواست نہیں ملی۔",
   "records.invalidStatus": "یہ ایسی حالت نہیں جو درخواست کی ہو سکے۔",
-  "records.invalidTransition": "درخواست اپنی موجودہ حالت سے اس حالت میں نہیں جا سکتی۔"
+  "records.invalidTransition": "درخواست اپنی موجودہ حالت سے اس حالت میں نہیں جا سکتی۔",
+  "handoff.invalid": "فارورڈنگ کی ترتیبات ایک آبجیکٹ ہونی چاہئیں۔",
+  "handoff.contactsInvalid": "افراد کی فہرست ایک لسٹ ہونی چاہیے۔",
+  "handoff.topicsInvalid": "موضوعات ایک لسٹ ہونے چاہئیں۔",
+  "handoff.contactIncomplete": "فرد {index}: کردار یا نام درج کریں۔",
+  "handoff.invalidPhone": "فرد {index}: یہ درست فون نمبر نہیں ہے (مثلاً 0300 1234567)۔",
+  "handoff.duplicatePhone": "فرد {index}: یہ نمبر فہرست میں پہلے سے موجود ہے۔",
+  "handoff.tooManyContacts": "آپ زیادہ سے زیادہ {max} افراد شامل کر سکتے ہیں۔",
+  "handoff.missesRange": "{min} سے {max} تک کوئی عدد منتخب کریں۔",
+  "handoff.outsideHoursInvalid": "منتخب کریں کہ کاروباری اوقات کے بعد کیا ہو۔",
+  "handoff.topicTooLong": "موضوع {max} حروف یا اس سے کم ہونا چاہیے۔",
+  "handoff.tooManyTopics": "آپ زیادہ سے زیادہ {max} موضوعات شامل کر سکتے ہیں۔",
+  "handoff.enabledNeedsContact": "کال فارورڈنگ آن کرنے سے پہلے کم از کم ایک فرد کو فون نمبر کے ساتھ شامل کریں۔"
 }

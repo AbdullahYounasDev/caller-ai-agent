@@ -154,6 +154,7 @@ scripts/
 src/app/
   page.js                      # THE TEST CONSOLE — tabs: agent · knowledge · collected · call · chat
   collect/CollectPanel.js      # the "what the agent collects" checklist + the list of requests taken (§6.25)
+  handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
@@ -211,6 +212,8 @@ src/lib/
     config.js                  # per-tenant collect config: normalise/validate, preset, describeCatalog
     engine.js                  # ★ advanceCollection — the deterministic state machine that owns a request
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
+  handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
+    config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
   standins/                    # fake backend (customers, records, events) behind fixed interfaces — what Haseeb replaces (§6.25)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
   tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18)
@@ -1729,7 +1732,7 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
      dropped if nothing was spoken), so the next turn never builds on words the caller did not hear.
   **Not done:** echo of the agent's own voice through speakers (4–13 "interruptions" per call without
   headphones) needs an echo guard tested on real audio.
-- **Limits** (`config.js`): 15 min per call, 90 s of caller silence ends it, 3 concurrent calls per
+- **Limits** (`config.js`): 15 min per call, 3 concurrent calls per
   tenant, 6 per gateway (a CPU budget for this machine, not a business rule), 20 s max utterance.
 - **Wire protocol** (`protocol.js`, imported by both sides): binary frames are PCM16 audio, text
   frames are `{type, …}` JSON. **A payload must never carry its own `type`** — a timeline event is
@@ -1776,9 +1779,9 @@ LLM (Groq), Kokoro at 8 threads (now the default), the fast voice tier for laten
 the 0.5 s VAD window.
 
 **Not built:** Twilio transport (μ-law 8 kHz ⇄ PCM 16 kHz at the edge, Media Streams `mark` events
-for playback, webhook signature → dialled number → tenant in `registry.js`); call recording
-(`recording_url` stays null); auto-hang-up after a goodbye; merging an utterance that was cut by
-a mid-sentence pause with the one after it; a per-tenant greeting; a local Urdu recogniser.
+for playback, webhook signature → dialled number → tenant in `registry.js`, and a REAL
+`transport.transfer`, §6.26); call recording (`recording_url` stays null); a per-tenant greeting;
+a local Urdu recogniser.
 
 ### 6.25 Taking a request — appointments and call-backs (the collect domain)
 
@@ -1843,7 +1846,7 @@ taken. Backend responsibilities that are stood in for are in
 - **Stand-ins, not a second backend.** `lib/standins/*` (customers, records, events) sit behind
   fixed interfaces; nothing else touches those tables. The AI never reads them back (§6.11).
 
-**Verified:** `npm test` (435 unit tests, incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests, incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -1853,6 +1856,68 @@ against a real provider (it runs in parallel with retrieval, but nobody has time
 **Not built:** WhatsApp/SMS confirmation to the customer's phone; slot availability (opening
 hours only); modifying or cancelling an existing booking; tool execution of any other kind
 (`TOOL_EXECUTION_AVAILABLE` stays false — collecting is not executing).
+
+### 6.26 Passing a caller to a person, ending calls well, and the marker that leaked
+
+**Scenario one — "forward the call to a representative / senior / lead".** The owner switches
+*Call forwarding* on (Agent tab → `HandoffPanel`), lists people in the order they should be tried
+(role, name, phone) and sets how patient the agent is. When the agent cannot help, or the caller
+asks for a person, it **tells the caller first**, then the call is passed on. Everything is the
+engine's, behind three seams, so Twilio is a transport swap:
+
+- **Settings** (`handoff/config.js`) live in the existing `agent_configs.escalation` JSON (no new
+  column; the backend later stores one more document next to the others):
+  `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours:
+  "callback"|"forward" }`. Phones are stored in international form; ≤5 contacts; "enabled" with nobody to
+  forward to is read as OFF and refused on save (`validation:handoff.*`, en + ur). **Phone numbers are never put in a
+  prompt and never sent to a browser** (the chat route strips them; events carry ids only).
+- **The decision is code, not the model** (`handoff/decide.js decideHandoff`, pure, one call per message from
+  `respond()` via `handoff/turn.js planHandoff`; the model only WORDS it, `prompt.js buildHandoffInstruction`):
+  1. the caller asks for a person (`asksForHuman`, en/ur/Roman Urdu) → hand off now (`asked`), to the contact whose
+     role/name the caller mentioned, else the owner's first; 2. an owner topic word ("complaint") → hand off
+     (`topic`); 3. **not understanding, counted in a row**: first time → the agent says so honestly and asks the
+     caller to rephrase (`rephrase`); the Nth time (N = `afterMisses`) → hand off (`not_understood`, or
+     `frustrated` when the caller said they are not understood / repeated themselves). A good answer, a greeting, a
+     request being taken or a question the business PROFILE answers (hours, who are you) resets the count.
+  4. closed hours + `outsideHours: callback` → NO transfer is promised (`unavailable`): the agent offers a call-back.
+  "Not understanding" means: speech the recogniser could not read (voice only, below), a real question with nothing in
+  the documents, the caller saying so, or saying the same thing again — all rule-based, zero model calls.
+  State is `conversations.handoff_state` (migration `20261021120000_conversation_handoff_state`, hand-written, HNSW line
+  removed), restored if the reply fails; a conversation already passed on is not forwarded twice (chat has no hang-up).
+- **The transport places the transfer** — the seam Twilio fills: `transport.transfer(contact, { summary, reason,
+  callId }) → Promise<{ connected: boolean, reason?: "busy"|"no_answer"|"failed" }>`. `CallSession.performHandoff`
+  waits for the announcement to finish playing, tries the contacts in order, and on `connected` ends the call as
+  `transferred` (`END_REASONS.TRANSFERRED`); if nobody answers, or the transport has no `transfer`, it says a fixed
+  line (`voiceLine("handoff_failed")`), clears the state and **the call carries on** so a call-back can be taken. The
+  browser transport only SIMULATES (`SERVER.TRANSFER` → the console shows who, no number). `summary` is a few plain
+  English lines for the person who picks up (reason, last things said, details already collected) — a phone
+  transport can say it to them before bridging. Events: `handoff.requested` / `handoff.unavailable` (engine events,
+  ids only) and, on the call timeline, `handoff.started/attempt/failed/completed/unavailable`.
+- **Speech nobody could read** (`CallSession.onUnheard`, `UNHEARD.minSpeechMs` 1 s): a caller who really spoke and got
+  an empty transcript used to be met with silence. Now: "Sorry, I didn't catch that" (fixed line, Urdu without gendered
+  forms or Latin names), and a second time in a row `brain.noteUnheard` → hand off if the business set it up.
+
+**Ending a call well** (`voice/config.js SILENCE`, `CLOSING`; tests in voice-session):
+- **Never hangs up on silence without asking.** 15 s after the AGENT stopped talking (not from the caller's last word,
+  never while the agent is thinking or speaking) → "Are you still there?"; 10 s more → a polite goodbye line, then the call
+  ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end.
+- **A finished conversation ends itself.** Caller says goodbye (short message ≤ 8 words, never mid-request) → the agent
+  answers → 2.5 s of quiet → the call ends (`agent_goodbye`); speech in that quiet keeps it open.
+- **Solution-oriented but never hurried** (`prompt.js HELPING_STYLE`, in every prompt): work toward an answer, a request
+  noted or a person connected; one question at a time; never rush, interrupt or talk down; once the need is met, ask once
+  whether there is anything else, then close warmly.
+
+**The marker that leaked** (`collect/marker.js`): a real call read aloud "…the treatment cost. [[START code]]May I have your
+name?" — the model put the start marker MID-reply and copied the placeholder "code" from the instruction. The filter now
+removes a marker ANYWHERE in the reply, whatever the stream chunking (a lone "[" is held only until it is clear it is not a
+marker), tolerates `[START x]`, and the prompt spells a real code per request type (`[[START appointment]]`), never a
+placeholder. An unknown code starts nothing (`respond()` checks it against the request types the business has).
+
+**Verified:** `npm test` (539), `npm run test:collect` (handoff end to end on the real DB: asked, rephrase→handoff, topics,
+reset in a row, unheard, closed hours, failed reply restores state, the mid-reply marker). **Not verified:** a real phone
+transfer (Twilio does not exist yet); the real model's wording of the handoff announcement in Urdu; how often the
+"nothing in the documents" signal fires on real BUSINESS documents (a business with thin knowledge will hand off more —
+`afterMisses` is the owner's dial).
 
 ---
 
@@ -2151,7 +2216,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 435 unit tests: collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 539 unit tests: handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 #   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)

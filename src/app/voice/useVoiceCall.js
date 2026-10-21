@@ -32,6 +32,8 @@ export function useVoiceCall({ tenantId, uiLocale }) {
   const [events, setEvents] = useState([]);
   const [error, setError] = useState(null);
   const [notice, setNotice] = useState(null);
+  // Who the call is being passed to, once the agent decides (simulated in this console).
+  const [transfer, setTransfer] = useState(null);
   const [endReason, setEndReason] = useState(null);
   const [muted, setMuted] = useState(false);
   const [startedAt, setStartedAt] = useState(null);
@@ -85,6 +87,7 @@ export function useVoiceCall({ tenantId, uiLocale }) {
     setError(null);
     setNotice(null);
     setEndReason(null);
+    setTransfer(null);
     setCallId(null);
     setStartedAt(null);
     const call = {};
@@ -199,6 +202,9 @@ export function useVoiceCall({ tenantId, uiLocale }) {
         case SERVER.EVENT:
           setEvents((e) => [...e, message.event]);
           break;
+        case SERVER.TRANSFER:
+          setTransfer({ contact: message.contact, simulated: Boolean(message.simulated) });
+          break;
         case SERVER.ENDED:
           setEndReason(message.reason);
           break;
@@ -247,7 +253,7 @@ export function useVoiceCall({ tenantId, uiLocale }) {
     setMuted(mutedRef.current);
   }, []);
 
-  return { status, callState, callId, transcript, events, error, notice, endReason, muted, startedAt, levels, start, hangup, toggleMute };
+  return { status, callState, callId, transcript, events, error, notice, transfer, endReason, muted, startedAt, levels, start, hangup, toggleMute };
 }
 
 function send(call, message) {

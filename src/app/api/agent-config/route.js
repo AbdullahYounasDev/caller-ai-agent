@@ -5,6 +5,7 @@ import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
+import { validateHandoffConfig } from "@/lib/handoff/config";
 import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 
 /**
@@ -172,6 +173,15 @@ function validatePatch(patch, tr) {
           ? tr("validation:voices.invalid")
           : tr(`validation:voices.${kind === "language" ? "unknownLanguage" : "unknownVoice"}`, { vars: { value: detail } })
       );
+    }
+  }
+
+  // Who a caller may be passed to (lib/handoff/config.js). Every problem is reported, in the
+  // reader's language, before anything is saved: a half-valid list of people would promise
+  // callers a transfer that can never connect.
+  if (patch.escalation !== undefined) {
+    for (const problem of validateHandoffConfig(patch.escalation).problems) {
+      errors.push(tr(`validation:handoff.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
     }
   }
 

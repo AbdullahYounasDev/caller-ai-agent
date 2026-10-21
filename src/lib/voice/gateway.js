@@ -1,7 +1,7 @@
 import http from "node:http";
 import { WebSocketServer } from "ws";
 import { prisma } from "@/lib/db";
-import { respond, trimLastReply } from "@/lib/agent/respond";
+import { respond, trimLastReply, noteUnheard, handoffFailed } from "@/lib/agent/respond";
 import { describeChatProvider } from "@/lib/agent/llm";
 import { getAgentConfig, invalidateAgentConfig } from "@/lib/tenant/config";
 import { assertTenantServiceable } from "@/lib/tenant/registry";
@@ -169,7 +169,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
         tts: speech.tts,
         createVad: () => new VoiceActivity({ sherpa: speech.engine.sherpa, config: speech.engine.vadConfig }),
         engineInfo: speech.engineInfo,
-        brain: { respond, trimLastReply, getAgentConfig, invalidateAgentConfig },
+        brain: { respond, trimLastReply, noteUnheard, handoffFailed, getAgentConfig, invalidateAgentConfig },
         openRecorder: (args) => CallRecorder.open(args),
       });
       sessions.add(session);

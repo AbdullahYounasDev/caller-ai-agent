@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { CallSession } from "@/lib/voice/session";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "@/lib/voice/protocol";
-import { BARGE_IN } from "@/lib/voice/config";
+import { BARGE_IN, CLOSING, SILENCE } from "@/lib/voice/config";
 
 /**
  * The whole call flow with every dependency faked: no models, no database, no network,
@@ -11,7 +11,7 @@ import { BARGE_IN } from "@/lib/voice/config";
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {} } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -26,8 +26,16 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
     },
   };
 
-  const sent = { audio: [], notify: [], clears: 0, closed: null };
+  const sent = { audio: [], notify: [], clears: 0, closed: null, transfers: [] };
   const transport = {
+    ...(transfer
+      ? {
+          transfer: async (contact, context) => {
+            sent.transfers.push({ contact, context });
+            return transfer(contact, context);
+          },
+        }
+      : {}),
     audio: (samples, sampleRate) => sent.audio.push({ samples, sampleRate }),
     clear: () => sent.clears++,
     notify: (type, payload) => sent.notify.push({ type, ...payload }),
@@ -78,7 +86,10 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
 
   const calls = [];
   const trims = [];
+  const handoffFailures = [];
   const brain = {
+    noteUnheard: noteUnheard ?? (async () => null),
+    handoffFailed: async (args) => handoffFailures.push(args),
     trimLastReply: async (args) => trims.push(args),
     invalidateAgentConfig: () => {},
     getAgentConfig: async () => ({ businessName: "Nyron", replyLanguage: "en", ...config }),
@@ -112,6 +123,7 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
     recorded,
     calls,
     trims,
+    handoffFailures,
     vad,
     advance: (ms) => (now += ms),
     /** Move the clock on and run every timer that has come due (and was not cleared). */
@@ -121,6 +133,19 @@ function harness({ replies = [], transcripts = [], config = {} } = {}) {
         timer.cleared = true;
         timer.fn();
       }
+    },
+    /** Let the call run for `ms` of fake time, in small steps, letting promises settle between
+     *  them — timers that a step creates are seen by the next one. */
+    pump: async (ms, steps = 60) => {
+      for (let i = 0; i < steps; i++) {
+        await new Promise((r) => setImmediate(r));
+        now += ms / steps;
+        for (const timer of timers.filter((t) => !t.cleared && t.at <= now)) {
+          timer.cleared = true;
+          timer.fn();
+        }
+      }
+      await new Promise((r) => setImmediate(r));
     },
     /** Feed the VAD's verdict for the next audio frame. */
     hear: (...events) => {
@@ -255,12 +280,14 @@ describe("CallSession", () => {
   test("noise the VAD let through is not a turn: no brain call, nothing recorded", async () => {
     const h = harness({ transcripts: ["", "."] });
     await h.session.start();
-    h.hear(utterance);
-    h.hear(utterance);
+    const blip = { type: "utterance", samples: new Float32Array(4000), durationMs: 300 };
+    h.hear(blip);
+    h.hear(blip);
     await h.settle();
     assert.equal(h.calls.length, 0);
     assert.equal(h.recorded.turns.length, 0);
     assert.equal(h.recorded.events.filter((e) => e.type === "stt.empty").length, 2);
+    assert.ok(!h.recorded.events.some((e) => e.type === "speech.unheard"), "a blip is not a person we failed to hear");
   });
 
   test("a failed turn: the caller hears a short apology, the call goes on, the turn is logged as failed", async () => {
@@ -518,5 +545,240 @@ describe("CallSession", () => {
     h.hear({ type: "start" }, utterance);
     await h.settle();
     assert.deepEqual(h.trims, []);
+  });
+
+  // ── passing the call to a person ──────────────────────────────────────────
+
+  const CONTACTS = [
+    { id: "c1", role: "Representative", name: "Bilal", phone: "+923001234567" },
+    { id: "c2", role: "Senior doctor", name: "Dr Ayesha", phone: "+923215551234" },
+  ];
+  const handingOff = (extra = {}) => async ({ onChunk }) => {
+    onChunk("Of course. I'm connecting you to our representative, Bilal.");
+    return { reply: "Of course. I'm connecting you to our representative, Bilal.", sources: [], handoff: { kind: "handoff", reason: "asked", contacts: CONTACTS, summary: "The caller asked to speak to a person." }, ...extra };
+  };
+
+  test("the reply says who the caller is being connected to, THEN the transfer is placed, then the call ends as 'transferred'", async () => {
+    const h = harness({ transcripts: ["I want to speak to a person."], replies: [handingOff()], transfer: async () => ({ connected: true, simulated: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(300);
+    assert.equal(h.sent.transfers.length, 0, "not before the announcement has played");
+    await h.pump(5000); // the announcement finishes playing
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 1);
+    assert.equal(h.sent.transfers[0].contact.id, "c1", "the owner's first contact is tried first");
+    assert.equal(h.sent.transfers[0].context.summary, "The caller asked to speak to a person.");
+    assert.equal(h.sent.transfers[0].context.reason, "asked");
+    assert.equal(h.spoken.filter((x) => !x.cache).map((x) => x.text).join(" "), "Of course. I'm connecting you to our representative, Bilal.");
+    assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
+    for (const type of ["handoff.started", "handoff.attempt", "handoff.completed"]) assert.ok(h.recorded.events.some((e) => e.type === type), type);
+    assert.equal(h.recorded.closed.reason, END_REASONS.TRANSFERRED);
+  });
+
+  test("nobody picks up the first contact: the next one is tried; the caller is never left on a dead line", async () => {
+    const answers = { c1: { connected: false, reason: "no_answer" }, c2: { connected: true } };
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], transfer: async (c) => answers[c.id] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.deepEqual(h.sent.transfers.map((t) => t.contact.id), ["c1", "c2"]);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed" && e.data.contactId === "c1" && e.data.reason === "no_answer"));
+    assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
+  });
+
+  test("nobody at all can take it: the agent says so, the call carries on, the conversation is not left 'passed on'", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], transfer: async () => ({ connected: false, reason: "busy" }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 2);
+    assert.equal(h.sent.closed, null, "the call is NOT ended");
+    assert.deepEqual(h.handoffFailures, [{ tenantId: "t1", conversationId: "conv-1" }]);
+    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry, nobody is available")), "the caller hears why");
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.unavailable"));
+  });
+
+  test("a transport that cannot transfer (no phone line) is the same as nobody answering", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.unavailable" && e.data.reason === "unsupported"));
+    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry, nobody is available")));
+  });
+
+  test("a transfer that throws is a failed attempt, never a crashed call", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], transfer: async () => { throw new Error("carrier down"); } });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed" && e.data.reason === "failed"));
+  });
+
+  test("a reply that does NOT carry a handoff never places a transfer", async () => {
+    const h = harness({ transcripts: ["What are your hours?"], replies: [streams("Nine to six.")], transfer: async () => ({ connected: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 0);
+  });
+
+  test("speech that could not be read: first time 'say it again', a person asked for on the second", async () => {
+    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "The assistant could not understand or answer the caller." }];
+    const h = harness({ transcripts: ["", ""], noteUnheard: async () => decisions.shift(), transfer: async () => ({ connected: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.ok(h.spoken.some((x) => x.text === "Sorry, I didn't catch that. Could you say it again, please?" || x.text === "I'm sorry, the line wasn't clear. Could you repeat that for me?"));
+    assert.equal(h.sent.closed, null);
+    assert.equal(h.recorded.events.filter((e) => e.type === "speech.unheard").length, 1);
+
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry I couldn't understand. Let me connect you")));
+    assert.equal(h.sent.transfers[0].context.reason, "not_understood");
+    assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
+  });
+
+  test("with no one to hand to, unheard speech is still met with a polite 'say it again' — never silence", async () => {
+    const h = harness({ transcripts: [""], noteUnheard: async () => null });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.ok(h.spoken.some((x) => /didn't catch that|wasn't clear/.test(x.text)));
+  });
+
+  test("unheard speech in Urdu is answered in Urdu, with no Latin names and no gendered forms", async () => {
+    const h = harness({ config: { replyLanguage: "ur" }, transcripts: [""], noteUnheard: async () => null });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    const line = h.spoken.filter((x) => x.language === "ur").at(-1);
+    assert.match(line.text, /[\u0600-\u06FF]/);
+    assert.doesNotMatch(line.text, /[A-Za-z]/);
+  });
+
+  // ── silence on the line ──────────────────────────────────────────────────
+
+  test("quiet for 15 s: the agent asks 'are you still there?' — it does not hang up", async () => {
+    const h = harness();
+    await h.session.start();
+    await h.pump(SILENCE.checkInAfterMs + 8000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+    assert.ok(h.spoken.some((x) => x.text === "Are you still there?" || x.text === "Hello, are you still with me?"));
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("the silence is measured from when the AGENT stopped talking, not from when the call began", async () => {
+    const h = harness();
+    await h.session.start();
+    // The greeting plays for about 2 s: the check-in comes 15 s after it ends, not 15 s after pick-up.
+    await h.pump(SILENCE.checkInAfterMs - 1000);
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.check_in"));
+    await h.pump(5000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+  });
+
+  test("still quiet after the check-in: a polite goodbye is spoken, then the call ends as idle_timeout", async () => {
+    const h = harness();
+    await h.session.start();
+    await h.pump(SILENCE.checkInAfterMs + 5000);
+    assert.equal(h.sent.closed, null, "not yet: the caller has the whole second window to answer");
+    await h.pump(SILENCE.endAfterCheckInMs + 8000);
+    assert.ok(h.spoken.some((x) => x.text.startsWith("I can't hear you, so I'll end the call now")));
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.ending"));
+    assert.equal(h.sent.closed, END_REASONS.IDLE);
+  });
+
+  test("the caller answering the check-in carries on: nothing ends", async () => {
+    const h = harness({ transcripts: ["Yes, I'm here."], replies: [streams("Great, how can I help?")] });
+    await h.session.start();
+    await h.pump(SILENCE.checkInAfterMs + 4000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(SILENCE.endAfterCheckInMs + 2000);
+    assert.equal(h.sent.closed, null);
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.ending"));
+  });
+
+  test("the silence clock never runs while the agent is still talking", async () => {
+    const h = harness({ transcripts: ["Tell me everything."], replies: [streams("A very long answer. ".repeat(30))] });
+    await h.session.start();
+    await h.pump(2500);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(SILENCE.checkInAfterMs - 3000);
+    // 12 s after the caller stopped the agent is mid-answer (30 sentences, a second each): no check-in.
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.check_in"));
+  });
+
+  // ── ending a conversation that has reached its conclusion ─────────────────
+
+  test("the caller says goodbye, the agent answers: after a short quiet the call ends by itself", async () => {
+    const h = harness({ transcripts: ["No, that's all, thank you. Bye."], replies: [streams("You're welcome. Goodbye!")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.sent.closed, null, "not at once: the caller might add something");
+    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+    assert.ok(h.recorded.events.some((e) => e.type === "call.closing"));
+  });
+
+  test("…but anything the caller says in that quiet keeps the call open", async () => {
+    const h = harness({ transcripts: ["That's all, thanks, bye.", "Oh wait, one more thing."], replies: [streams("Goodbye!"), streams("Of course, go ahead.")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(1000);
+    h.hear({ type: "start" }); // the caller starts to speak again
+    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    assert.equal(h.sent.closed, null);
+    h.hear(utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+  });
+
+  test("a long sentence that happens to contain 'that's all' is not a goodbye", async () => {
+    const h = harness({ transcripts: ["Well that's all very interesting but I still need to know about the price of the implants"], replies: [streams("Implants start at fifty thousand.")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("a goodbye in the middle of taking a request does not end the call", async () => {
+    const h = harness({ transcripts: ["bye"], replies: [async ({ onChunk }) => {
+      onChunk("Before you go, may I have your phone number?");
+      return { reply: "Before you go, may I have your phone number?", sources: [], collection: { state: "ask", field: "phone" } };
+    }] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    assert.equal(h.sent.closed, null);
   });
 });
