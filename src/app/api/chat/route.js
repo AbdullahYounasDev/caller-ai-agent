@@ -161,7 +161,7 @@ export async function POST(request) {
         // then fails — otherwise a failed first message orphans it.
         send(controller, "session", { conversationId });
 
-        const { reply, model, sources, searchQuery, rewriteStatus, collection } = await respond({
+        const { reply, model, sources, searchQuery, rewriteStatus, collection, handoff } = await respond({
           tenantId,
           conversationId,
           channel: "chat",
@@ -180,7 +180,12 @@ export async function POST(request) {
         // which of the tenant's documents (if any) it was grounded in. Never
         // part of `reply` itself, so it stays out of anything that might one
         // day read the reply aloud.
-        if (!closed) send(controller, "done", { reply, model, sources, searchQuery, rewriteStatus, collection });
+        // The phone numbers behind a handoff never leave the server: a browser only learns that the
+        // conversation is being passed on, and to whom by role and name.
+        const handoffForClient = handoff
+          ? { kind: handoff.kind, reason: handoff.reason ?? null, contact: handoff.contacts?.[0] ? { role: handoff.contacts[0].role, name: handoff.contacts[0].name } : null }
+          : null;
+        if (!closed) send(controller, "done", { reply, model, sources, searchQuery, rewriteStatus, collection, handoff: handoffForClient });
       } catch (err) {
         console.error("POST /api/chat failed:", err);
         if (!closed) {

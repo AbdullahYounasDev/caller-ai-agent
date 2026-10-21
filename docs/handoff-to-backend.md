@@ -118,7 +118,7 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `uiLocale` | `en \| ur` | dashboard language (Urdu renders right-to-left) |
   | `replyLanguage` | `en \| ur` | what the agent *says*; it always *understands* both |
   | `hours` | `{ "mon": [["09:00","17:00"]], … "sun": [] }` | opening hours in `timezone` |
-  | `escalation` | `{ email, phone, whenUserAsks, whenAgentUnsure }` or null | hand-off to a human |
+  | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward" }` | **call forwarding** to a person (CLAUDE.md §6.26). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
   | `capabilities` | `{ "<capabilityId>": { enabled, channels, params } }` | catalogue: `GET /api/agent-config/catalog` |
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
   | `collect`, `collectVersion` | see B3 | |
@@ -290,6 +290,8 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   | --- | --- |
   | `record.submitted` | `{ recordId, recordType, reference, conversationId }` |
   | `record.updated` | `{ recordId, status, detailsChanged? }` |
+  | `handoff.requested` | `{ conversationId, channel, reason: asked\|topic\|not_understood\|frustrated, contactId }` — a caller was passed to a person |
+  | `handoff.unavailable` | `{ conversationId, channel, reason, contactId: null }` — a person was needed but the business was closed |
   Event data carries **ids and references, not the customer's details** — read them from the record.
   *Open question:* do you want the details inside the event instead?
 - **Backend provides:** `POST /internal/events` that verifies an **HMAC signature** (shared secret, B6) and is
@@ -332,6 +334,18 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   `GET /internal/numbers/{e164}` → `{ "tenantId": "…" }` (after the engine verifies the Twilio **webhook
   signature** — the tenant is never taken from anything the caller supplies).
 - **Engine builds (later):** the Twilio transport (μ-law 8 kHz ⇄ 16 kHz PCM, barge-in, call setup).
+
+### B11b — Passing a call to a person (the transfer seam)
+
+- **What:** the owner lists who a caller may be forwarded to (role, name, phone); the engine decides *when* and tells the
+  caller; **placing the transfer** is the phone transport's job.
+- **Engine today:** the decision, the announcement, the order of contacts, the fallback when nobody answers, and the
+  summary for the person who picks up are all built and tested. The browser console only *simulates* the transfer.
+- **What the real phone transport (Twilio, engine side) must implement:**
+  `transport.transfer(contact, { summary, reason, callId }) → { connected: boolean, reason?: "busy"|"no_answer"|"failed" }`.
+- **What the backend provides:** storing the `escalation` document (B2), and — if it owns Twilio numbers (B11) — the
+  caller-id / number to dial out from. The engine never logs or returns the contacts' numbers except to the transport.
+- **Events:** `handoff.requested`, `handoff.unavailable` (B7).
 
 ### B12 — The dashboard and its translations
 

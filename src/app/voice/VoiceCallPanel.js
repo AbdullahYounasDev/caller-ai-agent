@@ -99,6 +99,12 @@ export function VoiceCallPanel({ tenantId, uiLocale, t, dir, cardClass }) {
           {t("dashboard:voice.error.turnFailed")}
         </p>
       )}
+      {call.transfer && (
+        <p className="rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+          {t("dashboard:voice.transfer.banner", { vars: { who: [call.transfer.contact?.role, call.transfer.contact?.name].filter(Boolean).join(" — ") } })}
+          {call.transfer.simulated && <span className="block text-blue-600">{t("dashboard:voice.transfer.simulated")}</span>}
+        </p>
+      )}
       {call.status === "ended" && call.endReason && (
         <p className="text-xs text-gray-500">
           {t("dashboard:voice.endedBecause", { vars: { reason: t(`dashboard:voice.endReason.${call.endReason}`) } })}

@@ -45,6 +45,10 @@ export const SERVER = {
   /** A timeline entry, mirrored live from the call_events log:
    *  { event: { seq, type, atMs, data } } — nested, because the event has a `type` too. */
   EVENT: "event",
+  /** The call is being passed to a person: { contact: { role, name }, simulated, reason }. A
+   *  browser has no phone line, so the test console only SHOWS it (simulated: true); a phone
+   *  transport places a real transfer instead. The number is never sent to the browser. */
+  TRANSFER: "transfer",
   /** The call is over: { reason }. The socket closes right after. */
   ENDED: "ended",
   /** Something failed: { code, message }. */
@@ -70,7 +74,12 @@ export const END_REASONS = {
   CALLER_HANGUP: "caller_hangup",
   /** The session could not be set up (no config, recorder failed…). */
   SETUP_FAILED: "setup_failed",
+  /** The caller said nothing for a while, was asked whether they were still there, and still did not answer. */
   IDLE: "idle_timeout",
+  /** The caller said goodbye, the agent said it too, and nobody spoke again. */
+  AGENT_GOODBYE: "agent_goodbye",
+  /** The call was passed to a person (voice/session.js performHandoff). */
+  TRANSFERRED: "transferred",
   MAX_DURATION: "max_duration",
   DISCONNECTED: "disconnected",
   SERVER_SHUTDOWN: "server_shutdown",

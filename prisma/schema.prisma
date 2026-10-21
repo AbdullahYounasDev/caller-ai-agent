@@ -33,6 +33,11 @@ model Conversation {
   /// saved, cancelled or abandoned. One JSON document, never queried — a record only
   /// becomes a row in `records` when the customer confirms it.
   collectDraft Json? @map("collect_draft")
+
+  /// Whether the agent has failed to understand the caller, and whether the conversation has
+  /// been passed to a person (src/lib/handoff/decide.js): { v, misses, status, reason, at }.
+  /// One small JSON document, never queried.
+  handoffState Json? @map("handoff_state")
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 

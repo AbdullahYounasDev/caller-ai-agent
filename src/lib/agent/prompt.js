@@ -4,7 +4,7 @@ import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { humanizeTitle } from "./chunk";
 import { SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
 import { digitsAsWords } from "@/lib/collect/validate";
-import { MARKER_EXAMPLE } from "@/lib/collect/marker";
+import { markerFor } from "@/lib/collect/marker";
 
 /**
  * Builds the system instruction. This is where a tenant's configuration stops
@@ -64,6 +64,17 @@ const CHANNEL_STYLE = {
     "write it in Urdu script, never in Roman (Latin-letter) Urdu: an Urdu voice reads it aloud.",
 };
 
+// Aim at a conclusion, never at hurrying the caller. Owners asked for the agent to lead a
+// conversation to a result — an answer given, a request noted, a person connected — without
+// ever sounding impatient, so both halves are stated, and the second half is the stronger.
+const HELPING_STYLE =
+  "Be solution-oriented: work out what the caller needs, answer it directly, and move toward a clear next step or " +
+  "conclusion (a question answered, a request noted, a person connected). Ask at most ONE question at a time, never " +
+  "repeat back what the caller just said word for word, and keep to what they asked. But never rush, hurry, interrupt " +
+  "or talk down to anyone: be patient, polite and warm, let people take their time, and never end a thought with a " +
+  "push to finish. When their need is met, ask once whether there is anything else; if there is not, close briefly and " +
+  "kindly (thank them and say goodbye).";
+
 const GENDER_WORDS = { female: "feminine", male: "masculine" };
 
 /**
@@ -117,7 +128,7 @@ function voiceHearingInstruction(config) {
  *   (lib/collect/engine.js); null when the business takes none
  * @returns {string}
  */
-export function buildSystemInstruction({ config, channel, chunks = [], collection = null }) {
+export function buildSystemInstruction({ config, channel, chunks = [], collection = null, handoff = null }) {
   const sections = [];
 
   // --- 1. Who the agent is -------------------------------------------------
@@ -133,6 +144,7 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   // --- 2. Tone + channel style --------------------------------------------
   sections.push(`TONE: ${TONE_GUIDANCE[config.tone] ?? TONE_GUIDANCE.professional}`);
   sections.push(`CHANNEL: ${CHANNEL_STYLE[channel] ?? CHANNEL_STYLE.chat}`);
+  sections.push(`HOW YOU HELP: ${HELPING_STYLE}`);
   if (channel === "voice") {
     sections.push(voiceGenderInstruction(config));
     sections.push(voiceHearingInstruction(config));
@@ -230,9 +242,20 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   }
 
   // --- 6. Escalation -------------------------------------------------------
-  if (config.escalation) {
-    sections.push(`ESCALATION: ${formatEscalation(config.escalation)}`);
+  // What THIS turn does about a person (lib/handoff/decide.js) is decided by code; the model
+  // only words it. The standing rule below exists because a model that promises "I'll connect
+  // you" when the system is not actually doing it leaves a caller waiting on a line that goes
+  // nowhere.
+  if (config.escalation?.enabled && config.escalation.contacts?.length) {
+    sections.push(
+      "PASSING THE CALLER TO A PERSON: you cannot transfer anyone yourself and you never read out a phone number. " +
+        "Only when this turn's instructions below say the caller is being connected may you say so. If the caller " +
+        "wants a person and no such instruction is given, say you will help as far as you can, and that they can " +
+        "say plainly 'connect me to a person' at any time."
+    );
   }
+  const passing = handoff ? buildHandoffInstruction(handoff, { channel }) : null;
+  if (passing) sections.push(passing);
 
   // --- 6b. Taking a request (appointment, callback…) -------------------------
   // The engine decides what happens this turn (lib/collect/engine.js); this section only
@@ -416,6 +439,33 @@ export function voiceLine(kind, language, variant = 0) {
       en: ["Sorry, I'm having trouble answering right now. Could you try again in a moment?"],
       ur: ["معذرت، اس وقت جواب دینے میں دشواری ہو رہی ہے۔ کیا آپ تھوڑی دیر میں دوبارہ پوچھ سکتے ہیں؟"],
     },
+    // Fixed lines for the moments no model is involved. Urdu wording is deliberately free of
+    // gendered verb forms (the agent's voice may be either) and of Latin-letter names (the
+    // Urdu voice would spell them out).
+    unheard: {
+      en: ["Sorry, I didn't catch that. Could you say it again, please?", "I'm sorry, the line wasn't clear. Could you repeat that for me?"],
+      ur: ["معذرت، آواز واضح نہیں آئی۔ کیا آپ دوبارہ بتا سکتے ہیں؟", "معذرت، بات سمجھ نہیں آئی۔ براہِ کرم ایک بار پھر کہیے۔"],
+    },
+    connecting: {
+      en: ["I'm sorry I couldn't understand. Let me connect you to a member of our team."],
+      ur: ["معذرت، بات واضح نہیں ہو سکی۔ آپ کی بات ہماری ٹیم کے ایک رکن سے کروائی جا رہی ہے۔"],
+    },
+    handoff_failed: {
+      en: ["I'm sorry, nobody is available to take the call right now. I can take your details and have someone call you back."],
+      ur: ["معذرت، اس وقت کوئی دستیاب نہیں ہے۔ ہم آپ کی تفصیل لکھ لیتے ہیں تاکہ ٹیم آپ کو واپس کال کرے۔"],
+    },
+    still_there: {
+      en: ["Are you still there?", "Hello, are you still with me?"],
+      ur: ["کیا آپ لائن پر ہیں؟", "ہیلو، کیا آپ میرے ساتھ ہیں؟"],
+    },
+    silence_goodbye: {
+      en: ["I can't hear you, so I'll end the call now. Thank you for calling, and please call again any time. Goodbye."],
+      ur: ["آپ کی آواز نہیں آ رہی، اس لیے کال ختم کی جا رہی ہے۔ کال کرنے کا شکریہ، آپ جب چاہیں دوبارہ کال کریں۔ خدا حافظ۔"],
+    },
+    closing: {
+      en: ["Thank you for calling. Goodbye."],
+      ur: ["کال کرنے کا شکریہ۔ خدا حافظ۔"],
+    },
   };
   const options = lines[kind][language === "ur" ? "ur" : "en"];
   return options[Math.abs(Math.trunc(variant)) % options.length];
@@ -516,23 +566,70 @@ function formatHours(hours) {
     .join("; ");
 }
 
-function formatEscalation(escalation) {
-  if (typeof escalation === "string") return escalation;
+/** Who a person is, for the model to say: "our Senior doctor, Dr Ayesha". Never a number. */
+function describeContact(contact) {
+  if (!contact) return "a member of our team";
+  const role = contact.role?.trim();
+  const name = contact.name?.trim();
+  if (role && name) return `our ${role}, ${name}`;
+  return role ? `our ${role}` : name;
+}
 
-  const parts = [];
-  if (escalation.whenUserAsks !== false) {
-    parts.push("If the customer asks for a human, agree immediately and stop trying to resolve it yourself.");
+/**
+ * The section for this turn's HANDOFF PLAN (lib/handoff/decide.js), or null. Four outcomes; each
+ * one repeats the rule that a lie is the failure to avoid: the model says a transfer is
+ * happening ONLY when the system is making it happen, and never invents a wait, a time or a
+ * name it was not given.
+ *
+ * @param {{kind: string, reason?: string, contact?: object, callback?: boolean}|null} plan
+ * @param {{channel: string}} options
+ * @returns {string|null}
+ */
+export function buildHandoffInstruction(plan, { channel }) {
+  if (!plan) return null;
+  switch (plan.kind) {
+    case "rephrase":
+      return (
+        "UNDERSTANDING: you could not make out what the caller wanted, or the reference material has nothing for it. " +
+        "Say so honestly in ONE short, kind sentence (do not guess or invent an answer) and ask them to put it another " +
+        "way or give a little more detail. Do not mention a person or a transfer."
+      );
+    case "handoff": {
+      const who = describeContact(plan.contact);
+      const why =
+        plan.reason === "asked"
+          ? "The caller asked for a person."
+          : plan.reason === "frustrated"
+            ? "The caller feels they are not being understood: apologise briefly and sincerely, in one clause."
+            : plan.reason === "topic"
+              ? "This is a matter the business wants a person to handle."
+              : "You could not understand or help the caller after trying.";
+      return (
+        `PASSING THE CALLER ON: ${why} The caller IS being connected to ${who} right now. Tell them so in one or two ` +
+        "short, warm sentences: who they are being connected to, and that it will be a moment. " +
+        (channel === "voice" ? "Do not say goodbye and do not ask anything else — the line is about to be transferred. " : "") +
+        "Do not promise anything else, do not give a phone number, do not guess a waiting time, and do not continue " +
+        "with the original question."
+      );
+    }
+    case "unavailable":
+      return (
+        "PASSING THE CALLER ON — NOBODY IS AVAILABLE: the caller needs a person, but the business is closed right now, so no " +
+        "one can be connected. Say that politely in one sentence" +
+        (plan.callback
+          ? ", and offer to take their details so a team member can call them back. Do not claim anyone will call at a specific time."
+          : ", and say a team member will follow up when the business opens. Do not claim anyone will call at a specific time.") +
+        " Do not say you are connecting them."
+      );
+    case "handed_off":
+      return (
+        "PASSING THE CALLER ON: this conversation has already been passed to a team member. Keep every reply to one short " +
+        "sentence, answer only what is simple and clearly in the reference material, and say a team member will be with them. " +
+        "Do not start new requests."
+      );
+    default:
+      return null;
   }
-  if (escalation.whenAgentUnsure) {
-    parts.push("If you are unsure or the customer is frustrated, offer a human rather than guessing.");
-  }
-  // Contact details are deliberately NOT handed to the model as text it may read
-  // out: it will volunteer them unprompted. Phase 4's transfer_to_human tool is
-  // what actually routes the conversation.
-  if (escalation.email || escalation.phone) {
-    parts.push("A route to a human exists — offer it, and the system will handle the handoff.");
-  }
-  return parts.join(" ") || "Offer a human when you cannot help.";
 }
 
 
@@ -602,13 +699,17 @@ export function buildCollectionInstruction(plan, { channel }) {
 
   if (plan.state === "idle") {
     if (!plan.offers?.length) return null;
-    const list = plan.offers.map((o) => `${o.label} (code ${o.type})`).join("; ");
-    const first = plan.offers.map((o) => `for ${o.type}: "${o.firstQuestion}"`).join("; ");
+    const list = plan.offers.map((o) => `${o.label}`).join("; ");
+    const first = plan.offers.map((o) => `for ${o.label}: "${o.firstQuestion}"`).join("; ");
+    // The marker is spelled out in full for each type — never a placeholder like "code" — because a
+    // model copies what it is shown: a real call once read "[[START code]]" aloud.
+    const markers = plan.offers.map((o) => `${markerFor(o.type)} for ${o.label}`).join(", ");
     return (
       `REQUESTS YOU CAN TAKE: ${list}. ${never} If the customer clearly wants one of these, say in one short sentence ` +
-      `that you can take their details now, then ask the first question (${first}) in ${replyName}, ` +
-      `and begin your whole reply with the marker ${MARKER_EXAMPLE} (using that request's code) — nothing before it. ` +
-      "The marker is removed before the customer sees it. Never use it for any other reason, and never mention it."
+      `that you can take their details now, then ask the first question (${first}) in ${replyName}. ` +
+      `Begin your reply with exactly one of these markers, copied exactly as written: ${markers}. ` +
+      "The marker is removed before the customer sees or hears it. Use it only when you are about to ask the first " +
+      "question of that request, never for anything else, and never mention it."
     );
   }
 
