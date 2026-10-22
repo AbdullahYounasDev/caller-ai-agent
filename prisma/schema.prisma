@@ -20,13 +20,17 @@ datasource db {
 }
 
 model Conversation {
-  id        String   @id @default(uuid())
-  tenantId  String   @map("tenant_id")
-  channel   String // chat | voice — chat is the internal test surface (§ CLAUDE.md)
-  status    String   @default("active") // active | resolved | escalated
+  id       String  @id @default(uuid())
+  tenantId String  @map("tenant_id")
+  /// The agent (agent_configs.id) this conversation is held with — fixed when it starts, so a
+  /// conversation never changes personality half-way. NULL = the tenant's default agent (a
+  /// tenant that has never saved any settings has no agent row yet).
+  agentId  String? @map("agent_id")
+  channel  String // chat | voice — chat is the internal test surface (§ CLAUDE.md)
+  status   String  @default("active") // active | resolved | escalated
   // The language this conversation's agent replies in (en | ur) — a transcript label,
   // stamped from agent_configs.reply_language; the agent understands both whatever it is.
-  locale    String   @default("en")
+  locale   String  @default("en")
 
   /// The request being taken in this conversation, if any (src/lib/collect/engine.js): a
   /// draft appointment or callback, filled in over several messages and cleared once it is
@@ -37,13 +41,14 @@ model Conversation {
   /// Whether the agent has failed to understand the caller, and whether the conversation has
   /// been passed to a person (src/lib/handoff/decide.js): { v, misses, status, reason, at }.
   /// One small JSON document, never queried.
-  handoffState Json? @map("handoff_state")
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  handoffState Json?    @map("handoff_state")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
 
   messages Message[]
 
   @@index([tenantId])
+  @@index([agentId])
   @@map("conversations")
   @@schema("ai_engine")
 }
@@ -181,7 +186,7 @@ model KnowledgeChunk {
   /// retrieval does not tokenise every candidate per query. Written by Postgres, never
   /// by us. Deliberately NO GIN index: we only rank vector-admitted rows (§6.3).
   contentTsv Unsupported("tsvector")? @default(dbgenerated()) @map("content_tsv")
-  createdAt DateTime @default(now()) @map("created_at")
+  createdAt  DateTime                 @default(now()) @map("created_at")
 
   @@index([tenantId])
   @@index([sourceId])
@@ -212,6 +217,9 @@ model KnowledgeChunk {
 model CallLog {
   id             String  @id @default(uuid())
   tenantId       String  @map("tenant_id")
+  /// The agent that answered (agent_configs.id); NULL = the tenant's default agent. With
+  /// telephony this is the agent the dialled number points to.
+  agentId        String? @map("agent_id")
   conversationId String? @map("conversation_id")
 
   /// "browser" (test console) | "twilio" (later). The call session is identical for
@@ -251,6 +259,7 @@ model CallLog {
 
   @@index([tenantId])
   @@index([tenantId, createdAt])
+  @@index([agentId, createdAt])
   @@map("call_logs")
   @@schema("ai_engine")
 }
@@ -267,8 +276,8 @@ model CallTurn {
   /// 1-based position in the call. The agent's greeting is not a turn.
   index Int
 
-  callerText String @map("caller_text")
-  agentText  String @map("agent_text")
+  callerText  String  @map("caller_text")
+  agentText   String  @map("agent_text")
   /// What the caller actually HEARD. Shorter than agentText when they interrupted.
   spokenText  String? @map("spoken_text")
   interrupted Boolean @default(false)
@@ -296,7 +305,7 @@ model CallTurn {
   /// Every stage: { speechMs, sttMs, retrievalMs, rewriteMs, llmFirstTokenMs, llmMs,
   /// ttsFirstAudioMs, responseMs }. JSON because stages will be added; responseMs is
   /// also a column because it is the one that gets queried.
-  timings Json @default("{}")
+  timings    Json @default("{}")
 
   error     String?
   createdAt DateTime @default(now()) @map("created_at")
@@ -324,7 +333,7 @@ model CallEvent {
   type String
   /// Milliseconds since the call started — a timeline that reads the same however the
   /// server clock is set.
-  atMs Int   @map("at_ms")
+  atMs Int    @map("at_ms")
   data Json?
 
   createdAt DateTime @default(now()) @map("created_at")
@@ -341,30 +350,46 @@ model AgentAction {
   conversationId String?  @map("conversation_id")
   actionType     String   @map("action_type") // e.g. refund_issued | appointment_booked | record_updated
   payload        Json // structured details of what was done — never a text blob
-  createdAt      DateTime @default(now())      @map("created_at")
+  createdAt      DateTime @default(now()) @map("created_at")
 
   @@index([tenantId])
   @@map("agent_actions")
   @@schema("ai_engine")
 }
 
-// Per-tenant agent configuration — the "businesses train/edit their agent" surface.
+// ONE AGENT — the "businesses train/edit their agent" surface. A tenant has one or more
+// (a restaurant chain: one per branch; a call centre: one per line or client). The AI engine
+// is the one brain every agent uses; a row here is WHICH setup it answers with: persona,
+// hours, voice, language, what it collects and who it forwards calls to. `id` is the
+// agent's id everywhere (conversations, call_logs, records, later phone numbers).
 //
 // WHY THIS LIVES IN ai_engine, NOT tenant_core: the partner owns tenants, users,
 // auth, plans and billing. This row is the AI engine's own concern — persona,
 // capabilities and prompt-facing settings all change whenever the prompt
 // pipeline changes,
 // so keeping it on our side means prompt iteration never waits on their migrations.
-// The partner's dashboard edits it through /api/agent-config. One row per tenant.
+// The partner's dashboard edits it through /api/agent-config and /api/agents.
 model AgentConfig {
   id       String @id @default(uuid())
-  tenantId String @unique @map("tenant_id")
+  tenantId String @map("tenant_id")
+
+  // --- which agent this is (src/lib/tenant/config.js) ---
+  /// What the owner calls it ("Dublin branch", "Sales line"). Empty = unnamed; the console
+  /// shows the business name instead.
+  name       String  @default("")
+  /// "active" | "archived". Archived, never deleted: calls and requests point at it.
+  status     String  @default("active")
+  /// Set to tenant_id on the tenant's DEFAULT agent and NULL on every other — a plain unique
+  /// column, so the database itself guarantees at most one default per tenant (NULLs never
+  /// collide) without a partial index Prisma could not see (§6.1). The default answers every
+  /// request that names no agent, and carries the tenant-wide uiLocale.
+  defaultFor String? @unique @map("default_for")
 
   // --- identity / persona: what the agent says it is ---
-  businessName String  @map("business_name")
-  purpose      String  @default("") // what the agent is here to do, in the tenant's words
-  tone         String  @default("professional") // professional | friendly | concise | formal
-  timezone     String  @default("UTC") // IANA name — needed for hours + booking
+  businessName String @map("business_name")
+  purpose      String @default("") // what the agent is here to do, in the tenant's words
+  tone         String @default("professional") // professional | friendly | concise | formal
+  timezone     String @default("UTC") // IANA name — needed for hours + booking
 
   // --- language ---
   // TWO SETTINGS, and they answer different questions. Never merge them.
@@ -416,10 +441,10 @@ model AgentConfig {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
+  @@index([tenantId])
   @@map("agent_configs")
   @@schema("ai_engine")
 }
-
 
 /// A unit of work that takes too long to do inside a request.
 ///
@@ -476,7 +501,6 @@ model IngestJob {
   @@schema("ai_engine")
 }
 
-
 // ── REQUESTS THE AGENT TAKES (appointments, callbacks) ─────────────────────
 //
 // ⚠ STAND-INS FOR THE PARTNER'S SIDE. Customers and their requests belong to the backend
@@ -517,6 +541,8 @@ model Record {
   type           String
   /// requested | confirmed | done | cancelled
   status         String    @default("requested")
+  /// The agent that took it (agent_configs.id); NULL = the tenant's default agent.
+  agentId        String?   @map("agent_id")
   conversationId String?   @map("conversation_id")
   customerId     String?   @map("customer_id")
   customer       Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
@@ -545,6 +571,7 @@ model Record {
   @@unique([tenantId, reference])
   @@index([tenantId, status, createdAt])
   @@index([tenantId, type])
+  @@index([agentId, createdAt])
   @@map("records")
   @@schema("ai_engine")
 }

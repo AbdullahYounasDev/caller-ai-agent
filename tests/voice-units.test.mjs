@@ -174,8 +174,18 @@ describe("session tickets", () => {
   test("a fresh ticket opens exactly one call for its tenant", () => {
     const verifier = createTicketVerifier({ secret });
     const { ticket } = issueTicket({ tenantId: "clinic-1", ttlMs: 60_000, secret });
-    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "clinic-1" });
+    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "clinic-1", agentId: null });
     assert.deepEqual(verifier.verify(ticket), { ok: false, reason: "replayed" });
+  });
+
+  test("a ticket carries the agent it was issued for, and the agent cannot be swapped", () => {
+    const verifier = createTicketVerifier({ secret });
+    const { ticket } = issueTicket({ tenantId: "chain", agentId: "agent-dublin", ttlMs: 60_000, secret });
+    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "chain", agentId: "agent-dublin" });
+
+    const [payload, sig] = issueTicket({ tenantId: "chain", agentId: "agent-dublin", ttlMs: 60_000, secret }).ticket.split(".");
+    const otherAgent = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, "base64url")), a: "agent-london" })).toString("base64url");
+    assert.equal(verifier.verify(`${otherAgent}.${sig}`).reason, "signature");
   });
 
   test("expired, forged, tampered and malformed tickets are refused", () => {

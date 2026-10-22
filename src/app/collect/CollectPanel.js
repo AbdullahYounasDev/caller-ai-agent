@@ -47,7 +47,7 @@ function withIds(parsed, previous) {
   });
 }
 
-export function CollectPanel({ tenantId, uiLocale, replyLanguage, t, cardClass, labelClass, helpClass, inputClass, buttonClass }) {
+export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, cardClass, labelClass, helpClass, inputClass, buttonClass }) {
   const [config, setConfig] = useState(null);
   const [version, setVersion] = useState(0);
   const [dirty, setDirty] = useState(false);
@@ -61,7 +61,8 @@ export function CollectPanel({ tenantId, uiLocale, replyLanguage, t, cardClass, 
   const [openWording, setOpenWording] = useState(null);
   const [addPick, setAddPick] = useState({});
 
-  const query = `tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`;
+  // Each agent has its own checklist (CLAUDE.md §6.27); null = the default agent.
+  const query = `tenantId=${encodeURIComponent(tenantId)}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}&locale=${uiLocale}`;
 
   // `load` is the Reload button; the effect below runs the same fetch without a synchronous
   // setState in its body (react-hooks/set-state-in-effect): state is only set after the await.
@@ -515,7 +516,7 @@ export function CollectPanel({ tenantId, uiLocale, replyLanguage, t, cardClass, 
         </div>
       </section>
 
-      <RecordsPanel tenantId={tenantId} uiLocale={uiLocale} config={config} t={t} cardClass={cardClass} helpClass={helpClass} />
+      <RecordsPanel tenantId={tenantId} agentId={agentId} uiLocale={uiLocale} config={config} t={t} cardClass={cardClass} helpClass={helpClass} />
     </div>
   );
 }
@@ -531,18 +532,19 @@ const BADGE = { requested: "bg-amber-100 text-amber-800", confirmed: "bg-green-1
  * without reloading. Backed by the stand-in records (src/lib/standins/); the backend owns
  * these in production.
  */
-function RecordsPanel({ tenantId, uiLocale, config, t, cardClass, helpClass }) {
+function RecordsPanel({ tenantId, agentId, uiLocale, config, t, cardClass, helpClass }) {
   const [filter, setFilter] = useState("requested");
   const [list, setList] = useState({ data: [], counts: {}, total: 0 });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(null);
 
   const fetchList = useCallback(async () => {
-    const res = await fetch(`/api/records?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}${filter ? `&status=${filter}` : ""}`);
+    // Only the requests THIS agent took.
+    const res = await fetch(`/api/records?tenantId=${encodeURIComponent(tenantId)}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}&locale=${uiLocale}${filter ? `&status=${filter}` : ""}`);
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "failed");
     return data;
-  }, [tenantId, uiLocale, filter]);
+  }, [tenantId, agentId, uiLocale, filter]);
 
   const load = useCallback(async () => {
     try {

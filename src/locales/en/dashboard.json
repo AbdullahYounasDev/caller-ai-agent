@@ -302,5 +302,22 @@
   "chat.handoff.rephrase": "Asked the caller to rephrase",
   "chat.handoff.handed_off": "Already passed to a person",
   "handoff.afterMisses.option_one": "{count} time",
-  "handoff.afterMisses.option_other": "{count} times"
+  "handoff.afterMisses.option_other": "{count} times",
+  "agents.label": "Agent",
+  "agents.help": "Each agent has its own settings, checklist, call forwarding, calls and requests. All agents share the documents in Knowledge.",
+  "agents.default": "default",
+  "agents.archivedTag": "archived",
+  "agents.new": "New agent",
+  "agents.newName": "Name of the new agent",
+  "agents.namePlaceholder": "e.g. Dublin branch, Sales line",
+  "agents.copyHelp": "The new agent starts with a copy of the settings of \"{name}\". You can change everything afterwards.",
+  "agents.created": "Agent created. You are now editing it.",
+  "agents.rename": "Rename",
+  "agents.renameLabel": "Agent name",
+  "agents.makeDefault": "Make default",
+  "agents.archive": "Archive",
+  "agents.archiveConfirm": "Archive \"{name}\"? It will stop answering, but its calls and requests stay.",
+  "agents.restore": "Restore",
+  "agents.showArchived": "Show archived",
+  "agents.archivedHelp": "This agent is archived: it does not answer chats or calls. Restore it to use it again."
 }

@@ -150,6 +150,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       const verdict = tickets.verify(frame.ticket);
       if (!verdict.ok) return refuse(ERROR_CODES.BAD_TICKET, verdict.reason);
       const tenantId = verdict.tenantId;
+      const agentId = verdict.agentId;
 
       const serviceable = await assertTenantServiceable(tenantId);
       if (!serviceable.ok) return refuse(ERROR_CODES.BAD_TICKET, "tenant cannot be served");
@@ -163,6 +164,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
 
       session = new CallSession({
         tenantId,
+        agentId,
         transportName: "browser",
         transport,
         stt: speech.stt,
@@ -174,7 +176,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       });
       sessions.add(session);
       const started = await session.start();
-      if (started) console.log(`[voice] call ${session.recorder.callId} answered for tenant ${tenantId}`);
+      if (started) console.log(`[voice] call ${session.recorder.callId} answered for tenant ${tenantId}, agent ${session.agentId ?? "default"}`);
       else sessions.delete(session);
     });
 

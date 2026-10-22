@@ -95,3 +95,22 @@ export async function requireServiceableTenant({ tenantId, tr }) {
 
   return { ok: false, status: verdict.status, error: tr(key) };
 }
+
+// ── AGENTS (CLAUDE.md §6.27) ─────────────────────────────────────────────────
+
+/**
+ * ★ WHERE A PLAN'S AGENT LIMIT GOES ★ — the backend decides how many agents a plan includes.
+ * Today every tenant may add agents up to the engine's own safety cap (config.js
+ * MAX_AGENTS_PER_TENANT). Same shape and same "edit only this function" rule as
+ * assertTenantServiceable(). Called by tenant/config.js createAgent() — never by a route.
+ *
+ * @param {string} tenantId
+ * @param {{activeAgents: number}} usage
+ * @returns {Promise<{ok: true} | {ok: false, status: number, error: string}>}
+ */
+export async function assertCanAddAgent(tenantId, { activeAgents }) {
+  void tenantId;
+  void activeAgents;
+  // TODO (when plans exist): { ok: false, status: 403, error: "Your plan includes N agents" }
+  return { ok: true };
+}

@@ -56,6 +56,8 @@ export class CallSession {
   /**
    * @param {object} args
    * @param {string} args.tenantId
+   * @param {string|null} [args.agentId]       which agent answers (null = the default agent).
+   *   With telephony this is the agent the dialled number points to (CLAUDE.md §6.27).
    * @param {"browser"|"twilio"} args.transportName
    * @param {object} args.transport            see above
    * @param {{forCall(call: {vocabulary?: string[]}): import("./speech/stt").Transcriber}} args.stt
@@ -67,8 +69,9 @@ export class CallSession {
    * @param {(args: object) => Promise<object>} args.openRecorder   CallRecorder.open
    * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
    */
-  constructor({ tenantId, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
+  constructor({ tenantId, agentId = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
     this.tenantId = tenantId;
+    this.agentId = agentId;
     this.transportName = transportName;
     this.transport = transport;
     this.stt = stt;
@@ -108,7 +111,12 @@ export class CallSession {
       // process (lib/tenant/config.js), and this process is not the one the dashboard
       // saved through.
       this.brain.invalidateAgentConfig(this.tenantId);
-      this.config = await this.brain.getAgentConfig(this.tenantId);
+      this.config = await this.brain.getAgentConfig(this.tenantId, { agentId: this.agentId });
+      // Archived after the ticket was issued: it no longer answers callers.
+      if (this.config.status === "archived") throw new Error(`agent ${this.agentId} is archived`);
+      // From here on the RESOLVED agent: "the default" becomes the default agent's id, so the
+      // conversation keeps it even if the owner later makes another agent the default.
+      this.agentId = this.config.agentId ?? null;
 
       // The engines THIS call uses, decided once: every call understands Urdu and English
       // whichever language it answers in, so the recogniser does not depend on the reply
@@ -121,6 +129,7 @@ export class CallSession {
 
       this.recorder = await this.openRecorder({
         tenantId: this.tenantId,
+        agentId: this.agentId,
         transport: this.transportName,
         engine: this.callEngine,
       });
@@ -378,6 +387,7 @@ export class CallSession {
     try {
       result = await this.brain.respond({
         tenantId: this.tenantId,
+        agentId: this.agentId,
         conversationId: this.recorder.conversationId,
         channel: "voice",
         userMessage: text,
@@ -530,7 +540,7 @@ export class CallSession {
     this.log("speech.unheard", { durationMs, inARow: this.unheardRun });
     let decision = null;
     try {
-      decision = (await this.brain.noteUnheard?.({ tenantId: this.tenantId, conversationId: this.recorder.conversationId })) ?? null;
+      decision = (await this.brain.noteUnheard?.({ tenantId: this.tenantId, agentId: this.agentId, conversationId: this.recorder.conversationId })) ?? null;
     } catch (err) {
       console.error("[voice] could not weigh unheard speech:", err);
     }
@@ -843,6 +853,7 @@ export class CallSession {
   describe() {
     return {
       tenantId: this.tenantId,
+      agentId: this.agentId,
       callId: this.recorder?.callId ?? null,
       state: this.state,
       turns: this.turnIndex,
