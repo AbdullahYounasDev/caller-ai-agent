@@ -1,3 +1,7 @@
+import { toE164, routeForNumber } from "@/lib/telephony/routing";
+import { readRoute, rememberRoute } from "@/lib/telephony/route-cache";
+import { findNumberForRouting } from "@/lib/standins/numbers";
+
 /**
  * ███ THE TENANT RESOLUTION SEAM ███
  *
@@ -20,10 +24,10 @@
  * chat, both behind INTERNAL_API_KEY — so a tenant id arrives as a trusted
  * query parameter rather than something resolved from a public credential.
  *
- * WHEN TELEPHONY LANDS, the identity question returns in a different shape:
- * an inbound call identifies its tenant by the NUMBER THAT WAS DIALLED, and
- * that mapping is resolved HERE, from a verified provider webhook — never from
- * anything the caller supplies. See the Twilio section in CLAUDE.md.
+ * TELEPHONY: an inbound call identifies its tenant — and its AGENT — by the NUMBER
+ * THAT WAS DIALLED, resolved HERE by resolveDialledNumber() (bottom of this file,
+ * CLAUDE.md §6.29) from a verified provider webhook — never from anything the
+ * caller supplies.
  */
 
 /**
@@ -113,4 +117,43 @@ export async function assertCanAddAgent(tenantId, { activeAgents }) {
   void activeAgents;
   // TODO (when plans exist): { ok: false, status: 403, error: "Your plan includes N agents" }
   return { ok: true };
+}
+
+// ── PHONE NUMBERS (CLAUDE.md §6.29) ─────────────────────────────────────────
+
+/**
+ * ★ THE PHONE-NUMBER LOOKUP — "this number was dialled: which tenant, which agent?" ★
+ *
+ * An inbound call identifies its business by the NUMBER THAT WAS DIALLED, and nothing the caller
+ * supplies (§9.2). Today the numbers come from the stand-in store (standins/numbers.js); when the
+ * backend's lookup exists (`GET /internal/numbers/{e164}` → { tenantId, agentId }, handoff B11)
+ * the read inside this function changes and NOTHING ELSE does — the phone webhook, the console's
+ * "call as if dialling" and the tests all come through here.
+ *
+ * Refuses (never guesses) a number that is malformed, unknown, released, not linked to an agent,
+ * linked to an archived agent, or whose business may not be served. The route is cached ~30 s
+ * per process (telephony/route-cache.js); a change made through standins/numbers.js drops it at
+ * once. Serviceability is re-checked on EVERY call, never cached, so a suspension takes effect
+ * immediately.
+ *
+ * @param {string} dialled the number as the provider sent it ("+442071234567")
+ * @param {{skipCache?: boolean}} [options]
+ * @returns {Promise<{ok: true, tenantId: string, agentId: string, numberId: string, e164: string}
+ *   | {ok: false, reason: string, e164?: string, tenantId?: string, numberId?: string}>}
+ */
+export async function resolveDialledNumber(dialled, { skipCache = false } = {}) {
+  const parsed = toE164(dialled);
+  if (!parsed.ok) return { ok: false, reason: "invalid_number" };
+  const e164 = parsed.value;
+
+  let route = skipCache ? undefined : readRoute(e164);
+  if (route === undefined) {
+    route = routeForNumber(await findNumberForRouting(e164));
+    rememberRoute(e164, route);
+  }
+  if (!route.ok) return { ...route, e164 };
+
+  const serviceable = await assertTenantServiceable(route.tenantId);
+  if (!serviceable.ok) return { ok: false, reason: "tenant_unserviceable", e164, tenantId: route.tenantId, numberId: route.numberId };
+  return { ...route, e164 };
 }

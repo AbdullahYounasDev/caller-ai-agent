@@ -12,17 +12,22 @@ code disagree, **the code wins** — fix this file in the same change (same rule
 
 ## 0. How to read this (for an AI assistant)
 
-1. Read `CLAUDE.md` in the repo root — the engine's handover. §4 (who owns what), §6.11 (the AI never mutates
-   tenant data), §6.18 (tenant seam), §6.25 (request-taking) matter most here.
+1. Read `CLAUDE.md` in the repo root — the engine's handover. §4 (who owns what, and every stand-in with the seam it
+   is read through), §6.11 (the AI never mutates tenant data), §6.18 (tenant seam), §6.25 (request-taking), §6.27
+   (agents), §6.28 (knowledge per agent) and §6.29 (phone numbers) matter most here.
 2. Read this file top to bottom. Every backend duty is a numbered block **B1…B12** with the same layout:
    *What · Why it is the backend's · What the engine has today (stand-in) · What the backend must provide ·
    Expected responses · What changes in the engine when it arrives.*
-3. Everything the engine fakes lives behind **`src/lib/standins/`** (customers, records, events) and the two
-   seams **`src/lib/tenant/config.js`** (what has this business configured?) and
-   **`src/lib/tenant/registry.js`** (may this tenant be served?). Replacing a stand-in = replacing that file;
-   engine code never touches those tables directly.
+3. Everything the engine stands in for today is read through ONE seam each, so replacing it = changing that file:
+   **`src/lib/tenant/config.js`** (agents and their settings), **`src/lib/agent/knowledge-access.js`** (which agents
+   use each document), **`src/lib/tenant/registry.js`** (may this tenant be served? which agent does this phone
+   number ring?) and **`src/lib/standins/`** (customers, requests, events, phone numbers). Engine code never touches
+   those tables directly. The engine routes that WRITE them (`/api/agents`, `/api/agent-config`, `/api/collect`,
+   `/api/numbers`, the `agents` field of `/api/knowledge`) are a stand-in dashboard — they show the shapes your side
+   needs and go away when it exists.
 4. Useful commands (Node 20+, Postgres 16 + pgvector): `npm test` (unit, no DB), `npm run test:collect`
-   (request-taking end to end on a real DB with faked models), `npm run db:check`, `npm run dev`
+   (request-taking end to end on a real DB with faked models), `npm run test:agents` (agents, knowledge per agent,
+   every setting per agent), `npm run test:numbers` (the phone-number lookup), `npm run db:check`, `npm run dev`
    (console at `:3000`), `npm run voice` (voice gateway at `:3001`).
 5. **Vocabulary.** *Tenant* = one business. *Engine* = this repo (`ai_engine` schema). *Backend* = the
    partner platform (`tenant_core` schema). *Request* = an appointment or call-back the agent took
@@ -36,16 +41,16 @@ code disagree, **the code wins** — fix this file in the same change (same rule
 | --- | --- | --- |
 | Tenants, users, login, roles, onboarding | — | **owns** (B1) |
 | Plans, billing, quotas, suspension | enforces via one function | **owns** (B1, B8) |
-| Agent settings (name, tone, hours, language, voices…) | reads, uses in the prompt | **stores, versions, edits via dashboard** (B2) |
+| **Agents** (a tenant has one or more) and each agent's settings (name, tone, hours, language, voices, forwarding…) | reads, uses in the prompt and on calls | **creates/archives agents; stores, versions, edits settings via dashboard** (B2) |
 | "What the agent collects" settings | defines the catalogue + validates | **stores the document** (B3) |
 | Customers and requests (appointments, call-backs), staff screen, status workflow | proposes / saves / corrects while `requested` | **owns the data and the workflow** (B4) |
-| Knowledge files: upload UI, **original-file storage (Cloudinary or other)**, limits, document list | receives the file/text, extracts, splits, embeds, searches; keeps extracted text only | **owns the original file, storage, limits, UI** (B5) |
+| Knowledge files: upload UI, **original-file storage (Cloudinary or other)**, limits, document list, **which agents use each document** | receives the file/text, extracts, splits, embeds, searches only what the agent may use; keeps extracted text only | **owns the original file, storage, limits, UI, the per-document agent list** (B5) |
 | Integration secrets | **keeps its own AI keys** (Gemini, Groq…) in its deployment | **keeps its own** (storage, billing, WhatsApp/SMS, Twilio account); only `INTERNAL_API_KEY` + event-signing secret are shared (B6) |
 | Events engine → backend (outbox) | produces | **receives** (B7) |
 | Usage metering (minutes, messages, requests) | reports events | **counts, bills** (B8) |
 | Customer notifications (WhatsApp / SMS) | emits the event | **sends** (B9) — decision needed |
 | Calendar / slot availability | asks (future) | **owns** (B10) |
-| Phone numbers, Twilio provisioning, number→tenant mapping | call handling | **owns purchase + mapping** (B11) |
+| Phone numbers, Twilio provisioning, **number → agent** mapping | the lookup on every call + call handling | **owns purchase, release, billing and the mapping** (B11) |
 | Dashboard UI + its translations | provides labels + catalogue | **builds the real dashboard** (B12) |
 | RAG (extract, OCR, chunk, embed, retrieve), the brain, prompts | **owns** | — |
 | Request-taking state machine, validation, extraction | **owns** | — |
@@ -327,7 +332,8 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 - **What:** counting what a tenant consumes and enforcing plan limits.
 - **Engine today:** **nothing is metered.** Only abuse protection exists: chat 60 msgs/min/tenant and 5 per
   10 s per conversation, 10 voice sessions/min/tenant, 3 concurrent calls per tenant — in-process, not billing.
-- **Data the engine already has:** `call_logs` (start/end, duration, turns, transport), `call_turns`,
+- **Data the engine already has:** `call_logs` (start/end, duration, turns, transport, and which agent and which phone
+  number answered — so usage can be billed per agent and per number), `call_turns`,
   `messages` (chat), `records`, `ingest_jobs` / embedding counts.
 - **Needs agreeing (do this early — retrofitting is painful):** the usage-event shape. Proposal:
   `usage.call_minutes { conversationId, seconds, channel }`, `usage.chat_message { conversationId }`,
@@ -351,14 +357,38 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 
 ### B11 — Phone numbers and Twilio
 
-- **What:** buying/porting numbers, mapping the **dialled number → tenant**, billing for it.
-- **Engine today:** voice works from the browser only. The call logger already has `from_number/to_number`.
-- **Backend provides:** number purchase flow and the mapping table — each number points to exactly ONE agent, an agent
-  may have many numbers; and a lookup the engine's webhook uses:
-  `GET /internal/numbers/{e164}` → `{ "tenantId": "…", "agentId": "…" }` (after the engine verifies the Twilio
-  **webhook signature** — the tenant is never taken from anything the caller supplies). A number that is unknown,
-  released or linked to no agent is refused politely by the engine.
-- **Engine builds (later):** the Twilio transport (μ-law 8 kHz ⇄ 16 kHz PCM, barge-in, call setup).
+- **What:** buying / porting / releasing numbers, billing for them, and keeping **which agent each number rings** —
+  each number rings exactly ONE agent; an agent may have many numbers (a restaurant chain: one per branch; a call
+  centre: several lines on one agent). Also the "forwarding number": the hidden number a business forwards its own
+  line to, so it keeps the number printed on its menus.
+- **Engine today (CLAUDE.md §6.29):**
+  - **The lookup is BUILT** — `resolveDialledNumber(dialled)` in `src/lib/tenant/registry.js`: dialled number (E.164)
+    → `{ tenantId, agentId, numberId }`, or a refusal with a reason: `invalid_number`, `unknown`, `released`,
+    `unassigned` (linked to no agent), `agent_archived`, `tenant_unserviceable`. It never guesses: a refused number
+    is never sent to "some" agent and never to another business; the caller hears a polite "not in service" line.
+    Cached ~30 s, dropped on every change; serviceability re-checked on every call.
+  - **The numbers themselves are a STAND-IN**: table `ai_engine.phone_numbers` behind `src/lib/standins/numbers.js`
+    (`id, tenantId, e164, agentId, label, status: active|released, kind: purchased|forwarding, provider, providerSid`).
+    Rules kept there because routing depends on them: one ACTIVE number = one business (database-enforced); a number
+    rings an ACTIVE agent of its OWN business; an agent that numbers still ring cannot be archived; a released number
+    keeps its row (call history) and can be bought again by anyone.
+  - Routes (stand-in dashboard): `GET|POST /api/numbers`, `PATCH /api/numbers/:id` (`{ agentId, label, status:
+    "released" }`), and `GET /api/numbers/lookup?to=+44…` to try the routing — tenant-agnostic on purpose.
+  - Calls record `to_number`, `phone_number_id` and `agent_id` (`call_logs`); `GET /api/voice/calls?numberId=` lists
+    one number's calls — the basis for per-number usage and billing (B8).
+- **Backend provides:** the number purchase / release / billing flow and the mapping table, and ONE read the engine
+  calls on every inbound call:
+  `GET /internal/numbers/{e164}` → `200 { "tenantId": "…", "agentId": "…" | null, "numberId": "…", "status": "active" | "released" }`
+  or `404` for a number you have never had. The engine applies the rules above to that answer (unlinked → refuse,
+  agent archived → refuse, released → refuse). Please refuse at write time what the engine refuses at call time:
+  a number without a country code, an agent of another tenant, an archived agent.
+- **Engine change when it lands:** `findNumberForRouting()` calls your endpoint instead of the stand-in table;
+  `resolveDialledNumber`, its callers and its tests stay. `/api/numbers` and the console's Numbers tab are removed.
+- **Engine builds next:** the Twilio webhook (verify Twilio's signature FIRST → this lookup → TwiML
+  `<Connect><Stream>` to the voice gateway, or `<Say>` the not-in-service line and hang up) and
+  `transports/twilio.js` (μ-law 8 kHz ⇄ 16 kHz PCM, barge-in, the real `transfer`, B11b).
+- **Open:** who owns the Twilio account and the purchase API calls (proposal: the backend, since it bills); whether the
+  engine also needs `GET /internal/tenants/{id}/numbers` for reports.
 
 ### B11b — Passing a call to a person (the transfer seam)
 
@@ -405,8 +435,10 @@ without it, the tenant's default agent (settings, chat, calls) or every agent (l
 | `GET /api/records[?agentId=]`, `GET/PATCH /api/records/:id` | requests (B4) — console only | `{data,total,counts}` / row |
 | `GET/POST /api/knowledge[?agentId=]`, `…/:id`, `…/:id/retry`, `…/jobs*`, `…/search` | knowledge (B5) — each document's `agents` (null = shared) | see B5 |
 | `POST /api/chat[?agentId=]` | test chat, **SSE**: `session`, `chunk`, `done`, `error` | `done` = `{reply,model,sources,collection,…}` |
-| `POST /api/voice/session[?agentId=]` | one-minute single-use ticket for the voice WebSocket (agent signed in) | `{ticket,agentId,url,healthUrl,expiresAt}` |
-| `GET /api/voice/calls[?agentId=]`, `/api/voice/calls/:id` | call history (turns, timeline) | list / detail |
+| `POST /api/voice/session[?agentId=][&to=+44…]` | one-minute single-use ticket for the voice WebSocket (agent signed in); `to` = call "as if dialling" that number, through the real lookup | `{ticket,agentId,line,url,healthUrl,expiresAt}` |
+| `GET /api/voice/calls[?agentId=][&numberId=]`, `/api/voice/calls/:id` | call history (turns, timeline), per agent or per number | list / detail |
+| `GET/POST /api/numbers[?agentId=]`, `PATCH /api/numbers/:id` | phone numbers and the agent each rings (B11) — stand-in | `{numbers}` / `{number}` |
+| `GET /api/numbers/lookup?to=` | the phone-number lookup (B11), no tenantId | `{ok,tenantId,agentId,numberId,e164}` or `{ok:false,reason}` |
 | `GET /api/locales` | UI strings (public) | catalog |
 
 Voice gateway (separate process, `npm run voice`, port 3001): `GET /health`, `GET /voices/preview`,
@@ -421,7 +453,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 554, `npm run test:collect`, `npm run test:agents`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 567, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -433,12 +465,14 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
   and requests are stamped with the agent; a default agent keeps single-agent tenants unchanged.
 - Knowledge per agent: one library, each document shared or limited to chosen agents; every search is scoped to the
   agent answering.
+- The phone-number lookup: dialled number → business → agent, refusing (never guessing) unknown, released, unlinked,
+  archived-agent and suspended cases; calls record the number they came in on (B11). The numbers are a stand-in.
 
 **To do on my side:**
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
 2. Real outbox + signed event sender (B7).
 3. Usage events (B8) once the shape is agreed.
-4. Twilio transport + webhook (B11), compliance wording (recording consent, calling hours).
+4. Twilio webhook + transport (B11) on top of the built lookup; compliance wording (AI disclosure, recording consent).
 5. Fix: an utterance cut by a pause arrives as two turns; agent memory after a long pause.
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.
 7. Later: speech models on a server and a paid LLM key (infrastructure, not code).
@@ -449,16 +483,17 @@ deployment, storage/billing/messaging/Twilio-account keys on the backend, only `
 event-signing secret shared (B6).
 
 **Still open — decisions I need from you:** who sends WhatsApp/SMS (B9); whether events carry customer details (B7);
-the usage-event shape (B8); which `/internal` routes come first.
+the usage-event shape (B8); which `/internal` routes come first; who owns the Twilio account and the purchase calls (B11).
 
 ---
 
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261023100000_knowledge_per_agent` — the table
-`knowledge_source_agents` (which agents may use a document; no row = shared, so nothing changes for existing documents).
-Before it: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
+similarity index (`CLAUDE.md` §6.1). Latest: `20261024100000_phone_numbers` — the stand-in `phone_numbers` table
+(B11) and `call_logs.phone_number_id`; changes no existing row. Before it: `20261023100000_knowledge_per_agent` — the
+table `knowledge_source_agents` (which agents may use a document; no row = shared, so nothing changes for existing
+documents). Before that: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
 one row per agent (`name`, `status`, `default_for`; the one-row-per-tenant unique index is dropped), and
 `conversations`, `call_logs`, `records` gain `agent_id`. Every existing row becomes its tenant's default agent and
 existing conversations/calls/requests are stamped with it, so nothing changes for a current tenant. Before it:

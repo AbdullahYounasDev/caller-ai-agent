@@ -31,7 +31,8 @@
     "reembed": "node --no-warnings --import ./scripts/alias-register.mjs scripts/reembed.mjs",
     "reembed:dry": "node --no-warnings --import ./scripts/alias-register.mjs scripts/reembed.mjs --dry-run",
     "test:collect": "node --no-warnings --import ./scripts/test-collect-register.mjs scripts/test-collect.mjs",
-    "test:agents": "node --no-warnings --import ./scripts/test-collect-register.mjs scripts/test-agents.mjs"
+    "test:agents": "node --no-warnings --import ./scripts/test-collect-register.mjs scripts/test-agents.mjs",
+    "test:numbers": "node --no-warnings --import ./scripts/alias-register.mjs scripts/test-numbers.mjs"
   },
   "dependencies": {
     "@codemirror/lang-markdown": "^6.5.2",

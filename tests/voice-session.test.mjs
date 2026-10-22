@@ -11,7 +11,7 @@ import { BARGE_IN, CLOSING, SILENCE } from "@/lib/voice/config";
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId, line } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -109,6 +109,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
   const session = new CallSession({
     tenantId: "t1",
     agentId,
+    line,
     transportName: "browser",
     transport,
     stt,
@@ -440,6 +441,21 @@ describe("CallSession", () => {
     assert.equal(h.configReads[0].agentId, null, "asked for the default");
     assert.equal(h.session.agentId, "agent-main", "then held on to the agent that answered");
     assert.equal(h.recorderOpens[0].agentId, "agent-main");
+  });
+
+  test("a call that came in on one of the business's numbers is recorded with that number (§6.29)", async () => {
+    const h = harness({ agentId: "agent-dublin", line: { numberId: "n1", toNumber: "+35312345678" }, config: { agentId: "agent-dublin", status: "active" } });
+    await h.session.start();
+    assert.equal(h.recorderOpens[0].toNumber, "+35312345678");
+    assert.equal(h.recorderOpens[0].phoneNumberId, "n1");
+    assert.equal(h.recorded.events.find((e) => e.type === "call.started").data.toNumber, "+35312345678");
+  });
+
+  test("a plain console call records no number", async () => {
+    const h = harness({ config: { agentId: "agent-main", status: "active" } });
+    await h.session.start();
+    assert.equal(h.recorderOpens[0].toNumber, null);
+    assert.equal(h.recorderOpens[0].phoneNumberId, null);
   });
 
   test("an agent archived after its ticket was issued does not answer", async () => {

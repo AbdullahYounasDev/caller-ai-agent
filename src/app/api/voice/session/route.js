@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkInternalAuth } from "@/lib/auth/internal";
-import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { requireServiceableTenant, resolveDialledNumber } from "@/lib/tenant/registry";
+import { describeRouteRefusal } from "@/lib/telephony/errors";
 import { requireAgent } from "@/lib/tenant/agent-request";
 import { hit } from "@/lib/security/rate-limit";
 import { translator, resolveLocale } from "@/lib/i18n";
@@ -14,6 +15,14 @@ import { gatewayUrls } from "@/lib/voice/gateway-url";
  *   POST /api/voice/session?tenantId=…[&agentId=…]   → { ticket, agentId, url, healthUrl, expiresAt }
  *
  * `agentId` picks which agent answers (default agent if omitted); it is signed into the ticket.
+ *
+ *   POST /api/voice/session?tenantId=…&to=+442071234567   → the same, "as if dialling" that number
+ *
+ * `to` runs the REAL phone-number lookup (registry.js resolveDialledNumber, §6.29): the number —
+ * not `agentId` — decides the agent, exactly as a phone call will, and the call is recorded as
+ * having come in on that number. A number that rings no agent is refused with the reason (a real
+ * caller would hear "not in service"). Only this tenant's numbers: another business's number is
+ * "unknown" here, never connected.
  *
  * This route does the CHECKING; the gateway does the CALLING. Internal auth, the tenant
  * check (§4, §6.18) and a per-tenant rate limit all happen here, inside the Next.js app
@@ -58,8 +67,23 @@ export async function POST(request) {
       return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
-    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, serving: true });
-    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+    // Who answers: the dialled number when one is given (the phone path), else the named agent.
+    let line = null;
+    let agent;
+    const to = request.nextUrl.searchParams.get("to");
+    if (to) {
+      const route = await resolveDialledNumber(to, { skipCache: true });
+      if (!route.ok || route.tenantId !== tenantId) {
+        // Another business's number is "unknown" here: this route never reveals that it exists.
+        const reason = route.tenantId && route.tenantId !== tenantId ? "unknown" : route.reason;
+        return NextResponse.json({ error: describeRouteRefusal(reason, tr), reason }, { status: 409 });
+      }
+      line = { numberId: route.numberId, toNumber: route.e164 };
+      agent = { ok: true, agentId: route.agentId };
+    } else {
+      agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, serving: true });
+      if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+    }
 
     const limited = hit({ key: `voice:session:${tenantId}`, ...TENANT_SESSION_LIMIT });
     if (!limited.ok) {
@@ -74,8 +98,8 @@ export async function POST(request) {
       return NextResponse.json({ error: "VOICE_SESSION_SECRET is not configured on the server" }, { status: 500 });
     }
 
-    const { ticket, expiresAt } = issueTicket({ tenantId, agentId: agent.agentId, ttlMs: LIMITS.sessionTicketTtlMs, secret });
-    return NextResponse.json({ ticket, agentId: agent.agentId, expiresAt, ...gatewayUrls(request) });
+    const { ticket, expiresAt } = issueTicket({ tenantId, agentId: agent.agentId, line, ttlMs: LIMITS.sessionTicketTtlMs, secret });
+    return NextResponse.json({ ticket, agentId: agent.agentId, line, expiresAt, ...gatewayUrls(request) });
   } catch (err) {
     console.error("POST /api/voice/session failed:", err);
     return NextResponse.json({ error: "Something went wrong" }, { status: 500 });

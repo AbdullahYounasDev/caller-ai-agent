@@ -20,8 +20,14 @@ import { formatDuration } from "./format";
  * Same standing as the chat panel: a test surface for the same brain a phone call will
  * use, not a product channel (§2).
  */
-export function VoiceCallPanel({ tenantId, agentId, uiLocale, t, dir, cardClass }) {
-  const call = useVoiceCall({ tenantId, agentId, uiLocale });
+export function VoiceCallPanel({ tenantId, agentId, numbers = [], agents = [], uiLocale, t, dir, cardClass }) {
+  // "" = call the picked agent directly; a number = ring that line, as a real caller would (§6.29).
+  const [dialNumber, setDialNumber] = useState("");
+  const call = useVoiceCall({ tenantId, agentId, dialNumber: dialNumber || null, uiLocale });
+  const agentLabel = (id) => {
+    const a = agents.find((x) => x.id === id);
+    return a ? a.name || a.businessName : t("dashboard:numbers.noAgent");
+  };
   const [historyKey, setHistoryKey] = useState(0);
   const busy = call.status === "preparing" || call.status === "live";
 
@@ -45,6 +51,25 @@ export function VoiceCallPanel({ tenantId, agentId, uiLocale, t, dir, cardClass 
           <StatusPill call={call} t={t} />
         </div>
         <p className="mt-1 text-xs text-gray-500">{t("dashboard:voice.help")}</p>
+        {numbers.length > 0 && (
+          <label className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+            <span>{t("dashboard:voice.dialAs")}</span>
+            <select
+              className="rounded border border-gray-300 px-2 py-1"
+              value={dialNumber}
+              disabled={busy}
+              onChange={(e) => setDialNumber(e.target.value)}
+              data-testid="dial-as"
+            >
+              <option value="">{t("dashboard:voice.dialDirect")}</option>
+              {numbers.map((n) => (
+                <option key={n.id} value={n.e164}>
+                  {`${n.e164}${n.label ? ` · ${n.label}` : ""} → ${agentLabel(n.agentId)}`}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
       </div>
 
       <div className="flex flex-wrap items-center gap-4">

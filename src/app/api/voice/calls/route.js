@@ -8,7 +8,7 @@ import { requireAgent, agentScope } from "@/lib/tenant/agent-request";
 /**
  * CALL HISTORY — the most recent calls for a tenant, newest first.
  *
- *   GET /api/voice/calls?tenantId=…[&agentId=…]&limit=20
+ *   GET /api/voice/calls?tenantId=…[&agentId=…][&numberId=…]&limit=20
  *
  * With `agentId`, only that agent's calls; without it, every agent's. Each call says which
  * agent answered it (`agentId`).
@@ -35,6 +35,10 @@ export async function GET(request) {
       scope = agentScope(agent.agentId, agent.config.isDefault);
     }
 
+    // Per phone number (§6.29): the calls that came in on one of the business's lines.
+    const numberId = request.nextUrl.searchParams.get("numberId");
+    if (numberId) scope = { ...scope, phoneNumberId: numberId };
+
     const calls = await prisma.callLog.findMany({
       where: { tenantId, ...scope },
       orderBy: { createdAt: "desc" },
@@ -42,6 +46,8 @@ export async function GET(request) {
       select: {
         id: true,
         agentId: true,
+        phoneNumberId: true,
+        toNumber: true,
         transport: true,
         status: true,
         endReason: true,

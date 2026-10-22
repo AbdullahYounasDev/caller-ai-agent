@@ -258,9 +258,13 @@ model CallLog {
   /// setup_failed | error — END_REASONS in src/lib/voice/protocol.js
   endReason String? @map("end_reason")
 
-  /// E.164 numbers once telephony exists. Null for browser sessions.
-  fromNumber String? @map("from_number")
-  toNumber   String? @map("to_number")
+  /// E.164 numbers once telephony exists. Null for browser sessions — except a console call
+  /// placed "as if dialling" one of the tenant's numbers, which records the number it simulated.
+  fromNumber    String? @map("from_number")
+  toNumber      String? @map("to_number")
+  /// The phone number the call came in on (phone_numbers.id), for per-number reporting (§6.29).
+  /// Kept as a plain id: a released number keeps its call history.
+  phoneNumberId String? @map("phone_number_id")
 
   /// The models that served this call — { vad, stt, tts: {en, it}, llm } — so a
   /// latency or quality regression can be traced to a model change.
@@ -285,6 +289,7 @@ model CallLog {
   @@index([tenantId])
   @@index([tenantId, createdAt])
   @@index([agentId, createdAt])
+  @@index([phoneNumberId, createdAt])
   @@map("call_logs")
   @@schema("ai_engine")
 }
@@ -467,6 +472,9 @@ model AgentConfig {
   /// row and are not listed here.
   knowledge KnowledgeSourceAgent[]
 
+  /// Phone numbers that ring this agent (phone_numbers) — each number has exactly one agent.
+  phoneNumbers PhoneNumber[]
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -602,5 +610,48 @@ model Record {
   @@index([tenantId, type])
   @@index([agentId, createdAt])
   @@map("records")
+  @@schema("ai_engine")
+}
+
+// ── PHONE NUMBERS (§6.29) ───────────────────────────────────────────────────
+//
+// ⚠ STAND-IN FOR THE PARTNER'S SIDE, like customers and records above. Buying, porting, releasing
+// and billing a number is the backend's (docs/handoff-to-backend.md B11); the engine only needs to
+// answer "this number was dialled — which tenant and which agent?". Everything touching this table
+// goes through src/lib/standins/numbers.js, and the ENGINE reads it only through
+// tenant/registry.js resolveDialledNumber() — the one function that changes when the backend's
+// lookup exists.
+
+/// One phone number of a tenant. It rings exactly ONE agent (or none yet); an agent may have many.
+model PhoneNumber {
+  id          String       @id @default(uuid())
+  tenantId    String       @map("tenant_id")
+  /// International form, "+442071234567" — what a provider's webhook sends as the dialled number.
+  e164        String
+  /// = e164 while the number is active, NULL once released: a plain UNIQUE column, so the database
+  /// guarantees an active number belongs to ONE tenant, while a released one can be bought again
+  /// (by anyone) — the same trick as agent_configs.default_for, no partial index Prisma cannot see.
+  activeE164  String?      @unique @map("active_e164")
+  /// The agent it rings. NULL = not linked yet: a call to it is refused politely, never guessed.
+  agentId     String?      @map("agent_id")
+  agent       AgentConfig? @relation(fields: [agentId], references: [id], onDelete: SetNull)
+  /// What the owner calls it ("Main line", "Dublin bookings").
+  label       String       @default("")
+  /// "active" | "released"
+  status      String       @default("active")
+  /// "purchased" (a number bought through us) | "forwarding" (the hidden number a business forwards
+  /// its own line to) — informational for the backend; routing treats both the same.
+  kind        String       @default("purchased")
+  /// "twilio" — and the provider's id for it, once numbers are really bought.
+  provider    String       @default("twilio")
+  providerSid String?      @map("provider_sid")
+  releasedAt  DateTime?    @map("released_at")
+  createdAt   DateTime     @default(now()) @map("created_at")
+  updatedAt   DateTime     @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@index([agentId])
+  @@index([e164])
+  @@map("phone_numbers")
   @@schema("ai_engine")
 }

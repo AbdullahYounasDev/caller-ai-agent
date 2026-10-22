@@ -35,12 +35,13 @@ export class CallRecorder {
    * @param {object} args.engine       which models serve it — stored on the row
    * @param {string} [args.fromNumber]
    * @param {string} [args.toNumber]
+   * @param {string} [args.phoneNumberId] which of the business's numbers it came in on (§6.29)
    * @param {object} [args.db]         Prisma client; injectable for tests
    */
-  static async open({ tenantId, agentId = null, transport, engine, fromNumber = null, toNumber = null, db = prisma }) {
+  static async open({ tenantId, agentId = null, transport, engine, fromNumber = null, toNumber = null, phoneNumberId = null, db = prisma }) {
     const conversation = await db.conversation.create({ data: { tenantId, agentId, channel: "voice" } });
     const call = await db.callLog.create({
-      data: { tenantId, agentId, conversationId: conversation.id, transport, engine, fromNumber, toNumber },
+      data: { tenantId, agentId, conversationId: conversation.id, transport, engine, fromNumber, toNumber, phoneNumberId },
     });
     return new CallRecorder({ db, tenantId, callId: call.id, conversationId: conversation.id });
   }
