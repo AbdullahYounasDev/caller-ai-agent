@@ -6,6 +6,7 @@ import { detectSearchConfig } from "./language";
 import { EMBEDDING_SCHEME_VERSION } from "./embed-scheme";
 import { deleteOriginalFile } from "./storage";
 import { JobCancelledError } from "./jobs";
+import { agentsBySource, setSourceAgents } from "./knowledge-access";
 
 /**
  * KNOWLEDGE INGESTION — create, replace, rename and delete a business's documents.
@@ -176,6 +177,9 @@ function chunksFor(text, title, fileName) {
  * @param {string} args.text       the extracted plain text
  * @param {"text"|"file"|"url"} [args.kind]
  * @param {{fileName?: string, mimeType?: string, byteSize?: number}} [args.file]
+ * @param {string[]|null} [args.agents] which agents may answer from it (§6.28): null = shared
+ *   with all, a list = only those, OMITTED = leave as it is (a new document is shared). The
+ *   caller has already checked the ids belong to this tenant (knowledge-access.js).
  * @returns {Promise<{id: string, title: string, chunkCount: number, replaced: boolean}>}
  */
 export async function ingestDocument({
@@ -184,6 +188,7 @@ export async function ingestDocument({
   text,
   kind = "text",
   file = {},
+  agents,
   // Optional, supplied when running inside a background job. Embedding is the
   // long part — one network round trip per BATCH of chunks — so it is reported
   // as it goes (in chunk units) rather than as a single opaque step.
@@ -234,6 +239,13 @@ export async function ingestDocument({
     },
   });
 
+  // A NEW document's availability is set now, before any chunk exists: it is never searchable
+  // by an agent it is not meant for, not even for a moment. A REPLACE keeps its old chunks
+  // answering under the old availability until the swap below, which changes both at once.
+  if (!existing && agents !== undefined) {
+    await setSourceAgents(prisma, { tenantId, sourceId: source.id, agentIds: agents });
+  }
+
   await onSource?.(source.id);
 
   try {
@@ -280,6 +292,12 @@ export async function ingestDocument({
           embeddingScheme: EMBEDDING_SCHEME_VERSION,
         },
       });
+
+      // Same transaction as the new chunks: no moment where the new text answers under the old
+      // availability or the reverse.
+      if (existing && agents !== undefined) {
+        await setSourceAgents(tx, { tenantId, sourceId: source.id, agentIds: agents });
+      }
     });
 
     // Only NOW — the new version is fully committed — is the OLD original file
@@ -364,9 +382,15 @@ export async function ingestDocument({
 /**
  * List a tenant's documents. Never returns `content` — the list screen shows
  * dozens of rows and the bodies would be megabytes of payload for text nobody
- * is reading yet.
+ * is reading yet. Each row carries `agents`: null = shared with every agent, else the
+ * agents it is restricted to (§6.28).
  */
 export async function listSources(tenantId) {
+  const [rows, restricted] = await Promise.all([listSourceRows(tenantId), agentsBySource(tenantId)]);
+  return rows.map((row) => ({ ...row, agents: restricted.get(row.id) ?? null }));
+}
+
+function listSourceRows(tenantId) {
   return prisma.knowledgeSource.findMany({
     where: { tenantId },
     orderBy: { updatedAt: "desc" },
@@ -392,9 +416,27 @@ export async function listSources(tenantId) {
  * document by guessing a uuid.
  */
 export async function getSource({ tenantId, id }) {
-  const source = await prisma.knowledgeSource.findUnique({ where: { id } });
+  const source = await prisma.knowledgeSource.findUnique({
+    where: { id },
+    include: { agents: { select: { agentId: true }, orderBy: { createdAt: "asc" } } },
+  });
   if (!source || source.tenantId !== tenantId) return null;
-  return source;
+  const { agents, ...rest } = source;
+  return { ...rest, agents: agents.length ? agents.map((a) => a.agentId) : null };
+}
+
+/**
+ * Change which agents may answer from a document — and nothing else: no re-embed, the chunks
+ * are the same text (§6.28). Takes effect on the next turn of every conversation.
+ *
+ * @param {{tenantId: string, id: string, agents: string[]|null}} args already validated
+ * @returns {Promise<object|null>} the document as getSource returns it, or null if not this tenant's
+ */
+export async function setDocumentAgents({ tenantId, id, agents }) {
+  const source = await getSource({ tenantId, id });
+  if (!source) return null;
+  await prisma.$transaction((tx) => setSourceAgents(tx, { tenantId, sourceId: id, agentIds: agents }));
+  return getSource({ tenantId, id });
 }
 
 /**

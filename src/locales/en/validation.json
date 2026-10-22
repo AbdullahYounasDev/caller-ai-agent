@@ -93,5 +93,9 @@
   "agents.planLimit": "Your plan does not include another agent.",
   "agents.statusInvalid": "An agent can only be active or archived.",
   "agents.archiveDefault": "The default agent cannot be archived. Make another agent the default first.",
-  "agents.defaultArchived": "An archived agent cannot be the default. Restore it first."
+  "agents.defaultArchived": "An archived agent cannot be the default. Restore it first.",
+  "knowledge.agentsInvalid": "Choose \"all agents\" or a list of agents.",
+  "knowledge.agentsEmpty": "Pick at least one agent, or make the document available to all agents.",
+  "knowledge.agentsTooMany": "A document can be limited to at most 25 agents.",
+  "knowledge.agentsUnknown": "One of the chosen agents does not exist for this business."
 }

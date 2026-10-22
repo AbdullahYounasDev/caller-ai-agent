@@ -158,6 +158,7 @@ src/app/
   collect/CollectPanel.js      # the "what the agent collects" checklist + the list of requests taken (§6.25)
   handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
   agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
+  knowledge/DocumentAgents.js  # one document's "All agents / Only: …" and its editor, in the Knowledge tab (§6.28)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
@@ -196,7 +197,9 @@ src/lib/
     extract.js                 # pdf/docx/txt/md/csv → text; editability rule (§6.7)
     ocr.js                     # scanned-PDF OCR (§6.5)
     crawl.js                   # website crawling + SSRF defences (§6.9)
-    ingest.js                  # create/REPLACE/rename/delete/retry documents (§6.10, §6.15)
+    ingest.js                  # create/REPLACE/rename/delete/retry documents (§6.10, §6.15); who may use each (§6.28)
+    knowledge-rules.js         # pure: may this agent use this document? (shared vs limited) — also imported by the console (§6.28)
+    knowledge-access.js        # the same rule as SQL (fails closed), validating and writing a document's agents (§6.28)
     jobs.js                    # background import queue + cancellation (§6.6, §6.14)
     storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
     capabilities/catalog.js    # what the agent can DO, per channel
@@ -1930,8 +1933,8 @@ transfer (Twilio does not exist yet); the real model's wording of the handoff an
 answers with — one `agent_configs` row: business name, purpose, tone, hours, reply language, voices, what it collects,
 who it forwards calls to. A tenant has **one or more** agents (a restaurant chain: one per branch; a call centre: one per
 line or client). Later each phone number points to exactly ONE agent, and an agent may have many numbers (§9.2) — that
-mapping is the backend's (docs/handoff-to-backend.md B11). **Knowledge is shared by all of a tenant's agents** for now;
-choosing documents per agent is the next step, not built.
+mapping is the backend's (docs/handoff-to-backend.md B11). **Knowledge is one library per tenant; each document is
+shared by every agent or limited to some** (§6.28).
 
 **Rules that must not drift:**
 
@@ -1978,14 +1981,78 @@ choosing documents per agent is the next step, not built.
 (`{ name?, status?, makeDefault? }`). Route-side parsing and errors live in `tenant/agent-request.js` only.
 
 **Console:** an agent bar above the tabs (`AgentPicker`); every tab — settings, what it collects, calls, chat — shows the
-picked agent; switching agents starts a new chat conversation and hangs up a live call. Knowledge is the shared library.
+picked agent; switching agents starts a new chat conversation and hangs up a live call. Knowledge is one library, each
+document shared or limited to some agents (§6.28).
 
 **Verified:** `npm test` (543 — incl. tickets carry the agent and cannot be re-signed, a call uses its agent for config,
 call record and every turn, the default resolved at pick-up, an archived agent does not answer), `npm run test:agents`
 (the rules above against the real DB, with the real `respond()` and a faked model), `test:collect` unchanged, the HTTP
 routes by hand on a dev server, and the console driven in a browser (create → copy → edit → switch) in English and Urdu.
-**Not built:** knowledge per agent; phone numbers (backend, B11) and the Twilio transport (§9.2); per-agent analytics
+**Not built:** phone numbers (backend, B11) and the Twilio transport (§9.2); per-agent analytics
 screens.
+
+### 6.28 Knowledge per agent — one library, each document shared or limited
+
+**The model (decided):** a tenant keeps ONE knowledge library (titles stay unique per tenant, replace-not-append is
+unchanged, §6.10). Each DOCUMENT is either **shared** — every agent of the tenant answers from it (the menu, the
+policies) — or **limited** to the agents the owner picks (the Dublin branch's page). Shared is the default and what every
+document was before, so a tenant that never limits anything behaves exactly as before.
+
+**Why per DOCUMENT and not "agent X uses documents [...]":** a new agent (a new branch) must automatically know
+everything shared and must NOT inherit another branch's page. Per-document availability gives exactly that with no
+step for the owner; a per-agent list would make a new agent see everything (other branches included) or nothing.
+
+**Rules that must not drift:**
+
+- **Storage:** `knowledge_source_agents (source_id, agent_id, tenant_id)` — PK `(source_id, agent_id)`, both foreign
+  keys `ON DELETE CASCADE`. No rows = shared; rows = only those agents. Migration
+  `20261023100000_knowledge_per_agent` (hand-written, HNSW line removed, changes no existing answer).
+- **The rule is in ONE place:** `lib/agent/knowledge-rules.js canAgentUse` (pure — the console imports the same rule
+  for its "used by this agent" flag) and its SQL twin `lib/agent/knowledge-access.js agentAccessSql`
+  (`AND (NOT EXISTS link OR EXISTS link for this agent)`, the agent id a bound value). tests/knowledge-access pins
+  that they agree.
+- **Retrieval FAILS CLOSED.** `retrieveRelevantChunks({ agentId })` with no agent searches SHARED documents only — the
+  most a caller that forgot the agent can get, never another agent's page. Only the debug/eval paths see everything,
+  and they must say `wholeLibrary: true`. `respond()` passes `config.agentId`; `retrieveForTurn` passes it to EVERY
+  search of a turn (raw, rewritten, the empty-first-pass retry). Membership is still `MAX_DISTANCE` alone (§6.3) among
+  what the agent may use; the HNSW iterative scan (§6.1) absorbs the stricter filter.
+- **When availability changes:**
+  - a NEW document's links are written right after its row, BEFORE any chunk exists — never searchable by an agent it
+    is not meant for, not even for a moment;
+  - a REPLACE that names agents swaps them in the SAME transaction as the new chunks (§6.10's swap); a replace that
+    does not mention agents KEEPS them — re-uploading the Dublin page must never quietly hand it to every branch (the
+    console's "All agents" choice therefore sends nothing);
+  - changing availability alone (`PUT /api/knowledge/:id { agents }`, `setDocumentAgents`) re-embeds NOTHING — same
+    chunk rows (test:agents checks the ids);
+  - retry and re-embed never touch it; deleting a document or an agent removes its links (cascade).
+- **Input** (`normalizeAgentList` + `validateAgentsForTenant`, via `readAgentsInput` in every route): `null`/`"all"` =
+  shared, a list = only those (deduplicated, ≤25), omitted = leave as it is. An EMPTY list is refused (it is a form sent
+  before anything was ticked, not "nobody"). Every id must be an agent of THIS tenant — no cross-tenant links; archived
+  agents are accepted (a branch closed for now) and the console warns when no ACTIVE agent uses a document.
+- **A copied agent inherits settings, never another agent's limited documents** (`createAgent` copies `agent_configs`
+  only). It uses every shared document from its first call.
+- **The search debug route** (`/api/knowledge/search`): the real paths search what an agent would (the named agent, else
+  the default — exactly like the agent); the raw path the whole library unless `agentId` is named.
+
+**API:** `GET /api/knowledge[?agentId=]` → each row has `agents` (null = shared) and, with `agentId`, `usedByAgent`;
+`POST /api/knowledge` (typed, url, multipart — a JSON string field `agents`) and `PUT /api/knowledge/:id` take `agents`.
+Errors: `validation:knowledge.agentsInvalid|agentsEmpty|agentsTooMany|agentsUnknown` (en + ur).
+
+**Console (Knowledge tab, shown once a tenant has two agents):** "New documents are for: All agents | Only <agent>";
+"Show: All documents | Documents <agent> uses"; each row says "All agents" or "Only: Dublin, London" with a Change
+editor; a document the picked agent does not use is dimmed and says so. "Select all" only selects what is on screen.
+
+**Verified:** `npm test` (554 — the rule, the input, the SQL shape, and that every search of a turn carries the agent),
+`npm run test:agents` (71 against the real DB: the filter for an agent / the default / no agent / the debug path,
+availability at create / replace / alone without re-embedding, cascade, copy, cross-tenant ids, and `respond()` giving
+Dublin's page to Dublin and never to London asked the same words), the HTTP routes by hand, and the Knowledge tab
+driven in a browser. **Not verified:** retrieval quality with a real embedding model (no key in the build sandbox — the
+filter is independent of the vectors, the ranking within it is unchanged).
+
+**Every per-agent setting, audited end to end (test:agents, real `respond()`):** call forwarding (Dublin passes the
+caller to its own person, London has none), what the agent collects (one agent takes requests, the other does not), the
+reply language, the opening hours and the forwarding contacts each follow the AGENT; the dashboard language follows the
+tenant (§6.27). Records and calls carry the agent (§6.27).
 
 ---
 
@@ -2062,7 +2129,7 @@ right language, with history persisted per tenant.
 | Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
-| **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge is shared per tenant |
+| **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge: one library, each document shared or limited to some agents, retrieval scoped to the agent and failing closed (§6.28) |
 | **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
@@ -2285,10 +2352,10 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 543 unit tests: handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 554 unit tests: knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 #   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
-npm run test:agents      # several agents per tenant end to end against the real DB, faked models — spends no quota (§6.27)
+npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent, against the real DB, faked models — spends no quota (§6.27, §6.28)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
 npm run test:openrouter  # OpenRouter integration vs. a local stand-in

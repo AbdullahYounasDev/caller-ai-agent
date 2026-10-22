@@ -5,7 +5,8 @@ import { useCallback, useEffect, useState } from "react";
 /**
  * "WHICH AGENT" — the bar above the console's tabs (CLAUDE.md §6.27). A tenant has one or more
  * agents (a branch, a line, a client); every tab below — settings, what it collects, calls,
- * chat — shows the one picked here. The knowledge library is shared by all of them.
+ * chat — shows the one picked here. Knowledge is one library; each document is shared or limited
+ * to some agents (§6.28).
  *
  * Lists /api/agents, and changes agents through POST /api/agents (a new agent starts as a copy
  * of the one being looked at) and PATCH /api/agents/:id (rename, make default, archive,
@@ -19,10 +20,12 @@ import { useCallback, useEffect, useState } from "react";
  *                                                 of a tenant that has not saved anything yet
  * @param {(agentId: string|null) => void} props.onChange
  * @param {number} [props.refreshKey]             bump to re-read the list (e.g. after a save renames the business)
+ * @param {(agents: object[]) => void} [props.onAgentsLoaded] every agent of the tenant, archived included —
+ *                                                 the Knowledge tab names the agents a document is for
  * @param {(key: string, options?: object) => string} props.t
  * @param {string} props.cardClass @param {string} props.inputClass @param {string} props.buttonClass @param {string} props.helpClass
  */
-export function AgentPicker({ tenantId, uiLocale, value, onChange, refreshKey = 0, t, cardClass, inputClass, buttonClass, helpClass }) {
+export function AgentPicker({ tenantId, uiLocale, value, onChange, onAgentsLoaded, refreshKey = 0, t, cardClass, inputClass, buttonClass, helpClass }) {
   const [agents, setAgents] = useState([]);
   const [showArchived, setShowArchived] = useState(false);
   const [mode, setMode] = useState(null); // null | "create" | "rename"
@@ -37,16 +40,20 @@ export function AgentPicker({ tenantId, uiLocale, value, onChange, refreshKey = 
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/api/agents?${base}${showArchived ? "&includeArchived=1" : ""}`);
+        // Always the whole list, archived included: the Knowledge tab needs every name. Archived
+        // agents are only OFFERED here when "show archived" is ticked.
+        const res = await fetch(`/api/agents?${base}&includeArchived=1`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "failed");
         if (cancelled) return;
-        setAgents(data.agents);
+        onAgentsLoaded?.(data.agents);
+        const shown = showArchived ? data.agents : data.agents.filter((a) => a.status === "active");
+        setAgents(shown);
         // Report the choice on every load, even when it is unchanged: the console waits for it
         // before loading settings (null is a real choice — an unsaved default agent). Nothing
         // picked yet, or the picked agent is gone (another tenant, archived and hidden): the
         // default agent, which the list always has first.
-        if (data.agents.length) onChange(data.agents.some((a) => a.id === value) ? value : data.agents[0].id ?? null);
+        if (shown.length) onChange(shown.some((a) => a.id === value) ? value : shown[0].id ?? null);
       } catch (err) {
         if (!cancelled) setStatus(String(err.message || err));
       }
@@ -54,7 +61,7 @@ export function AgentPicker({ tenantId, uiLocale, value, onChange, refreshKey = 
     return () => {
       cancelled = true;
     };
-  }, [base, showArchived, refreshKey, reloads, value, onChange]);
+  }, [base, showArchived, refreshKey, reloads, value, onChange, onAgentsLoaded]);
 
   const current = agents.find((a) => a.id === value) ?? null;
   const labelOf = (a) => a.name || a.businessName;

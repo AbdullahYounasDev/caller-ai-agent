@@ -20,8 +20,9 @@ import { translator } from "@/lib/i18n";
  *          voice and the people calls go to. Edit it afterwards through
  *          /api/agent-config?agentId= and /api/collect?agentId=.
  *
- * One agent is changed through /api/agents/:id. The KNOWLEDGE library is shared by every agent
- * of a tenant (choosing documents per agent is the next step, not built yet).
+ * One agent is changed through /api/agents/:id. KNOWLEDGE is one library per tenant; which agents
+ * use each document is set on the document (/api/knowledge, §6.28). A new agent uses every shared
+ * document and none of the limited ones.
  *
  * Server-to-server (x-internal-key), like every route. POST mutates, so it goes through
  * requireServiceableTenant; GET does not (§6.18).
