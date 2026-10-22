@@ -58,6 +58,9 @@ export class CallSession {
    * @param {string} args.tenantId
    * @param {string|null} [args.agentId]       which agent answers (null = the default agent).
    *   With telephony this is the agent the dialled number points to (CLAUDE.md §6.27).
+   * @param {{numberId?: string|null, toNumber?: string|null, fromNumber?: string|null}|null} [args.line]
+   *   the phone line the call came in on (§6.29): which of the business's numbers was dialled, and
+   *   by whom — recorded on the call. null for a plain console call.
    * @param {"browser"|"twilio"} args.transportName
    * @param {object} args.transport            see above
    * @param {{forCall(call: {vocabulary?: string[]}): import("./speech/stt").Transcriber}} args.stt
@@ -69,9 +72,10 @@ export class CallSession {
    * @param {(args: object) => Promise<object>} args.openRecorder   CallRecorder.open
    * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
    */
-  constructor({ tenantId, agentId = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
+  constructor({ tenantId, agentId = null, line = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
     this.tenantId = tenantId;
     this.agentId = agentId;
+    this.line = line;
     this.transportName = transportName;
     this.transport = transport;
     this.stt = stt;
@@ -131,6 +135,9 @@ export class CallSession {
         tenantId: this.tenantId,
         agentId: this.agentId,
         transport: this.transportName,
+        fromNumber: this.line?.fromNumber ?? null,
+        toNumber: this.line?.toNumber ?? null,
+        phoneNumberId: this.line?.numberId ?? null,
         engine: this.callEngine,
       });
       this.vad = this.createVad();
@@ -149,6 +156,7 @@ export class CallSession {
     });
     this.log("call.started", {
       transport: this.transportName,
+      ...(this.line?.toNumber ? { toNumber: this.line.toNumber } : {}),
       replyLanguage: this.config.replyLanguage,
       stt: this.transcriber.id,
     });

@@ -11,6 +11,7 @@ import { CollectPanel } from "./collect/CollectPanel";
 import { HandoffPanel } from "./handoff/HandoffPanel";
 import { AgentPicker } from "./agents/AgentPicker";
 import { DocumentAgents } from "./knowledge/DocumentAgents";
+import { NumbersPanel } from "./numbers/NumbersPanel";
 import { fieldDef } from "@/lib/collect/config";
 import { pick } from "@/lib/collect/catalog";
 
@@ -225,6 +226,9 @@ export default function Home() {
   // Knowledge tab: show every document, or only those the picked agent answers from; and who a
   // NEW upload / typed document / crawled site is for.
   const [docFilter, setDocFilter] = useState("all");
+  // The business's active phone numbers (§6.29) — the Numbers tab manages them, the Call tab can
+  // ring one "as a caller would".
+  const [numbers, setNumbers] = useState([]);
   const [newDocScope, setNewDocScope] = useState("all");
   const pickAgent = useCallback((id) => {
     setAgentId(id);
@@ -447,6 +451,20 @@ export default function Home() {
   useEffect(() => {
     loadDocs();
   }, [loadDocs]);
+
+  const loadNumbers = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/numbers?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`);
+      const data = await readJsonSafe(res);
+      if (res.ok) setNumbers(data.numbers);
+    } catch {
+      // The numbers are a convenience on the Call tab; the Numbers tab shows its own errors.
+    }
+  }, [tenantId, uiLocale]);
+
+  useEffect(() => {
+    loadNumbers();
+  }, [loadNumbers]);
 
   // ── who a document is for (§6.28) ──
   // Choosing only makes sense with two agents that can be chosen (an unsaved default has no id).
@@ -1067,7 +1085,7 @@ export default function Home() {
       />
 
       <nav className="flex flex-wrap gap-1 border-b border-gray-200" role="tablist" aria-label={t("dashboard:agent.title")}>
-        {["agent", "knowledge", "collect", "call", "chat"].map((id) => (
+        {["agent", "knowledge", "collect", "numbers", "call", "chat"].map((id) => (
           <button
             key={id}
             type="button"
@@ -1608,11 +1626,27 @@ export default function Home() {
         />
       )}
 
+      {tab === "numbers" && (
+        <NumbersPanel
+          tenantId={tenantId}
+          uiLocale={uiLocale}
+          numbers={numbers}
+          agents={agentList}
+          onChanged={loadNumbers}
+          t={t}
+          cardClass={card}
+          inputClass={inputCls}
+          buttonClass="rounded border border-gray-300 px-3 py-1.5 text-sm"
+          helpClass={help}
+          labelClass={label}
+        />
+      )}
+
       {tab === "call" && (
         <>
       {/* The voice channel — the product (§1). Same brain as the chat below; it runs in
             its own process (npm run voice), see src/lib/voice/gateway.js. */}
-        <VoiceCallPanel tenantId={tenantId} agentId={agentId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
+        <VoiceCallPanel tenantId={tenantId} agentId={agentId} numbers={numbers} agents={agentList} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
         </>
       )}
 

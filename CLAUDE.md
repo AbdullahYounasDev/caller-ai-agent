@@ -8,6 +8,11 @@
 >
 > If this file and the code disagree, **the code wins** — and fix this file in
 > the same change.
+>
+> **Documents that are handed to someone must never be out of date** — this file, `README.md`,
+> `docs/handoff-to-backend.md`, `src/lib/standins/README.md`, `.env.example`. A change that alters
+> behaviour, ownership, an API, a migration, a command or a test count updates them **in the same
+> commit**. The checklist is in §11.
 
 ---
 
@@ -71,7 +76,7 @@ public.
 | UI | React 19.2, **Tailwind v4** (CSS-first `@theme`) | No `tailwind.config.js`; config is in `src/app/globals.css`. |
 | DB | **Postgres 16 + pgvector** | Our schema is `ai_engine`; the partner's is `tenant_core`, same database. |
 | ORM | **Prisma 6** | See §6.1 — Prisma cannot see the HNSW index and keeps trying to drop it. |
-| **Chat model** | Pluggable: `LLM_PROVIDER` = `gemini` \| `openrouter` | Via [`llm.js`](src/lib/agent/llm.js). |
+| **Chat model** | Pluggable: `LLM_PROVIDER` = `gemini` \| `groq` \| `openrouter` | Via [`llm.js`](src/lib/agent/llm.js). Groq is the fast one for voice (§6.24). |
 | **Embeddings** | **Gemini only — not swappable** | `gemini-embedding-001` @ 768 dims. §6.2 explains why this is a correctness constraint. |
 | Documents | `pdfjs-dist`, `mammoth`, `tesseract.js`, `@napi-rs/canvas` | All four in `serverExternalPackages`; see §6.8. |
 | File storage | **Cloudinary** (`resource_type: raw`) | The ORIGINAL uploaded file only — never what the agent answers from. See §6.13. |
@@ -82,32 +87,36 @@ public.
 
 ## 4. Who owns what
 
-- **Us — the AI engine.** RAG, the brain, channel adapters, telephony plumbing,
-  tool-calling, conversation storage, i18n of everything we render.
-- **Partner — the multi-tenant platform.** Tenants, users, auth, roles,
-  billing/plans, the business-facing dashboard, onboarding, quotas.
+**The split (agreed with the partner — `docs/handoff-to-backend.md` is the contract):**
 
-We **never** create or migrate tenant tables. We consume `tenantId` as an opaque
-string and scope every query by it.
+| The BACKEND (partner — Abdul Haseeb) STORES and MANAGES | The ENGINE (us) USES it to do the AI work |
+| --- | --- |
+| Tenants, users, auth, roles, billing, plans, quotas, onboarding, the business dashboard | `tenantId` is an opaque string; every query is scoped by it |
+| **Agents** — creating, renaming, archiving them, and every agent's **settings**, versioned | Reading an agent's settings to answer (persona, hours, language, voice, checklist, forwarding) |
+| **Knowledge** — uploads, original files (Cloudinary), limits, the document list, **which agents use each document** | Processing documents: extraction, OCR, chunking, embeddings; searching only what the agent may use |
+| **Phone numbers** — buying, porting, releasing, billing, **which agent each number rings** | The lookup "this number was dialled → which tenant, which agent" and everything on the call |
+| Customers, bookings / requests and the staff screens that confirm them | Taking the request in conversation (the checklist engine) and handing it over |
+| Integration secrets of its own (storage, billing, messaging, Twilio account) | The engine's own secrets (model keys); the shared internal key and event-signing secret |
 
-> **Update (the backend split):** the partner's responsibility table now has the backend storing the
-> *versioned* agent config, knowledge uploads/limits, integration secrets, approval decisions and
-> usage counts, and the engine reading config, processing knowledge, proposing/executing actions and
-> reporting usage. Until that exists, config stays in `agent_configs` behind `tenant/config.js`, and
-> the request-taking backend parts are stood in locally (`src/lib/standins/`, §6.25).
+We **never** create or migrate tenant tables.
 
-**DECIDED — agent configuration lives on our side.** `agent_configs` is in
-`ai_engine`; the partner's dashboard edits it through `PUT /api/agent-config`.
-**A tenant has one or more agents** (one `agent_configs` row each, one of them the default — §6.27).
-Persona and capabilities change whenever the prompt pipeline changes, so keeping
-them here means prompt iteration never waits on his migrations.
+**TODAY the backend half does not exist yet, so the engine STANDS IN for it** — on purpose, behind
+seams, so the whole product can be built and tested end to end now and his side can replace ours
+without a refactor:
 
-**★ Two seams exist so his half can arrive without a refactor:**
-
-| Seam | Question it answers | Change it when |
+| Stood in here | Where | The seam it is read through (the only code that changes when his API exists) |
 | --- | --- | --- |
-| [`tenant/config.js`](src/lib/tenant/config.js) | What has this business (and each of its agents, §6.27) configured? | We need a field that lives in `tenant_core` |
-| [`tenant/registry.js`](src/lib/tenant/registry.js) | May this tenant be served? | Billing/suspension/quota exists — edit `assertTenantServiceable()` and **nothing else** |
+| Agents and their settings | `agent_configs` | [`tenant/config.js`](src/lib/tenant/config.js) — `getAgentConfig`, `listAgents` (§6.27) |
+| Which agents use each document | `knowledge_source_agents` | [`lib/agent/knowledge-access.js`](src/lib/agent/knowledge-access.js) (§6.28) |
+| Phone numbers → agent | `phone_numbers` | [`tenant/registry.js`](src/lib/tenant/registry.js) `resolveDialledNumber()` (§6.29) |
+| Customers, requests, engine → backend events | `customers`, `records` | [`src/lib/standins/`](src/lib/standins/README.md) (§6.25) |
+| May this tenant be served? | (nothing stored — always yes) | `registry.js` `assertTenantServiceable()` — edit **only** that function (§6.18) |
+
+The engine's routes that WRITE these (`PUT /api/agent-config`, `/api/agents`, `/api/collect`,
+`/api/numbers`, the `agents` of `/api/knowledge`) are the stand-in dashboard: they exist so the test
+console works today and so the partner sees the exact shapes his side needs. When his side lands,
+they go away and the seams read from his `/internal/*` API (handoff doc). **Do not grow them into a
+second backend**, and never let engine code read the stood-in tables except through the seams.
 
 Never let tenant-state checks leak into route handlers. The day one is missed is
 the day a suspended tenant keeps being served. **Routes don't call
@@ -115,7 +124,7 @@ the day a suspended tenant keeps being served. **Routes don't call
 the translated, route-facing wrapper next to it in the same file. It is called
 from every route that serves or mutates a tenant's data: `/api/chat`, all of
 `/api/knowledge` (upload/crawl/typed-text, edit, delete, retry) and
-`PUT /api/agent-config`. See §6.18.
+`PUT /api/agent-config`, `/api/agents`, `/api/collect` and `/api/numbers`. See §6.18.
 
 ---
 
@@ -146,7 +155,8 @@ scripts/
   eval-questions.mjs           # the labelled question set, shared by both real-path evals
   eval-embedding-variants.mjs  # picks an embedding scheme IN MEMORY before anything is re-embedded (§6.2, §6.20)
   test-collect*.mjs            # `npm run test:collect` — request-taking end to end against the real DB, faked models, ZERO quota (§6.25)
-  test-agents.mjs              # `npm run test:agents` — several agents per tenant against the real DB, faked models, ZERO quota (§6.27)
+  test-agents.mjs              # `npm run test:agents` — several agents per tenant + knowledge per agent against the real DB, faked models, ZERO quota (§6.27, §6.28)
+  test-numbers.mjs             # `npm run test:numbers` — the phone-number lookup against the real DB, ZERO quota (§6.29)
   test-reembed*.mjs            # `npm run test:reembed` — ingest/re-embed invariants with a faked embedder, no quota
   repro-tenant-recall.mjs      # synthetic multi-tenant data: does the shared HNSW index lose a tenant's rows? (§6.1)
   backfill-search-config.mjs   # `npm run db:backfill-search` — label chunks with their document's language; no embeddings (§6.3)
@@ -154,11 +164,12 @@ scripts/
   alias-loader.mjs / alias-register.mjs  # lets plain-node scripts import src/ (the "@/" alias) so they run the app's own code
   test-openrouter.mjs          # OpenRouter integration vs. a local stand-in
 src/app/
-  page.js                      # THE TEST CONSOLE — tabs: agent · knowledge · collected · call · chat
+  page.js                      # THE TEST CONSOLE — agent bar + tabs: agent · knowledge · what it collects · numbers · call · chat
   collect/CollectPanel.js      # the "what the agent collects" checklist + the list of requests taken (§6.25)
   handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
   agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
   knowledge/DocumentAgents.js  # one document's "All agents / Only: …" and its editor, in the Knowledge tab (§6.28)
+  numbers/NumbersPanel.js      # the Numbers tab: add / link / release a number, try the lookup (§6.29)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
@@ -166,6 +177,7 @@ src/app/
     voice/gateway/route.js     # where the gateway is (health + voice preview URLs) — for the voice picker
     voice/calls/route.js       # recent calls (summary); voice/calls/[id] = one call's turns + timeline
     agents/route.js            # list / add a tenant's agents; agents/[id] = rename, archive/restore, make default (§6.27)
+    numbers/route.js           # list / add phone numbers; numbers/[id] = link to an agent, rename, release; numbers/lookup = try the routing (§6.29)
     collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned, per agent)
     records/route.js           # list requests the agent took; records/[id] = read / confirm / decline one
     agent-config/route.js      # GET/PUT — partner's dashboard contract
@@ -221,15 +233,16 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
-  standins/                    # fake backend (customers, records, events) behind fixed interfaces — what Haseeb replaces (§6.25)
+  standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
+  telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
-  tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18) and the plan's agent limit hook
+  tenant/ config.js, registry.js   # ★ the seams (§4); registry.js: requireServiceableTenant() (§6.18), the plan's agent limit hook, resolveDialledNumber() (§6.29)
   tenant/agent-request.js      # which agent a request is for: ?agentId= → requireAgent(), agentScope() (§6.27)
-  i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
+  i18n/   index.js, catalogs.js    # en + ur — the only two languages (§7)
   security/rate-limit.js       # generic limiter — first wired up on /api/chat (§6.18)
   db.js                        # PrismaClient singleton
-src/locales/en|it/             # ACTIVE: common, dashboard, capabilities, validation, errors
-src/locales/ar|ur/             # DORMANT — translated, on disk, not build-enforced
+src/locales/en|ur/             # common, dashboard, capabilities, validation, errors — parity enforced on build (§7)
+docs/handoff-to-backend.md     # ★ THE CONTRACT with the partner: what the backend builds, the shapes, what is stood in here
 ```
 
 ---
@@ -1612,7 +1625,8 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   turn, a throwing callback is swallowed, and the chat route ignores them.
 - **Trust: a one-minute, single-use ticket** (`lib/voice/ticket.js`). The browser cannot hold
   `INTERNAL_API_KEY`, so `POST /api/voice/session` (internal-auth guarded, `requireServiceableTenant`,
-  10/min per tenant) signs `{tenantId, expiry, nonce}` with HMAC (`VOICE_SESSION_SECRET`, else
+  10/min per tenant) signs `{tenantId, agentId, expiry, nonce}` — plus the dialled number for a call "as if dialling"
+  (§6.29) — with HMAC (`VOICE_SESSION_SECRET`, else
   `INTERNAL_API_KEY`, else a dev-only secret; NULL in production = every call refused). The
   gateway verifies it, refuses a replay, and re-checks `assertTenantServiceable` because it serves
   the tenant. Not the removed widget tokens (§2): those were long-lived public credentials.
@@ -1776,7 +1790,7 @@ lower):
 | | Kokoro (natural) | Piper (fast) |
 | --- | --- | --- |
 | TTS per sentence | 1.3–2.1 s (0.57× real time, 4 threads); first chunk 0.86 s at 8 threads | 0.26–0.56 s (0.13×) |
-| Word error after STT round trip, 16 kHz / simulated 8 kHz phone | 0% / 0% (en and it) | 0% / 0% |
+| Word error after STT round trip, 16 kHz / simulated 8 kHz phone | 0% / 0% (en and it — measured before Italian was removed) | 0% / 0% |
 | Urdu | 3.1–3.2 s per 5.5 s sentence (0.56×) | — |
 
 STT (Parakeet) 0.2–0.5 s per utterance. Model load ~10 s at gateway start (three Kokoro languages).
@@ -1805,7 +1819,7 @@ taken. Backend responsibilities that are stood in for are in
 
 - **Configuration over code.** `lib/collect/catalog.js` is DATA: FIELDS (how a detail is asked and
   checked), RECORD_TYPES (which fields make one kind of request), INDUSTRIES (a starting
-  selection). A new kind of business is a new preset, never a new code path. Stored per tenant as
+  selection). A new kind of business is a new preset, never a new code path. Stored per AGENT (§6.27) as
   one JSON document, `agent_configs.collect`, versioned (`collect_version`), replaced whole by
   `PUT /api/collect`. Reading a stored document never throws (bad values degrade to the nearest
   valid one — a conversation is waiting); a save returns translated, specific refusals, including
@@ -2054,6 +2068,59 @@ caller to its own person, London has none), what the agent collects (one agent t
 reply language, the opening hours and the forwarding contacts each follow the AGENT; the dashboard language follows the
 tenant (§6.27). Records and calls carry the agent (§6.27).
 
+### 6.29 Phone numbers — "this number was dialled: which business, which agent?"
+
+**The model (decided with the owner):** a business has one or more phone numbers; **each number rings exactly ONE
+agent, and an agent may have many numbers**. An inbound call identifies its business AND its agent by the number that
+was dialled — never by anything the caller supplies (§9.2). Buying, porting, releasing and billing numbers is the
+BACKEND's (§4, handoff B11); the engine owns the lookup and everything on the call. Twilio itself is not built yet:
+this is the part that has to be right before it is.
+
+**The seam:** `tenant/registry.js resolveDialledNumber(dialled)` → `{ ok, tenantId, agentId, numberId, e164 }` or
+`{ ok: false, reason }`. Today it reads the stand-in store (`standins/numbers.js findNumberForRouting`, table
+`phone_numbers`); when the backend's `GET /internal/numbers/{e164}` exists, the read inside this ONE function changes
+and nothing else does. Its callers: the console's "call as if dialling" (`POST /api/voice/session?to=`),
+`GET /api/numbers/lookup?to=`, and — later — the Twilio webhook.
+
+**Rules that must not drift:**
+
+- **Refuse, never guess.** Reasons (`telephony/routing.js ROUTE_REFUSALS`): `invalid_number`, `unknown`, `released`,
+  `unassigned` (linked to no agent), `agent_archived`, `tenant_unserviceable`. A refused number is never sent to "some"
+  agent of the business, and never to another business. A real caller hears `voiceLine("not_in_service")` (en + ur) and
+  the call ends; the reason goes to the log.
+- **E.164 only** (`toE164`): provider webhooks send it; people typing may add spaces, dashes, brackets or `00`. A number
+  WITHOUT its country code is refused (`needsCountryCode`), not guessed — "020 …" is London to a Briton and a stranger's
+  line elsewhere.
+- **One active number = one business**, enforced by the database: `phone_numbers.active_e164` is UNIQUE and set to the
+  number while active, NULL once released (the `default_for` trick of §6.27 — no partial index Prisma cannot see).
+  A released number keeps its row (calls point at it) and can be added again, by anyone; the lookup then says
+  `released` only while nobody holds it.
+- **A number rings an ACTIVE agent of its OWN business** — checked on add and on re-link. An agent that numbers still
+  ring cannot be archived (`agents.hasNumbers`); move them first. If an agent ends up archived anyway, its numbers refuse
+  (`agent_archived`) rather than re-route.
+- **Cached ~30 s per process** (`telephony/route-cache.js`); every change through `standins/numbers.js` drops the
+  number's route at once, so re-linking takes effect for the NEXT caller. Serviceability (`assertTenantServiceable`) is
+  re-checked on EVERY call and never cached, so a suspension is immediate. A call already in progress keeps the agent it
+  was answered by.
+- **The call records its line:** `call_logs.to_number` + `phone_number_id` (and `agent_id`), signed into the voice
+  ticket (claims `l`, `d`) so a browser cannot forge which number a call came in on. `GET /api/voice/calls?numberId=`
+  lists one number's calls — per-number reports and per-number billing start here.
+- **The console's "call as if dialling"** (Call tab) uses the REAL lookup: the number, not the agent picker, decides
+  who answers — the closest thing to a phone call without Twilio. It only dials the console tenant's own numbers;
+  another business's number reads "unknown" there and is never connected.
+
+**API** (stand-in dashboard, §4): `GET/POST /api/numbers`, `PATCH /api/numbers/:id` (`{ agentId?, label?, status:
+"released" }` — no DELETE), `GET /api/numbers/lookup?to=` (tenant-agnostic on purpose: the number alone decides; a
+refusal is a 200 answer). Errors `validation:numbers.*` and `numbers.route.*` (en + ur). Kinds: `purchased` and
+`forwarding` (the hidden number a business forwards its own line to) route the same.
+
+**Verified:** `npm test` (567 — E.164, every routing decision, the cache, the signed line, the not-in-service line, the
+call recording its number), `npm run test:numbers` (32 against the real DB: storage format, every refusal, re-link
+effective for the next caller despite the cache, one business per active number, release and re-adding elsewhere,
+isolation, the archive guard, a suspended business, a call's number and per-number counts), the HTTP routes by hand, and
+the Numbers and Call tabs driven in a browser. **Not built:** the Twilio webhook (signature check → this lookup → TwiML
+`<Connect><Stream>` to the gateway → `transports/twilio.js`), buying numbers (backend), forwarding-number setup help.
+
 ---
 
 ## 7. Languages
@@ -2069,8 +2136,8 @@ Nothing user-facing is a hardcoded string — not a heading, not a button, not a
 
 | Setting | Values | Controls |
 | --- | --- | --- |
-| `agent_configs.uiLocale` | `en` \| `ur` | The **interface** — every dashboard screen (Urdu renders right-to-left) |
-| `agent_configs.replyLanguage` | `en` \| `ur` | What the **agent says** |
+| `agent_configs.uiLocale` | `en` \| `ur` | The **interface** — every dashboard screen (Urdu renders right-to-left). One per TENANT (kept on the default agent, §6.27) |
+| `agent_configs.replyLanguage` | `en` \| `ur` | What the **agent says** — per agent |
 
 The two are independent: a Karachi business can run an English dashboard while its agent
 answers in Urdu.
@@ -2129,6 +2196,7 @@ right language, with history persisted per tenant.
 | Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
+| **Phone numbers** | ✅ the lookup "dialled number → business → agent" (`registry.js resolveDialledNumber`): E.164, one number = one agent, refuses unknown / released / unlinked / archived / suspended, cached and dropped on change; calls record their number; the console can call "as if dialling" a number (§6.29). ⚠️ the numbers themselves are a stand-in (buying them is the backend's) and the Twilio webhook is not built |
 | **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge: one library, each document shared or limited to some agents, retrieval scoped to the agent and failing closed (§6.28) |
 | **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
@@ -2139,8 +2207,9 @@ right language, with history persisted per tenant.
 ### Limitations — be honest about these
 
 1. **No telephony yet.** Voice calls work from the browser (§6.24), but no phone number
-   reaches the agent. The gateway was built transport-agnostic so Twilio is a new transport
-   adapter, not a redesign — §9.2. **Voice latency is ~3–4 s to first word on a good free-tier
+   reaches the agent. What is ready for it: the gateway is transport-agnostic, the transfer seam
+   exists (§6.26), and the number lookup is built (§6.29) — what remains is the Twilio webhook and
+   transport (§9.2). **Voice latency is ~3–4 s to first word on a good free-tier
    call and up to ~10 s on a bad one**, because Gemini's free tier takes 3.5–10 s to its first
    token (§6.24). The ~800 ms target needs a fast LLM (Groq — built, needs a key) and probably
    the fast voice tier.
@@ -2181,16 +2250,17 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 327 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 567 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
    speech/brain/recorder (greeting, turns, barge-in, failures, ordering, hang-up), sentence
    chunking, intent, tickets, PCM and the wire format. The real speech models are covered by
-   `npm run voice:smoke`, not by `npm test`. Not covered: anything that needs Postgres or a model — route
-   handlers, `ingestDocument`, retrieval SQL, `respond()`, `retrieveForTurn`'s
-   trigger flow, `rewriteQuery`. Those still rest on the evals, `test:reembed`,
-   `test:openrouter`, `db:check` and hand verification.
+   `npm run voice:smoke`, not by `npm test`. What needs Postgres runs in the DATABASE suites, with the
+   models faked: `test:collect`, `test:agents`, `test:numbers`, `test:reembed` (they cover `respond()`,
+   `ingestDocument`, the retrieval SQL's filters, the stand-ins and the lookup). Still not covered by any
+   automatic test: the route handlers themselves (checked by hand over HTTP), anything with a REAL model
+   (`rewriteQuery` quality, wording, retrieval quality — the evals and `test:openrouter`), and real audio.
 9. **In-process state** — job queue, caches, and the rate limiter (§6.18).
    Multi-instance needs Redis; N instances currently means N× the rate limit
    (chat: 60/min per tenant, 5 per 10s per conversation), same caveat
@@ -2211,7 +2281,9 @@ right language, with history persisted per tenant.
 ### 9.1 Next, in order
 
 0. **Hand the backend contract to Haseeb** (`docs/handoff-to-backend.md`): agree which `/internal/*`
-   routes come first, replace `standins/`, and decide who sends the customer's confirmation (WhatsApp/SMS).
+   routes come first — agents and their settings, document availability, phone numbers, customers and
+   requests are all stood in here today (§4) — replace the stand-ins as his side lands, and decide who
+   sends the customer's confirmation (WhatsApp/SMS).
    Then the conversation-memory fixes seen in testing (an utterance cut by a pause arrives as two
    turns; the agent should see the previous exchange after a pause) and measuring Urdu end to end.
 1. **Finish the once-only embedding pass (§6.20), as soon as a paid key or the
@@ -2285,7 +2357,7 @@ right language, with history persisted per tenant.
 7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
    (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
    included. Record a handful of real calls before promising it.
-8. **Telephony** — §9.2.
+8. **Telephony** — §9.2. The lookup is built (§6.29); next is the Twilio webhook + transport.
 
 ### 9.2 Twilio — the destination, not yet started
 
@@ -2300,10 +2372,10 @@ What it will need:
 
 - **Number provisioning** through Twilio's API, surfaced as our own purchase
   flow. The partner handles payment; we handle the Twilio side and the mapping.
-- **`phone_number → tenant` routing.** An inbound call identifies its tenant by
-  **the number that was dialled**. That lookup belongs in
-  [`registry.js`](src/lib/tenant/registry.js), from a **verified Twilio webhook
-  signature** — never from anything the caller supplies.
+- **`phone_number → tenant + agent` routing — BUILT (§6.29).** An inbound call identifies its
+  business and agent by **the number that was dialled**: `registry.js resolveDialledNumber()`.
+  The webhook still has to VERIFY Twilio's signature before calling it — never take the tenant from
+  anything the caller supplies — and answer a refusal with `voiceLine("not_in_service")`.
 - **Realtime voice — DECIDED (§6.24): an STT → `respond()` → TTS pipeline**, not
   speech-to-speech. A speech-to-speech model (e.g. Gemini Live) brings its own prompt and
   session and turns retrieval into a tool call — a second brain beside `respond()`, which §1
@@ -2326,7 +2398,8 @@ What it will need:
 - **`call_logs` / `call_turns` / `call_events` exist and are written** (§6.24); the recording URL
   column is still unused — audio storage is not yet chosen.
 - **Compliance is not optional:** recording disclosure, consent, DNC lists,
-  permitted calling hours. Italy and the Gulf have real constraints. Budget time.
+  permitted calling hours. The UK and Ireland (the first markets) require telling callers they are speaking to an
+  AI and that a call may be recorded; Pakistan has its own rules. Budget time.
 
 **To agree with the partner before telephony starts:** who provisions numbers,
 how the purchase flow is billed, and the usage-event shape for per-minute
@@ -2352,9 +2425,10 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 554 unit tests: knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
-npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
-#   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+npm test                 # 567 unit tests: phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
+#   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
 npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent, against the real DB, faked models — spends no quota (§6.27, §6.28)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
@@ -2422,7 +2496,9 @@ stale.
   scripts find the running app, default `http://localhost:3000`), `EVAL_TENANT`,
   `TEST_TENANT`, `FAKE_PORT`, `EMBED_VARIANTS_CACHE`.
 
-`.env*` is gitignored. Never commit keys; update `.env.example` instead.
+`.env*` is gitignored **except `.env.example`**, which is committed and lists every variable the code reads (it
+used to be swallowed by that same ignore rule, so every "cp .env.example .env" pointed at a missing file). Never
+commit keys; update `.env.example` in the same commit as any new, renamed or removed variable (§11).
 
 ---
 
@@ -2434,6 +2510,23 @@ stale.
   reuses it), so a "pure" test that reaches the database fails loudly; `jobs.test.mjs`
   plants an in-memory fake instead. Tests never call Gemini. A bug found by a test gets
   its own named test; a fix that changes what is embedded stays behind `embed-scheme.js`.
+
+- **★ HANDOVER DOCUMENTS STAY CURRENT — a stale line is a bug, fixed in the same commit.** These are read by
+  people and AI agents who were not here — the partner (Abdul Haseeb), his assistants, the next session — and they
+  act on them. A wrong line in them is worse than a missing one: someone builds the wrong thing from it.
+
+  | Document | Who reads it | Update it when… |
+  | --- | --- | --- |
+  | `CLAUDE.md` | every session, first | any rule, decision, ownership, file, command, migration or measured number changes |
+  | `docs/handoff-to-backend.md` | the partner and his AI | an API, a field, an event, a stand-in, or who owns what changes |
+  | `README.md` | anyone opening the repo | setup, commands or what the product does changes |
+  | `src/lib/standins/README.md` | whoever replaces the stand-ins | a stand-in is added, removed or changes shape |
+  | `.env.example` | whoever deploys | an environment variable is added, renamed or removed |
+
+  **Before every commit:** (1) grep these files for every route, table, function and number the change touched;
+  (2) fix test counts (`npm test` prints them) and migration names; (3) when a decision changes, rewrite the old
+  sentence — do not add a contradicting one below it; (4) say in the commit message which documents were updated.
+  Measurements taken before a change stay, labelled with when they were taken; a CURRENT-state claim never does.
 
 - **JavaScript, not TypeScript.** JSDoc on exported functions, as `lib/agent/*` does.
 - **Comments explain *why*, not *what*.** The existing files set the bar. Every

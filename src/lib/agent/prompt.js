@@ -450,6 +450,13 @@ export function voiceLine(kind, language, variant = 0) {
       en: ["I'm sorry I couldn't understand. Let me connect you to a member of our team."],
       ur: ["معذرت، بات واضح نہیں ہو سکی۔ آپ کی بات ہماری ٹیم کے ایک رکن سے کروائی جا رہی ہے۔"],
     },
+    // A call to a number that rings no agent (unknown, released, not linked yet, the agent or the
+    // business not in service — §6.29). Said by the phone transport before it hangs up; there is no
+    // business to name and no agent to answer, so it is the same plain line for every reason.
+    not_in_service: {
+      en: ["Sorry, this number is not in service at the moment. Please try again later. Goodbye."],
+      ur: ["معذرت، یہ نمبر اس وقت سروس میں نہیں ہے۔ براہِ کرم بعد میں دوبارہ کوشش کیجیے۔ خدا حافظ۔"],
+    },
     handoff_failed: {
       en: ["I'm sorry, nobody is available to take the call right now. I can take your details and have someone call you back."],
       ur: ["معذرت، اس وقت کوئی دستیاب نہیں ہے۔ ہم آپ کی تفصیل لکھ لیتے ہیں تاکہ ٹیم آپ کو واپس کال کرے۔"],

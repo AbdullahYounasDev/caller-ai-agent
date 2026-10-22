@@ -32,6 +32,10 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# …except the documented template: it holds no secrets and is a handover document (CLAUDE.md §11).
+# It used to be swallowed by the line above, so every "cp .env.example .env" in the docs pointed at
+# a file that did not exist.
+!.env.example
 
 # vercel
 .vercel

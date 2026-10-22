@@ -8,6 +8,7 @@ import {
 import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config";
 import { emptyHandoffConfig, normalizeHandoffConfig } from "@/lib/handoff/config";
 import { assertCanAddAgent } from "@/lib/tenant/registry";
+import { countNumbersForAgent } from "@/lib/standins/numbers";
 
 /**
  * THE TENANT CONFIG SEAM — and since a tenant can have several agents, THE AGENT SEAM.
@@ -399,6 +400,8 @@ export async function createAgent(tenantId, { name, copyFrom = null } = {}) {
  *   - the default agent cannot be archived (make another one the default first) — something
  *     must always answer a request that names no agent;
  *   - an archived agent cannot become the default;
+ *   - an agent that phone numbers still ring cannot be archived (move them first, §6.29) — a
+ *     caller to that number would otherwise reach "not in service" with no warning to anyone;
  *   - restoring an agent counts against the agent limit.
  *
  * @param {string} tenantId
@@ -414,6 +417,10 @@ export async function updateAgent(tenantId, agentId, change = {}) {
   if (change.status !== undefined) {
     if (!AGENT_STATUSES.includes(change.status)) throw new AgentRuleError("statusInvalid");
     if (change.status === "archived" && (row.defaultFor || change.makeDefault)) throw new AgentRuleError("archiveDefault", 409);
+    if (change.status === "archived" && row.status !== "archived") {
+      const numbers = await countNumbersForAgent(row.id);
+      if (numbers) throw new AgentRuleError("hasNumbers", 409, { count: numbers });
+    }
     if (change.status === "active" && row.status !== "active") {
       const active = await prisma.agentConfig.count({ where: { tenantId, status: "active" } });
       if (active >= MAX_AGENTS_PER_TENANT) throw new AgentRuleError("tooMany", 409, { max: MAX_AGENTS_PER_TENANT });
