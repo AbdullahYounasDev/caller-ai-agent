@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { embedText } from "./llm";
 import { buildKeywordQuery } from "./keyword-query";
 import { EMBEDDING_SCHEME_VERSION } from "./embed-scheme";
+import { agentAccessSql } from "./knowledge-access";
 
 /**
  * Embed a question and find the tenant's most relevant knowledge chunks.
@@ -132,6 +133,11 @@ export async function embedQuery(query, embed = embedText) {
 /**
  * @param {object} args
  * @param {string} args.tenantId
+ * @param {string|null} [args.agentId] - the agent answering (§6.28): it searches the tenant's
+ *   SHARED documents plus those restricted to it. Omitted/null = shared documents only — the
+ *   filter fails CLOSED, so a caller that forgets the agent never reaches a restricted page.
+ * @param {boolean} [args.wholeLibrary] - debug/eval ONLY: search every document of the tenant,
+ *   whoever it is for. The agent never passes it.
  * @param {string} args.query - the customer's raw question
  * @param {number} [args.topK]
  * @param {number} [args.maxDistance] - override, used by the eval harness
@@ -141,6 +147,8 @@ export async function embedQuery(query, embed = embedText) {
  */
 export async function retrieveRelevantChunks({
   tenantId,
+  agentId = null,
+  wholeLibrary = false,
   query,
   topK = DEFAULT_TOP_K,
   maxDistance = MAX_DISTANCE,
@@ -219,6 +227,7 @@ export async function retrieveRelevantChunks({
       JOIN ai_engine.knowledge_sources s ON s.id = c.source_id
       WHERE c.tenant_id = ${tenantId}
         AND c.embedding <=> ${vectorLiteral}::vector <= ${maxDistance}
+        ${agentAccessSql(agentId, { wholeLibrary })}
       ORDER BY distance ASC
       LIMIT ${CANDIDATE_POOL_SIZE}
     `;
@@ -329,19 +338,23 @@ export function rankCandidates(candidates, topK) {
  *
  * Never call this from the agent: returning material the threshold rejected is
  * the behaviour the threshold exists to prevent.
+ *
+ * Searches the WHOLE library unless an agent is named (`agentId`), so "why didn't it find
+ * that?" can also be asked as "why didn't THIS agent find it?" (§6.28).
  */
-export async function retrieveWithoutThreshold({ tenantId, query, topK = DEFAULT_TOP_K }) {
+export async function retrieveWithoutThreshold({ tenantId, query, topK = DEFAULT_TOP_K, agentId }) {
   const queryEmbedding = await embedText(query, { role: "query" });
   const vectorLiteral = `[${queryEmbedding.join(",")}]`;
 
   return prisma.$queryRaw`
-    SELECT id,
-           source_title AS "sourceTitle",
-           heading,
-           content,
-           embedding <=> ${vectorLiteral}::vector AS distance
-    FROM ai_engine.knowledge_chunks
-    WHERE tenant_id = ${tenantId}
+    SELECT c.id,
+           c.source_title AS "sourceTitle",
+           c.heading,
+           c.content,
+           c.embedding <=> ${vectorLiteral}::vector AS distance
+    FROM ai_engine.knowledge_chunks c
+    WHERE c.tenant_id = ${tenantId}
+      ${agentAccessSql(agentId, { wholeLibrary: agentId === undefined })}
     ORDER BY distance ASC
     LIMIT ${topK}
   `;

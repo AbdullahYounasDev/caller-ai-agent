@@ -6,7 +6,7 @@
  *   npm run test:agents        (needs DATABASE_URL, migrations applied)
  *
  * Covers what the unit tests cannot, because it needs Postgres:
- *   - a tenant with nothing saved gets ONE default agent, created on first list or save
+ *   - a tenant with nothing saved gets ONE default agent, created on its first save (a list never writes)
  *   - a new agent starts as a copy of another's settings; afterwards each keeps its own
  *   - names: required, unique among active agents, length-capped
  *   - the dashboard language is the TENANT's: saved through any agent, read by every agent
@@ -16,6 +16,13 @@
  *   - the default can move; the default cannot be archived; an archived agent cannot be default
  *   - tenant isolation: one tenant's agent id is "not found" for another
  *   - the engine's own cap on active agents
+ *   - KNOWLEDGE PER AGENT (§6.28): shared vs restricted documents, the retrieval filter for every
+ *     kind of caller (an agent, the default, no agent, the debug whole-library path), availability
+ *     set at create / kept on replace / swapped with the new chunks / changed without re-embedding,
+ *     links removed with the document, a copied agent inheriting nothing restricted, another
+ *     tenant's agent refused — and respond() itself answering each agent from its own documents
+ *   - EVERY SETTING PER AGENT through the real respond(): call forwarding, what it collects, the
+ *     reply language and the opening hours each follow the agent, not the tenant
  */
 if (!process.env.DATABASE_URL) {
   try {
@@ -32,9 +39,13 @@ const { getAgentConfig, saveAgentConfig, saveCollectConfig, listAgents, createAg
 const { presetConfig } = await import("@/lib/collect/config");
 const { createRecord, listRecords } = await import("@/lib/standins/records");
 const { agentScope } = await import("@/lib/tenant/agent-request");
+const { ingestDocument, listSources, setDocumentAgents, deleteSource } = await import("@/lib/agent/ingest");
+const { retrieveRelevantChunks } = await import("@/lib/agent/retrieve");
+const { readAgentsInput, canAgentUse } = await import("@/lib/agent/knowledge-access");
 
 const T = "__agents_test_chain__";
 const OTHER = "__agents_test_other__";
+const KB = "__agents_test_kb__";
 let fails = 0;
 const ok = (c, m) => {
   console.log(`${c ? "PASS" : "FAIL"}  ${m}`);
@@ -50,7 +61,8 @@ const rejects = async (fn, code) => {
 };
 
 async function wipe() {
-  for (const tenantId of [T, OTHER]) {
+  for (const tenantId of [T, OTHER, KB]) {
+    await prisma.knowledgeSource.deleteMany({ where: { tenantId } });
     await prisma.record.deleteMany({ where: { tenantId } });
     await prisma.customer.deleteMany({ where: { tenantId } });
     await prisma.message.deleteMany({ where: { tenantId } });
@@ -168,6 +180,106 @@ ok(await rejects(() => saveAgentConfig(OTHER, { businessName: "Hijack" }, { agen
 ok(await rejects(() => updateAgent(OTHER, dublin.id, { name: "Hijack" }), "AGENT_NOT_FOUND"), "…or renamed");
 ok(await rejects(() => createAgent(OTHER, { name: "Copy", copyFrom: dublin.id }), "AGENT_NOT_FOUND"), "…or copied");
 ok((await getAgentConfig(T, { agentId: dublin.id, skipCache: true })).businessName === "Pizza Roma Dublin", "the agent is untouched");
+
+
+// Own block: the names below must not collide with the agent tests above.
+{
+// ── knowledge per agent (§6.28) ─────────────────────────────────────────────
+await saveAgentConfig(KB, { businessName: "Pizza Roma", purpose: "An Italian restaurant chain.", timezone: "Europe/Dublin", replyLanguage: "en" });
+const kbMain = (await getAgentConfig(KB, { skipCache: true })).agentId;
+const kbDublin = (await createAgent(KB, { name: "Dublin" })).id;
+const kbLondon = (await createAgent(KB, { name: "London" })).id;
+
+const MENU = "Our menu has pizza margherita, lasagne and tiramisu.";
+const DUBLIN = "Dublin branch special: the Guinness stew costs fourteen euros on Fridays.";
+const LONDON = "London branch: free parking behind the restaurant after six in the evening.";
+const menu = await ingestDocument({ tenantId: KB, title: "menu", text: MENU });
+const dubDoc = await ingestDocument({ tenantId: KB, title: "dublin page", text: DUBLIN, agents: [kbDublin] });
+const lonDoc = await ingestDocument({ tenantId: KB, title: "london page", text: LONDON, agents: [kbLondon] });
+
+const titlesFor = async (args) =>
+  new Set((await retrieveRelevantChunks({ tenantId: KB, query: "anything", topK: 10, maxDistance: 2, ...args })).map((c) => c.sourceTitle));
+const same = (set, list) => set.size === list.length && list.every((x) => set.has(x));
+ok(same(await titlesFor({ agentId: kbDublin }), ["menu", "dublin page"]), "Dublin answers from the shared menu and its own page — not London's");
+ok(same(await titlesFor({ agentId: kbLondon }), ["menu", "london page"]), "London answers from the shared menu and its own page — not Dublin's");
+ok(same(await titlesFor({ agentId: kbMain }), ["menu"]), "the default agent sees only what is shared (nothing is restricted to it)");
+ok(same(await titlesFor({}), ["menu"]), "no agent named → shared only: the filter fails closed");
+ok(same(await titlesFor({ wholeLibrary: true }), ["menu", "dublin page", "london page"]), "only the explicit debug path sees the whole library");
+
+const exact = async (agentId, text) => (await retrieveRelevantChunks({ tenantId: KB, agentId, query: text, topK: 5, maxDistance: 0.0001 })).map((c) => c.sourceTitle);
+ok((await exact(kbDublin, DUBLIN)).includes("dublin page"), "the exact question finds Dublin's page for Dublin…");
+ok((await exact(kbLondon, DUBLIN)).length === 0, "…and nothing at all for London, even when asked word for word");
+
+const docList = await listSources(KB);
+const row = (title) => docList.find((d) => d.title === title);
+ok(row("menu").agents === null && JSON.stringify(row("dublin page").agents) === JSON.stringify([kbDublin]), "the document list says who each document is for (null = shared)");
+ok(canAgentUse(row("dublin page").agents, kbDublin) && !canAgentUse(row("dublin page").agents, kbLondon) && canAgentUse(row("menu").agents, kbLondon), "the list's per-agent flag is the same rule");
+
+// Replace without saying who it is for: it keeps its availability.
+const chunksOf = async (id) => (await prisma.knowledgeChunk.findMany({ where: { sourceId: id }, select: { id: true }, orderBy: { id: "asc" } })).map((c) => c.id).join();
+await ingestDocument({ tenantId: KB, title: "dublin page", text: `${DUBLIN} Booking is advised.` });
+ok(same(await titlesFor({ agentId: kbLondon }), ["menu", "london page"]), "a replace that does not mention agents keeps the document restricted");
+// Replace that changes who it is for: swapped together with the new chunks.
+await ingestDocument({ tenantId: KB, title: "dublin page", text: DUBLIN, agents: [kbDublin, kbLondon] });
+ok((await titlesFor({ agentId: kbLondon })).has("dublin page"), "a replace that names agents applies them with the new text");
+
+// Change availability alone: no re-embed, the same chunk rows.
+const before = await chunksOf(dubDoc.id);
+const changed = await setDocumentAgents({ tenantId: KB, id: dubDoc.id, agents: [kbDublin] });
+ok(JSON.stringify(changed.agents) === JSON.stringify([kbDublin]) && (await chunksOf(dubDoc.id)) === before, "changing who uses a document re-embeds nothing (same chunk rows)");
+ok(!(await titlesFor({ agentId: kbLondon })).has("dublin page"), "…and takes effect on the next search");
+await setDocumentAgents({ tenantId: KB, id: dubDoc.id, agents: null });
+ok((await titlesFor({ agentId: kbMain })).has("dublin page"), "made shared again → every agent, the default included, uses it");
+await setDocumentAgents({ tenantId: KB, id: dubDoc.id, agents: [kbDublin] });
+
+// Input checks a route makes.
+ok((await readAgentsInput(KB, [kbDublin])).ok, "an agent of this tenant is accepted");
+ok((await readAgentsInput(KB, ["00000000-0000-0000-0000-000000000000"])).code === "agentsUnknown", "a made-up agent id is refused");
+const otherAgent = (await listAgents(T, { includeArchived: true }))[0].id;
+ok((await readAgentsInput(KB, [otherAgent])).code === "agentsUnknown", "another tenant's agent id is refused — no cross-tenant links");
+ok((await readAgentsInput(KB, [])).code === "agentsEmpty", "an empty list is refused, not read as everybody");
+
+// A copy inherits settings, never another agent's restricted documents.
+const kbCork = (await createAgent(KB, { name: "Cork", copyFrom: kbDublin })).id;
+ok(same(await titlesFor({ agentId: kbCork }), ["menu"]), "a new agent copied from Dublin uses the shared menu, not Dublin's page");
+
+// A document deleted takes its links with it.
+await deleteSource({ tenantId: KB, id: lonDoc.id });
+ok((await prisma.knowledgeSourceAgent.count({ where: { sourceId: lonDoc.id } })) === 0, "deleting a document removes who it was for");
+ok((await prisma.knowledgeSourceAgent.count({ where: { sourceId: menu.id } })) === 0, "a shared document has no links at all");
+
+// respond() itself: each agent answers from its own documents.
+const promptFor = async (agentId, message) => {
+  const conv = await prisma.conversation.create({ data: { tenantId: KB, agentId, channel: "chat" } });
+  stub.state.instructions.length = 0;
+  const result = await respond({ tenantId: KB, agentId, conversationId: conv.id, channel: "chat", userMessage: message });
+  return { result, instruction: stub.state.instructions.at(-1) ?? "" };
+};
+const dubTurn = await promptFor(kbDublin, DUBLIN);
+const lonTurn = await promptFor(kbLondon, DUBLIN);
+ok(dubTurn.instruction.includes("Guinness stew") && dubTurn.result.sources.includes("dublin page"), "respond(): Dublin's agent is given Dublin's page");
+ok(!lonTurn.instruction.includes("Guinness stew") && !lonTurn.result.sources.includes("dublin page"), "respond(): London's agent never sees it, asked the very same question");
+
+// ── every setting follows the agent, not the tenant ─────────────────────────
+await saveAgentConfig(KB, {
+  replyLanguage: "ur",
+  hours: { mon: [["12:00", "22:00"]], tue: [], wed: [], thu: [], fri: [], sat: [], sun: [] },
+  escalation: { enabled: true, contacts: [{ id: "c1", role: "Manager", name: "Siobhan", phone: "0300 1234567" }], whenCallerAsks: true, afterMisses: 2, topics: [], outsideHours: "forward" },
+}, { agentId: kbDublin });
+await saveAgentConfig(KB, { replyLanguage: "en", hours: null }, { agentId: kbLondon });
+await saveCollectConfig(KB, { ...presetConfig("restaurant"), enabled: true }, { agentId: kbLondon });
+
+const askPerson = "I want to speak to a person please";
+const dubHuman = await promptFor(kbDublin, askPerson);
+const lonHuman = await promptFor(kbLondon, askPerson);
+ok(dubHuman.result.handoff?.kind === "handoff" && dubHuman.result.handoff.contacts[0].name === "Siobhan", "call forwarding: Dublin passes the caller to ITS person");
+ok(!lonHuman.result.handoff, "call forwarding: London (not set up) does not");
+ok(/ALWAYS reply in Urdu/.test(dubHuman.instruction) && /ALWAYS reply in English/.test(lonHuman.instruction), "reply language is per agent");
+ok(dubHuman.instruction.includes("12:00") && !lonHuman.instruction.includes("12:00"), "opening hours are per agent");
+ok(dubHuman.result.collection === null && lonHuman.result.collection !== null, "what the agent collects is per agent (London takes requests, Dublin does not)");
+ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).escalation.contacts.length === 1
+  && (await getAgentConfig(KB, { agentId: kbLondon, skipCache: true })).escalation.contacts.length === 0, "forwarding contacts are stored per agent");
+}
 
 // ── the engine's cap on active agents ───────────────────────────────────────
 const active = (await listAgents(T)).length;

@@ -142,6 +142,8 @@ export async function respond({
       ? Promise.resolve({ chunks: [], searchQuery: userMessage, trigger: "skipped", rewrite: null })
       : retrieveForTurn({
           tenantId,
+          // Only the documents THIS agent may answer from: the shared library plus its own (§6.28).
+          agentId: config.agentId ?? null,
           message: userMessage,
           history: earlierTurns,
           topK: MAX_CONTEXT_CHUNKS,

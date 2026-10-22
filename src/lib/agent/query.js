@@ -275,6 +275,9 @@ export async function rewriteQuery({ history, message, timeoutMs = REWRITE_TIMEO
  *
  * @param {object} args
  * @param {string} args.tenantId
+ * @param {string|null} [args.agentId] the agent answering — every search of the turn (raw,
+ *   rewritten, the empty-first-pass retry) is limited to what it may use (§6.28)
+ * @param {boolean} [args.wholeLibrary] debug/eval only, see retrieveRelevantChunks
  * @param {string} args.message the customer's latest message
  * @param {Array<{role: string, content: string}>} args.history turns BEFORE this
  *   message, oldest first (NOT including it)
@@ -291,6 +294,8 @@ export async function rewriteQuery({ history, message, timeoutMs = REWRITE_TIMEO
  */
 export async function retrieveForTurn({
   tenantId,
+  agentId = null,
+  wholeLibrary = false,
   message,
   history,
   topK,
@@ -302,7 +307,7 @@ export async function retrieveForTurn({
 }) {
   const retrieveChunks = deps.retrieve ?? retrieveRelevantChunks;
   const rewrite = deps.rewrite ?? rewriteQuery;
-  const retrieve = (query) => retrieveChunks({ tenantId, query, topK, keywordQuery });
+  const retrieve = (query) => retrieveChunks({ tenantId, agentId, wholeLibrary, query, topK, keywordQuery });
   const resolved = { searchQuery: message, strategy, trigger: null, rewrite: null };
 
   if (strategy === "raw" || !history.length) {

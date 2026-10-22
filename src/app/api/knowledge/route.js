@@ -5,6 +5,8 @@ import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { ingestDocument, listSources } from "@/lib/agent/ingest";
 import { crawlSite, pagesToDocument } from "@/lib/agent/crawl";
 import { enqueueJob } from "@/lib/agent/jobs";
+import { readAgentsInput, canAgentUse } from "@/lib/agent/knowledge-access";
+import { readAgentId } from "@/lib/tenant/agent-request";
 import { ocrPdf } from "@/lib/agent/ocr";
 import { uploadOriginalFile } from "@/lib/agent/storage";
 import {
@@ -18,8 +20,14 @@ import {
 /**
  * KNOWLEDGE MANAGEMENT — what a business gives its agent to answer from.
  *
- *   GET  /api/knowledge?tenantId=…   list documents
- *   POST /api/knowledge?tenantId=…   add or REPLACE one
+ *   GET  /api/knowledge?tenantId=…[&agentId=…]   list documents
+ *   POST /api/knowledge?tenantId=…               add or REPLACE one
+ *
+ * ONE LIBRARY, SEVERAL AGENTS (§6.28). Every row says who may answer from it: `agents: null` =
+ * shared with every agent of the tenant, a list = only those agents. With `agentId` the list
+ * also says, per row, whether THAT agent uses it (`usedByAgent`). Every POST shape takes an
+ * optional `agents` ("all" | null | ["agentId", …]; multipart: a JSON string field) — omitted
+ * means a new document is shared and a replaced one keeps its availability.
  *
  * POST accepts three shapes, all landing in the same ingest path because a
  * document is a document once its text is out:
@@ -67,11 +75,20 @@ export async function GET(request) {
       return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
     }
 
+    const named = readAgentId(request.nextUrl.searchParams);
+    if (!named.ok) return NextResponse.json({ error: tr("validation:agents.invalidId") }, { status: 400 });
+    const forAgent = request.nextUrl.searchParams.has("agentId");
+
     const sources = await listSources(tenantId);
     return NextResponse.json({
       // `editable` is decided SERVER-side and sent with each row, so the
       // dashboard never has to re-implement the rule (and drift from it).
-      sources: sources.map((s) => ({ ...s, editable: isEditable(s) })),
+      // `usedByAgent` likewise — the same rule retrieval applies (knowledge-access.js).
+      sources: sources.map((s) => ({
+        ...s,
+        editable: isEditable(s),
+        ...(forAgent ? { usedByAgent: canAgentUse(s.agents, named.agentId) } : {}),
+      })),
       limits: { maxBytes: MAX_UPLOAD_BYTES, extensions: ACCEPTED_EXTENSIONS },
     });
   } catch (err) {
@@ -162,6 +179,17 @@ async function handleUploads({ request, tenantId, tr }) {
     );
   }
 
+  // One availability for the whole upload (§6.28): checked once, before anything is queued.
+  const rawAgents = form.get("agents");
+  let parsedAgents;
+  try {
+    parsedAgents = typeof rawAgents === "string" && rawAgents ? (rawAgents === "all" ? "all" : JSON.parse(rawAgents)) : undefined;
+  } catch {
+    return NextResponse.json({ error: tr("validation:knowledge.agentsInvalid") }, { status: 400 });
+  }
+  const access = await readAgentsInput(tenantId, parsedAgents);
+  if (!access.ok) return NextResponse.json({ error: tr(`validation:knowledge.${access.code}`) }, { status: 400 });
+
   const accepted = [];
   const rejected = [];
 
@@ -237,6 +265,7 @@ async function handleUploads({ request, tenantId, tr }) {
             fileUrl: stored?.url,
             filePublicId: stored?.publicId,
           },
+          agents: access.agents,
           onProgress: (stage, done, total) => ctx.report(stage, done, total),
           onSource: (sourceId) => ctx.attachSource(sourceId),
         });
@@ -261,6 +290,9 @@ async function handleCrawl({ body, tenantId, tr }) {
   }
 
   const title = String(body.title || "").trim() || host;
+
+  const access = await readAgentsInput(tenantId, body.agents);
+  if (!access.ok) return NextResponse.json({ error: tr(`validation:knowledge.${access.code}`) }, { status: 400 });
 
   const job = await enqueueJob({
     tenantId,
@@ -287,6 +319,7 @@ async function handleCrawl({ body, tenantId, tr }) {
         text: pagesToDocument(crawled.pages),
         kind: "url",
         file: { fileName: startUrl },
+        agents: access.agents,
         onProgress: (stage, done, total) => ctx.report(stage, done, total),
         onSource: (sourceId) => ctx.attachSource(sourceId),
       });
@@ -309,6 +342,9 @@ async function handleTypedText({ body, tenantId, tr }) {
     return NextResponse.json({ error: tr("validation:document.textRequired") }, { status: 400 });
   }
 
-  const result = await ingestDocument({ tenantId, title, text, kind: "text" });
+  const access = await readAgentsInput(tenantId, body.agents);
+  if (!access.ok) return NextResponse.json({ error: tr(`validation:knowledge.${access.code}`) }, { status: 400 });
+
+  const result = await ingestDocument({ tenantId, title, text, kind: "text", agents: access.agents });
   return NextResponse.json({ document: result }, { status: result.replaced ? 200 : 201 });
 }

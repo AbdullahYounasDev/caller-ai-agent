@@ -10,6 +10,7 @@ import { VoicePicker } from "./voice/VoicePicker";
 import { CollectPanel } from "./collect/CollectPanel";
 import { HandoffPanel } from "./handoff/HandoffPanel";
 import { AgentPicker } from "./agents/AgentPicker";
+import { DocumentAgents } from "./knowledge/DocumentAgents";
 import { fieldDef } from "@/lib/collect/config";
 import { pick } from "@/lib/collect/catalog";
 
@@ -218,6 +219,13 @@ export default function Home() {
   // null is also a real choice: the default agent of a tenant that has saved nothing yet.
   const [agentPicked, setAgentPicked] = useState(false);
   const [agentsKey, setAgentsKey] = useState(0);
+  // Every agent of the tenant, archived included (from AgentPicker) — the Knowledge tab names
+  // the agents a document is for and offers the active ones (§6.28).
+  const [agentList, setAgentList] = useState([]);
+  // Knowledge tab: show every document, or only those the picked agent answers from; and who a
+  // NEW upload / typed document / crawled site is for.
+  const [docFilter, setDocFilter] = useState("all");
+  const [newDocScope, setNewDocScope] = useState("all");
   const pickAgent = useCallback((id) => {
     setAgentId(id);
     setAgentPicked(true);
@@ -354,9 +362,11 @@ export default function Home() {
   }, [tenantId]);
 
   useEffect(() => {
-    // A conversation belongs to one agent: switching agents starts a new one.
+    // A conversation belongs to one agent: switching agents starts a new one. A selection in
+    // the Knowledge tab may now be partly hidden by the "used by this agent" filter: drop it.
     setConversationId(null);
     setMessages([]);
+    setSelectedIds(new Set());
   }, [agentId]);
 
   async function saveConfig(e) {
@@ -413,8 +423,9 @@ export default function Home() {
 
   const loadDocs = useCallback(async () => {
     try {
+      // With the agent named, each row says whether THIS agent answers from it (usedByAgent).
       const res = await fetch(
-        `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`
+        `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : "&agentId="}&locale=${uiLocale}`
       );
       const data = await readJsonSafe(res);
       if (!res.ok) throw new Error(data.error || "Failed to load documents");
@@ -431,11 +442,45 @@ export default function Home() {
     } catch (err) {
       setIngestStatus(humanizeError(err.message, t));
     }
-  }, [tenantId, uiLocale, t]);
+  }, [tenantId, agentId, uiLocale, t]);
 
   useEffect(() => {
     loadDocs();
   }, [loadDocs]);
+
+  // ── who a document is for (§6.28) ──
+  // Choosing only makes sense with two agents that can be chosen (an unsaved default has no id).
+  const choosableAgents = agentList.filter((a) => a.id && a.status === "active");
+  const multiAgent = choosableAgents.length > 1;
+  // "All agents" sends NOTHING: a new document is then shared, and a REPLACED one keeps who it was
+  // for — re-uploading the Dublin page must never quietly hand it to every branch.
+  const newDocAgents = multiAgent && newDocScope === "agent" && agentId ? [agentId] : undefined;
+  const visibleDocs = multiAgent && docFilter === "agent" ? docs.filter((d) => d.usedByAgent !== false) : docs;
+
+  async function saveDocAgents(id, agents) {
+    setBusyDocIds((prev) => new Set(prev).add(id));
+    setIngestStatus(null);
+    try {
+      const res = await fetch(`/api/knowledge/${id}?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agents }),
+      });
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Save failed");
+      await loadDocs();
+      return true;
+    } catch (err) {
+      setIngestStatus(humanizeError(err.message, t));
+      return false;
+    } finally {
+      setBusyDocIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
+  }
 
   function resetDocForm() {
     setEditingId(null);
@@ -496,7 +541,7 @@ export default function Home() {
         : await fetch(`/api/knowledge?${query}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ title: docTitle, text: docText }),
+            body: JSON.stringify({ title: docTitle, text: docText, agents: newDocAgents }),
           });
 
       const data = await readJsonSafe(res);
@@ -643,7 +688,7 @@ export default function Home() {
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url, maxPages: 10 }),
+          body: JSON.stringify({ url, maxPages: 10, agents: newDocAgents }),
         }
       );
       const data = await readJsonSafe(res);
@@ -691,6 +736,7 @@ export default function Home() {
     try {
       const form = new FormData();
       for (const file of list) form.append("file", file);
+      if (newDocAgents) form.append("agents", JSON.stringify(newDocAgents));
 
       const res = await fetch(
         `/api/knowledge?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
@@ -810,7 +856,8 @@ export default function Home() {
   }
 
   function toggleSelectAll() {
-    setSelectedIds((prev) => (prev.size === docs.length ? new Set() : new Set(docs.map((d) => d.id))));
+    // Only what is on screen: a filter must never let "select all" delete documents it hides.
+    setSelectedIds((prev) => (prev.size === visibleDocs.length ? new Set() : new Set(visibleDocs.map((d) => d.id))));
   }
 
   // Reuses the same single-document DELETE the row button calls, in parallel —
@@ -1010,6 +1057,7 @@ export default function Home() {
         uiLocale={uiLocale}
         value={agentId}
         onChange={pickAgent}
+        onAgentsLoaded={setAgentList}
         refreshKey={agentsKey}
         t={t}
         cardClass={card}
@@ -1145,6 +1193,31 @@ export default function Home() {
       <section className={card}>
           <h2 className="mb-1 font-medium">{t("dashboard:knowledge.title")}</h2>
           <p className={`${help} mb-3`}>{t("dashboard:knowledge.help")}</p>
+
+          {/* ---- ONE library, several agents (§6.28): who new documents are for, and which to list ---- */}
+          {multiAgent && (
+            <div className="mb-3 flex flex-col gap-2 rounded border border-gray-200 p-2 text-sm" data-testid="knowledge-scope">
+              <label className="flex flex-wrap items-center gap-2">
+                <span>{t("dashboard:knowledgeAgents.newFor")}</span>
+                <select className="rounded border border-gray-300 px-2 py-1" value={newDocScope} onChange={(e) => setNewDocScope(e.target.value)}>
+                  <option value="all">{t("dashboard:knowledgeAgents.allOption")}</option>
+                  <option value="agent">{t("dashboard:knowledgeAgents.onlyCurrent", { vars: { name: (choosableAgents.find((a) => a.id === agentId)?.name || choosableAgents.find((a) => a.id === agentId)?.businessName || "") } })}</option>
+                </select>
+              </label>
+              <p className={help}>{t("dashboard:knowledgeAgents.newForHelp")}</p>
+              <label className="flex flex-wrap items-center gap-2">
+                <span>{t("dashboard:knowledgeAgents.show")}</span>
+                <select className="rounded border border-gray-300 px-2 py-1" value={docFilter} onChange={(e) => {
+                  setDocFilter(e.target.value);
+                  // A hidden document must never stay selected for "delete selected".
+                  setSelectedIds(new Set());
+                }}>
+                  <option value="all">{t("dashboard:knowledgeAgents.showAll")}</option>
+                  <option value="agent">{t("dashboard:knowledgeAgents.showUsed", { vars: { name: (choosableAgents.find((a) => a.id === agentId)?.name || choosableAgents.find((a) => a.id === agentId)?.businessName || "") } })}</option>
+                </select>
+              </label>
+            </div>
+          )}
   
           {/* ---- the three ways to teach the agent something, always on top ---- */}
           {!crawlOpen ? (
@@ -1340,7 +1413,7 @@ export default function Home() {
                 <label className="flex items-center gap-2 text-xs text-gray-500">
                   <input
                     type="checkbox"
-                    checked={docs.length > 0 && selectedIds.size === docs.length}
+                    checked={visibleDocs.length > 0 && selectedIds.size === visibleDocs.length}
                     onChange={toggleSelectAll}
                   />
                   {t("dashboard:knowledge.selectAll")}
@@ -1357,8 +1430,8 @@ export default function Home() {
                 )}
               </div>
               <ul className="mb-4 flex flex-col divide-y divide-gray-200 border-y border-gray-200">
-                {docs.map((d) => (
-                  <li key={d.id} className="flex flex-wrap items-center gap-2 py-2">
+                {visibleDocs.map((d) => (
+                  <li key={d.id} className={`flex flex-wrap items-center gap-2 py-2 ${d.usedByAgent === false ? "opacity-60" : ""}`}>
                     <input
                       type="checkbox"
                       className="flex-none"
@@ -1379,6 +1452,21 @@ export default function Home() {
                       </p>
                       {d.status === "failed" && d.error && (
                         <p className="text-xs text-red-600">{humanizeError(d.error, t)}</p>
+                      )}
+                      {multiAgent && (
+                        <>
+                          <DocumentAgents
+                            key={`${d.id}:${(d.agents ?? []).join(",")}`}
+                            doc={d}
+                            agents={agentList}
+                            busy={busyDocIds.has(d.id)}
+                            onSave={(agents) => saveDocAgents(d.id, agents)}
+                            t={t}
+                          />
+                          {d.usedByAgent === false && (
+                            <p className="text-xs text-gray-500">{t("dashboard:knowledgeAgents.notUsedHere")}</p>
+                          )}
+                        </>
                       )}
                     </div>
                     {/* Only documents whose STORED TEXT IS THE DOCUMENT can be

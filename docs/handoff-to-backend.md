@@ -108,7 +108,8 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   line or client. The AI engine is the one brain; an agent is one *setup* it answers with. Each agent has its own
   copy of every field below. One agent per tenant is the **default**: it answers anything that names no agent, so a
   tenant with one agent never sees the difference. Agents are **archived, never deleted** (calls and requests point
-  at them); the default cannot be archived. The knowledge library is shared by all of a tenant's agents for now.
+  at them); the default cannot be archived. Knowledge is one library per tenant; each document is shared by every
+  agent or limited to some (B5).
 - **Engine today:** table `ai_engine.agent_configs` (one row per agent; `default_for = tenant_id` marks the default),
   read through `getAgentConfig(tenantId, { agentId })` in `src/lib/tenant/config.js` (60 s in-process cache),
   written by `PUT /api/agent-config?agentId=…`; agents managed through `/api/agents` (below).
@@ -227,6 +228,11 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
     original just isn't kept). It was added for the test console; under the decided split below it is not needed.
   - Limits in code: **10 MB per file** (`MAX_UPLOAD_BYTES`), types `pdf docx txt md csv`, **≤20 files per
     request**, **≤400 chunks per document**.
+  - **Which agents use a document** (CLAUDE.md §6.28): shared (every agent of the tenant — the default) or limited to
+    chosen agents. Table `ai_engine.knowledge_source_agents (source_id, agent_id, tenant_id)`; no row = shared. Every
+    knowledge route returns `agents` per document (`null` = shared) and takes `agents` (`"all"` | `null` | `[agentId…]`)
+    on create/replace/edit; changing it alone re-embeds nothing. When the backend owns the document list, it stores
+    this list next to each document and the engine reads it the same way it reads the text.
   - Routes (console): `GET|POST /api/knowledge`, `GET|PUT|DELETE /api/knowledge/:id`,
     `POST /api/knowledge/:id/retry`, `GET /api/knowledge/jobs`, `GET|DELETE /api/knowledge/jobs/:id`
     (cancel), `GET|POST /api/knowledge/search` (debug).
@@ -397,7 +403,7 @@ without it, the tenant's default agent (settings, chat, calls) or every agent (l
 | `GET /api/agent-config/catalog` | capability catalogue | `{locale,capabilities}` |
 | `GET/PUT /api/collect[?agentId=]` | one agent's collect settings + catalogue (B3) | `{agentId,collect,version,catalog,locale}` |
 | `GET /api/records[?agentId=]`, `GET/PATCH /api/records/:id` | requests (B4) — console only | `{data,total,counts}` / row |
-| `GET/POST /api/knowledge`, `…/:id`, `…/:id/retry`, `…/jobs*`, `…/search` | knowledge (B5) | see B5 |
+| `GET/POST /api/knowledge[?agentId=]`, `…/:id`, `…/:id/retry`, `…/jobs*`, `…/search` | knowledge (B5) — each document's `agents` (null = shared) | see B5 |
 | `POST /api/chat[?agentId=]` | test chat, **SSE**: `session`, `chunk`, `done`, `error` | `done` = `{reply,model,sources,collection,…}` |
 | `POST /api/voice/session[?agentId=]` | one-minute single-use ticket for the voice WebSocket (agent signed in) | `{ticket,agentId,url,healthUrl,expiresAt}` |
 | `GET /api/voice/calls[?agentId=]`, `/api/voice/calls/:id` | call history (turns, timeline) | list / detail |
@@ -415,7 +421,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 543, `npm run test:collect`, `npm run test:agents`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 554, `npm run test:collect`, `npm run test:agents`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -425,6 +431,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 - Test console (`page.js`) and the stand-ins (`src/lib/standins/`).
 - Several agents per tenant: each with its own settings, checklist, call forwarding, voice and language; chat, calls
   and requests are stamped with the agent; a default agent keeps single-agent tenants unchanged.
+- Knowledge per agent: one library, each document shared or limited to chosen agents; every search is scoped to the
+  agent answering.
 
 **To do on my side:**
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
@@ -448,7 +456,9 @@ the usage-event shape (B8); which `/internal` routes come first.
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
+similarity index (`CLAUDE.md` §6.1). Latest: `20261023100000_knowledge_per_agent` — the table
+`knowledge_source_agents` (which agents may use a document; no row = shared, so nothing changes for existing documents).
+Before it: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
 one row per agent (`name`, `status`, `default_for`; the one-row-per-tenant unique index is dropped), and
 `conversations`, `call_logs`, `records` gain `agent_id`. Every existing row becomes its tenant's default agent and
 existing conversations/calls/requests are stamped with it, so nothing changes for a current tenant. Before it:

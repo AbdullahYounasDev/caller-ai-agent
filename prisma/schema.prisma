@@ -139,6 +139,11 @@ model KnowledgeSource {
 
   chunks KnowledgeChunk[]
 
+  /// WHICH AGENTS may answer from this document (CLAUDE.md §6.28). NO rows = shared: every
+  /// agent of the tenant uses it (the default, and what every document was before agents).
+  /// One or more rows = ONLY those agents. Read by retrieval on every turn.
+  agents KnowledgeSourceAgent[]
+
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
@@ -204,6 +209,26 @@ model KnowledgeChunk {
   /// SO: never paste a generated migration in unread. Delete that DROP INDEX
   /// line. `npm run db:check` verifies the index is still there.
   @@map("knowledge_chunks")
+  @@schema("ai_engine")
+}
+
+/// "This document is for THIS agent" — one row per (document, agent). A document with no rows
+/// here is shared by all of the tenant's agents; with rows, only those agents retrieve it
+/// (src/lib/agent/knowledge-access.js). Both sides cascade: deleting a document or an agent
+/// removes its links, never the other side.
+model KnowledgeSourceAgent {
+  sourceId  String          @map("source_id")
+  source    KnowledgeSource @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  agentId   String          @map("agent_id")
+  agent     AgentConfig     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Denormalised so a tenant's links are listed without a join, and every query stays tenant-scoped.
+  tenantId  String          @map("tenant_id")
+  createdAt DateTime        @default(now()) @map("created_at")
+
+  @@id([sourceId, agentId])
+  @@index([agentId])
+  @@index([tenantId])
+  @@map("knowledge_source_agents")
   @@schema("ai_engine")
 }
 
@@ -437,6 +462,10 @@ model AgentConfig {
   /// Bumped on every save of `collect`, so a record can say which version of the questions
   /// it was taken under.
   collectVersion Int   @default(0) @map("collect_version")
+
+  /// Documents restricted to this agent (knowledge_source_agents). Shared documents have no
+  /// row and are not listed here.
+  knowledge KnowledgeSourceAgent[]
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")

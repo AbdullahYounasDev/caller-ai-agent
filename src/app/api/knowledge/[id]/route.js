@@ -8,13 +8,16 @@ import {
   renameSource,
   deleteSource,
   ingestDocument,
+  setDocumentAgents,
 } from "@/lib/agent/ingest";
+import { readAgentsInput } from "@/lib/agent/knowledge-access";
 
 /**
  * ONE DOCUMENT.
  *
  *   GET    /api/knowledge/:id   read it back, including its full text
- *   PUT    /api/knowledge/:id   edit the text and/or rename it
+ *   PUT    /api/knowledge/:id   edit the text and/or rename it, and/or change which agents use it
+ *                                ({ agents: "all" | null | ["agentId", …] } — §6.28; no re-embed)
  *   DELETE /api/knowledge/:id   remove it and everything derived from it
  *
  * GET returning the original text is what makes editing possible: a business
@@ -94,6 +97,15 @@ export async function PUT(request, context) {
       return NextResponse.json({ error: tr("validation:document.notFound") }, { status: 404 });
     }
 
+    // WHO MAY USE IT (§6.28) — checked before anything else changes, so a bad list refuses the
+    // whole save instead of renaming the document and then failing.
+    const access = await readAgentsInput(tenantId, body.agents);
+    if (!access.ok) {
+      return NextResponse.json({ error: tr(`validation:knowledge.${access.code}`) }, { status: 400 });
+    }
+    const agentsChanged =
+      access.agents !== undefined && JSON.stringify(access.agents) !== JSON.stringify(existing.agents);
+
     // ENFORCE THE EDITABILITY RULE SERVER-SIDE. The dashboard hides the edit
     // button for uploaded PDFs and Word files, but a hidden button is not a
     // permission check — and editing one would overwrite the document with our
@@ -124,16 +136,18 @@ export async function PUT(request, context) {
     // a label would spend model quota to produce byte-identical vectors. The
     // title is only denormalised onto the chunks so retrieval can cite it, and
     // renameSource rewrites exactly that.
+    // Availability alone is not a text change either: the chunks are the same, only who may
+    // retrieve them changes.
     if (!textChanged) {
-      if (nextTitle === existing.title) {
-        return NextResponse.json({ document: existing, reembedded: false });
+      if (nextTitle !== existing.title) {
+        try {
+          await renameSource({ tenantId, id, title: nextTitle });
+        } catch (err) {
+          return NextResponse.json({ error: err.message }, { status: 409 });
+        }
       }
-      try {
-        const renamed = await renameSource({ tenantId, id, title: nextTitle });
-        return NextResponse.json({ document: renamed, reembedded: false });
-      } catch (err) {
-        return NextResponse.json({ error: err.message }, { status: 409 });
-      }
+      if (agentsChanged) await setDocumentAgents({ tenantId, id, agents: access.agents });
+      return NextResponse.json({ document: await getSource({ tenantId, id }), reembedded: false });
     }
 
     // The text changed, so the chunks are stale — ingest replaces them.
@@ -155,6 +169,8 @@ export async function PUT(request, context) {
       // business wrote, not what the file contained, and claiming otherwise
       // would misreport where the content came from.
       kind: existing.kind === "file" && textChanged ? "text" : existing.kind,
+      // Swapped in together with the new chunks (ingest.js) when it changed; else left as it is.
+      agents: agentsChanged ? access.agents : undefined,
     });
 
     return NextResponse.json({ document: result, reembedded: true });

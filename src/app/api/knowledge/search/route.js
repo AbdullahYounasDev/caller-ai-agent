@@ -8,6 +8,19 @@ import {
   QUERY_STRATEGIES,
   DEFAULT_QUERY_STRATEGY,
 } from "@/lib/agent/query";
+import { requireAgent } from "@/lib/tenant/agent-request";
+import { uiLocaleFor } from "@/lib/tenant/ui-locale";
+import { translator } from "@/lib/i18n";
+
+/**
+ * Which agent's view of the library to search (§6.28). The REAL paths search exactly what an
+ * agent would — `agentId` if given, else the tenant's default agent — because that is the point
+ * of them. The raw path searches the whole library unless an agent is named.
+ */
+async function agentFor(request, tenantId) {
+  const tr = translator(await uiLocaleFor(request, tenantId));
+  return requireAgent({ tenantId, params: request.nextUrl.searchParams, tr });
+}
 
 /**
  * RETRIEVAL DEBUG + EVALUATION endpoint.
@@ -16,6 +29,9 @@ import {
  *   GET /api/knowledge/search?tenantId=…&q=…&topK=5&real=1     the REAL path — see below
  *   GET /api/knowledge/search?tenantId=…&meta=1                → just the live threshold
  *   POST /api/knowledge/search?tenantId=…  { q, history, strategy }   → the conversation-aware path (see POST below)
+ *   Every mode takes `&agentId=` (§6.28): the real paths search what that agent may use (the
+ *   default agent when omitted, exactly like the agent itself); the raw path the whole library
+ *   unless one is named.
  *
  * DEFAULT MODE returns matches WITH their cosine distances and WITHOUT
  * applying the relevance threshold. Both are deliberate:
@@ -73,7 +89,9 @@ export async function GET(request) {
     const keywordQuery = ["and", "or"].includes(params.get("keyword")) ? params.get("keyword") : undefined;
 
     if (params.get("real")) {
-      const kept = await retrieveRelevantChunks({ tenantId, query, topK, keywordQuery });
+      const agent = await agentFor(request, tenantId);
+      if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+      const kept = await retrieveRelevantChunks({ tenantId, agentId: agent.agentId, query, topK, keywordQuery });
       return NextResponse.json({
         query,
         mode: "real",
@@ -88,7 +106,13 @@ export async function GET(request) {
       });
     }
 
-    const rows = await retrieveWithoutThreshold({ tenantId, query, topK });
+    let rawAgent;
+    if (params.get("agentId")) {
+      const agent = await agentFor(request, tenantId);
+      if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+      rawAgent = agent.agentId;
+    }
+    const rows = await retrieveWithoutThreshold({ tenantId, query, topK, agentId: rawAgent });
 
     return NextResponse.json({
       query,
@@ -165,7 +189,10 @@ export async function POST(request) {
 
     const keywordQuery = ["and", "or"].includes(body?.keyword) ? body.keyword : undefined;
 
-    const turn = await retrieveForTurn({ tenantId, message: q, history, topK, strategy, rewriteTimeoutMs, keywordQuery });
+    const agent = await agentFor(request, tenantId);
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+
+    const turn = await retrieveForTurn({ tenantId, agentId: agent.agentId, message: q, history, topK, strategy, rewriteTimeoutMs, keywordQuery });
 
     return NextResponse.json({
       query: q,

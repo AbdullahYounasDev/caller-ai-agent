@@ -355,6 +355,10 @@ function cleanName(name) {
  * shares the business name, hours, voice and the people calls go to, and starting from a
  * blank agent would make the owner type all of it again. Everything is editable afterwards.
  *
+ * KNOWLEDGE IS NOT COPIED (§6.28): the new agent uses every SHARED document automatically, and
+ * none of the documents restricted to the agent it was copied from — a new branch must not
+ * answer from the Dublin branch's page just because it started as a copy of Dublin.
+ *
  * @param {string} tenantId
  * @param {{ name?: string, copyFrom?: string|null }} input
  * @returns {Promise<object>} the new agent, as listAgents describes it
