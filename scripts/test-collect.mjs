@@ -242,7 +242,7 @@ const CONTACTS = [
 await saveAgentConfig(H, { businessName: "Smile Care", timezone: "Asia/Karachi", hours: null, escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"] } });
 const stored = (await getAgentConfig(H, { skipCache: true })).escalation;
 ok(stored.enabled && stored.contacts[0].phone === "+923001234567" && stored.contacts[1].phone === "+923215551234", "saved phone numbers are stored in international form");
-const prismaRow = await prisma.agentConfig.findUnique({ where: { tenantId: H } });
+const prismaRow = await prisma.agentConfig.findUnique({ where: { defaultFor: H } });
 ok(prismaRow.escalation.contacts[0].phone === "+923001234567", "…in the database too, so what is dialled is what was stored");
 
 events.length = 0;

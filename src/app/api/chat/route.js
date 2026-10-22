@@ -3,14 +3,19 @@ import { prisma } from "@/lib/db";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { respond } from "@/lib/agent/respond";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { requireAgent } from "@/lib/tenant/agent-request";
 import { hit } from "@/lib/security/rate-limit";
 import { translator, resolveLocale } from "@/lib/i18n";
 
 /**
  * THE TEST CHAT — how we exercise the agent while the real channel is built.
  *
- *   POST /api/chat?tenantId=…   { message, conversationId? }
+ *   POST /api/chat?tenantId=…[&agentId=…]   { message, conversationId? }
  *        → SSE: session, chunk…, done | error
+ *
+ * `agentId` picks which of the tenant's agents answers (default agent if omitted). A
+ * conversation keeps the agent it started with: continuing one under a different agent starts
+ * a fresh conversation instead (CLAUDE.md §6.27).
  *
  * ── WHAT THIS IS AND IS NOT ──────────────────────────────────────────────
  * This is an INTERNAL TESTING SURFACE, not a product channel. It exists so the
@@ -101,6 +106,12 @@ export async function POST(request) {
     return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
   }
 
+  // Which agent answers. An archived one is refused: it no longer serves callers.
+  const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, serving: true });
+  if (!agent.ok) {
+    return NextResponse.json({ error: agent.error }, { status: agent.status });
+  }
+
   const body = await request.json().catch(() => null);
   const message = String(body?.message ?? "");
   if (!message.trim()) {
@@ -120,18 +131,21 @@ export async function POST(request) {
 
   // Continue an existing conversation, or start one. Scoped by tenant so a
   // stray id from another business is treated as a new conversation rather
-  // than joined.
+  // than joined — and by AGENT, so a conversation never changes agent half-way
+  // (respond() would refuse it). A row with no agent belongs to the default agent.
   let conversationId = body?.conversationId ?? null;
   if (conversationId) {
     const existing = await prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { tenantId: true },
+      select: { tenantId: true, agentId: true },
     });
-    if (!existing || existing.tenantId !== tenantId) conversationId = null;
+    const sameAgent = existing && (existing.agentId ?? null) === agent.agentId;
+    const legacyDefault = existing && existing.agentId === null && agent.config.isDefault;
+    if (!existing || existing.tenantId !== tenantId || !(sameAgent || legacyDefault)) conversationId = null;
   }
   if (!conversationId) {
     const created = await prisma.conversation.create({
-      data: { tenantId, channel: "chat" },
+      data: { tenantId, agentId: agent.agentId, channel: "chat" },
     });
     conversationId = created.id;
   }
@@ -159,10 +173,11 @@ export async function POST(request) {
       try {
         // Sent first so the client can keep the conversation even if generation
         // then fails — otherwise a failed first message orphans it.
-        send(controller, "session", { conversationId });
+        send(controller, "session", { conversationId, agentId: agent.agentId });
 
         const { reply, model, sources, searchQuery, rewriteStatus, collection, handoff } = await respond({
           tenantId,
+          agentId: agent.agentId,
           conversationId,
           channel: "chat",
           userMessage: message,

@@ -11,7 +11,7 @@ import { BARGE_IN, CLOSING, SILENCE } from "@/lib/voice/config";
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -85,6 +85,8 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
   };
 
   const calls = [];
+  const configReads = [];
+  const recorderOpens = [];
   const trims = [];
   const handoffFailures = [];
   const brain = {
@@ -92,7 +94,10 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
     handoffFailed: async (args) => handoffFailures.push(args),
     trimLastReply: async (args) => trims.push(args),
     invalidateAgentConfig: () => {},
-    getAgentConfig: async () => ({ businessName: "Nyron", replyLanguage: "en", ...config }),
+    getAgentConfig: async (tenantId, options) => {
+      configReads.push({ tenantId, ...options });
+      return { businessName: "Nyron", replyLanguage: "en", ...config };
+    },
     respond: async (args) => {
       calls.push(args);
       const reply = replies.shift();
@@ -103,6 +108,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
 
   const session = new CallSession({
     tenantId: "t1",
+    agentId,
     transportName: "browser",
     transport,
     stt,
@@ -110,7 +116,10 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
     createVad: () => vad,
     engineInfo: { stt: "fake" },
     brain,
-    openRecorder: async () => recorder,
+    openRecorder: async (args) => {
+      recorderOpens.push(args);
+      return recorder;
+    },
     clock,
   });
 
@@ -122,6 +131,8 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
     sttCalls,
     recorded,
     calls,
+    configReads,
+    recorderOpens,
     trims,
     handoffFailures,
     vad,
@@ -403,6 +414,39 @@ describe("CallSession", () => {
     assert.equal(await h.session.start(), false);
     assert.equal(h.sent.closed, END_REASONS.SETUP_FAILED);
     assert.equal(h.notified(SERVER.ERROR)[0].code, ERROR_CODES.INTERNAL);
+  });
+
+  // ── several agents per tenant (CLAUDE.md §6.27) ─────────────────────────────
+
+  test("a call is answered by the agent its ticket named: settings, call record and every turn", async () => {
+    const h = harness({
+      agentId: "agent-dublin",
+      config: { agentId: "agent-dublin", status: "active", businessName: "Pizza Dublin" },
+      transcripts: ["Are you open on Sunday?"],
+      replies: [streams("Yes, from noon.")],
+    });
+    assert.equal(await h.session.start(), true);
+    assert.deepEqual(h.configReads[0], { tenantId: "t1", agentId: "agent-dublin" });
+    assert.equal(h.recorderOpens[0].agentId, "agent-dublin");
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls[0].agentId, "agent-dublin");
+  });
+
+  test("a call for 'the default agent' keeps the default agent's id, even if the default changes later", async () => {
+    const h = harness({ config: { agentId: "agent-main", status: "active" } });
+    await h.session.start();
+    assert.equal(h.configReads[0].agentId, null, "asked for the default");
+    assert.equal(h.session.agentId, "agent-main", "then held on to the agent that answered");
+    assert.equal(h.recorderOpens[0].agentId, "agent-main");
+  });
+
+  test("an agent archived after its ticket was issued does not answer", async () => {
+    const h = harness({ agentId: "agent-old", config: { agentId: "agent-old", status: "archived" } });
+    assert.equal(await h.session.start(), false);
+    assert.equal(h.sent.closed, END_REASONS.SETUP_FAILED);
+    assert.equal(h.recorderOpens.length, 0, "no call record is opened");
   });
 
   // ── turn quality: the five fixes ──────────────────────────────────────────

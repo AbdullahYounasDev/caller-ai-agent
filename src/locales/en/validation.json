@@ -81,5 +81,17 @@
   "handoff.outsideHoursInvalid": "Choose what happens outside opening hours.",
   "handoff.topicTooLong": "A topic must be {max} characters or fewer.",
   "handoff.tooManyTopics": "You can add at most {max} topics.",
-  "handoff.enabledNeedsContact": "Add at least one person with a phone number before switching call forwarding on."
+  "handoff.enabledNeedsContact": "Add at least one person with a phone number before switching call forwarding on.",
+  "agents.invalidId": "That agent id is not valid.",
+  "agents.notFound": "That agent could not be found.",
+  "agents.archived": "This agent is archived and no longer answers. Restore it first.",
+  "agents.nameRequired": "Give the agent a name.",
+  "agents.nameInvalid": "The agent name must be text.",
+  "agents.nameTooLong": "The agent name must be {max} characters or fewer.",
+  "agents.nameTaken": "You already have an agent called \"{name}\".",
+  "agents.tooMany": "You can have at most {max} active agents.",
+  "agents.planLimit": "Your plan does not include another agent.",
+  "agents.statusInvalid": "An agent can only be active or archived.",
+  "agents.archiveDefault": "The default agent cannot be archived. Make another agent the default first.",
+  "agents.defaultArchived": "An archived agent cannot be the default. Restore it first."
 }

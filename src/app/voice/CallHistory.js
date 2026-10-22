@@ -10,7 +10,7 @@ import { formatDuration, formatMs } from "./format";
  * live panel showed was actually stored: per call the summary, and on click its full
  * transcript with each turn's intent, outcome, sources and timings, plus the timeline.
  */
-export function CallHistory({ tenantId, t, refreshKey }) {
+export function CallHistory({ tenantId, agentId, t, refreshKey }) {
   const [calls, setCalls] = useState(null);
   const [openId, setOpenId] = useState(null);
   const [detail, setDetail] = useState(null);
@@ -20,7 +20,7 @@ export function CallHistory({ tenantId, t, refreshKey }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/voice/calls?tenantId=${encodeURIComponent(tenantId)}&limit=10`)
+    fetch(`/api/voice/calls?tenantId=${encodeURIComponent(tenantId)}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}&limit=10`)
       .then((res) => (res.ok ? res.json() : Promise.reject(new Error(String(res.status)))))
       .then((data) => {
         if (cancelled) return;
@@ -31,7 +31,7 @@ export function CallHistory({ tenantId, t, refreshKey }) {
     return () => {
       cancelled = true;
     };
-  }, [tenantId, refreshKey, reloads]);
+  }, [tenantId, agentId, refreshKey, reloads]);
 
   async function toggle(id) {
     if (openId === id) {

@@ -9,6 +9,7 @@ import { VoiceCallPanel } from "./voice/VoiceCallPanel";
 import { VoicePicker } from "./voice/VoicePicker";
 import { CollectPanel } from "./collect/CollectPanel";
 import { HandoffPanel } from "./handoff/HandoffPanel";
+import { AgentPicker } from "./agents/AgentPicker";
 import { fieldDef } from "@/lib/collect/config";
 import { pick } from "@/lib/collect/catalog";
 
@@ -210,6 +211,18 @@ function isRetryableError(raw) {
 
 export default function Home() {
   const [tenantId, setTenantId] = useState(DEFAULT_TENANT_ID);
+  // Which of the tenant's agents every tab shows (CLAUDE.md §6.27). null until the agent list
+  // has loaded; AgentPicker then picks the default agent.
+  const [agentId, setAgentId] = useState(null);
+  // False until the picker has resolved which agent to show — `null` alone cannot say it, since
+  // null is also a real choice: the default agent of a tenant that has saved nothing yet.
+  const [agentPicked, setAgentPicked] = useState(false);
+  const [agentsKey, setAgentsKey] = useState(0);
+  const pickAgent = useCallback((id) => {
+    setAgentId(id);
+    setAgentPicked(true);
+  }, []);
+  const agentQuery = agentId ? `&agentId=${encodeURIComponent(agentId)}` : "";
 
   // --- the two languages ---
   const [uiLocale, setUiLocale] = useState("en");
@@ -280,7 +293,7 @@ export default function Home() {
     setConfigStatus(null);
     setReloadingConfig(true);
     try {
-      const q = `tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`;
+      const q = `tenantId=${encodeURIComponent(tenantId)}${agentQuery}&locale=${uiLocale}`;
       const [configRes, catalogRes] = await Promise.all([
         fetch(`/api/agent-config?${q}`),
         fetch(`/api/agent-config/catalog?locale=${uiLocale}`),
@@ -323,18 +336,28 @@ export default function Home() {
     } finally {
       setReloadingConfig(false);
     }
-  }, [tenantId, uiLocale, t]);
+  }, [tenantId, agentQuery, uiLocale, t]);
 
   useEffect(() => {
-    loadConfig();
-  }, [loadConfig]);
+    // Wait for the agent list: loading "the default" first and the picked agent a moment
+    // later would flash one agent's settings under another's name.
+    if (agentPicked) loadConfig();
+  }, [agentPicked, loadConfig]);
 
   useEffect(() => {
-    // A different business has its own saved language to adopt.
+    // A different business has its own saved language to adopt, and its own agents.
     adoptedRef.current = false;
+    setAgentId(null);
+    setAgentPicked(false);
     setConversationId(null);
     setMessages([]);
   }, [tenantId]);
+
+  useEffect(() => {
+    // A conversation belongs to one agent: switching agents starts a new one.
+    setConversationId(null);
+    setMessages([]);
+  }, [agentId]);
 
   async function saveConfig(e) {
     e.preventDefault();
@@ -342,7 +365,7 @@ export default function Home() {
     setConfigStatus(null);
     try {
       const res = await fetch(
-        `/api/agent-config?tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`,
+        `/api/agent-config?tenantId=${encodeURIComponent(tenantId)}${agentQuery}&locale=${uiLocale}`,
         {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -365,6 +388,8 @@ export default function Home() {
       setConfig(data.config);
       setUiLocale(data.config.uiLocale);
       setConfigStatus(t("common:state.saved"));
+      // The picker shows the business name of an unnamed agent: re-read it.
+      setAgentsKey((k) => k + 1);
     } catch (err) {
       setConfigStatus(humanizeError(err.message, t));
     } finally {
@@ -843,7 +868,7 @@ export default function Home() {
     setSending(true);
 
     try {
-      const res = await fetch(`/api/chat?tenantId=${encodeURIComponent(tenantId)}`, {
+      const res = await fetch(`/api/chat?tenantId=${encodeURIComponent(tenantId)}${agentQuery}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: userMessage, conversationId }),
@@ -980,6 +1005,19 @@ export default function Home() {
         <input id="tenant" className={inputCls} value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
       </div>
 
+      <AgentPicker
+        tenantId={tenantId}
+        uiLocale={uiLocale}
+        value={agentId}
+        onChange={pickAgent}
+        refreshKey={agentsKey}
+        t={t}
+        cardClass={card}
+        inputClass={inputCls}
+        buttonClass="rounded border border-gray-300 px-3 py-1.5 text-sm"
+        helpClass={help}
+      />
+
       <nav className="flex flex-wrap gap-1 border-b border-gray-200" role="tablist" aria-label={t("dashboard:agent.title")}>
         {["agent", "knowledge", "collect", "call", "chat"].map((id) => (
           <button
@@ -1051,7 +1089,7 @@ export default function Home() {
             />
   
             <HandoffPanel
-              key={`${tenantId}:${config.updatedAt ?? 0}`}
+              key={`${tenantId}:${config.agentId ?? ""}:${config.updatedAt ?? 0}`}
               value={config.escalation}
               onChange={(escalation) => patchConfig({ escalation })}
               t={t}
@@ -1468,7 +1506,9 @@ export default function Home() {
 
       {tab === "collect" && (
         <CollectPanel
+          key={agentId ?? "default"}
           tenantId={tenantId}
+          agentId={agentId}
           uiLocale={uiLocale}
           replyLanguage={config?.replyLanguage}
           t={t}
@@ -1484,7 +1524,7 @@ export default function Home() {
         <>
       {/* The voice channel — the product (§1). Same brain as the chat below; it runs in
             its own process (npm run voice), see src/lib/voice/gateway.js. */}
-        <VoiceCallPanel tenantId={tenantId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
+        <VoiceCallPanel tenantId={tenantId} agentId={agentId} uiLocale={uiLocale} t={t} dir={dir} cardClass={card} />
         </>
       )}
 

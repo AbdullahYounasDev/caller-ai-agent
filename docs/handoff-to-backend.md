@@ -100,14 +100,21 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   `429` (quota), `404` (unknown tenant) and a translated message.
 - **Engine change:** edit **only** `assertTenantServiceable()`. No route changes.
 
-### B2 — Versioned agent settings
+### B2 — Versioned agent settings (one document per AGENT)
 
 - **What:** the settings a business edits in the dashboard, with history/versioning.
 - **Why backend:** his responsibility table — "versioned agent config".
-- **Engine today:** table `ai_engine.agent_configs` (one row per tenant), read through
-  `getAgentConfig(tenantId)` in `src/lib/tenant/config.js` (60 s in-process cache), written by
-  `PUT /api/agent-config`.
-- **Fields (the contract):**
+- **A tenant has one or more AGENTS** (CLAUDE.md §6.27): a restaurant chain one per branch, a call centre one per
+  line or client. The AI engine is the one brain; an agent is one *setup* it answers with. Each agent has its own
+  copy of every field below. One agent per tenant is the **default**: it answers anything that names no agent, so a
+  tenant with one agent never sees the difference. Agents are **archived, never deleted** (calls and requests point
+  at them); the default cannot be archived. The knowledge library is shared by all of a tenant's agents for now.
+- **Engine today:** table `ai_engine.agent_configs` (one row per agent; `default_for = tenant_id` marks the default),
+  read through `getAgentConfig(tenantId, { agentId })` in `src/lib/tenant/config.js` (60 s in-process cache),
+  written by `PUT /api/agent-config?agentId=…`; agents managed through `/api/agents` (below).
+- **Agent identity fields:** `agentId` (uuid), `name` (≤60, unique among the tenant's active agents; may be empty on
+  the default), `status` (`active | archived`), `isDefault`.
+- **Fields (the contract) — per agent, except `uiLocale`, which is per tenant:**
 
   | Field | Type / values | Meaning |
   | --- | --- | --- |
@@ -115,7 +122,7 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `purpose` | string ≤2000 | what the business does, in its words (answers "who are you?") |
   | `tone` | `professional \| friendly \| concise \| formal` | |
   | `timezone` | IANA name, e.g. `Asia/Karachi` | used for hours and bookings |
-  | `uiLocale` | `en \| ur` | dashboard language (Urdu renders right-to-left) |
+  | `uiLocale` | `en \| ur` | dashboard language (Urdu renders right-to-left) — **the tenant's**, whichever agent is saved |
   | `replyLanguage` | `en \| ur` | what the agent *says*; it always *understands* both |
   | `hours` | `{ "mon": [["09:00","17:00"]], … "sun": [] }` | opening hours in `timezone` |
   | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward" }` | **call forwarding** to a person (CLAUDE.md §6.26). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
@@ -123,13 +130,21 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
   | `collect`, `collectVersion` | see B3 | |
 
-- **Backend provides:** store the document; make it readable by the engine:
-  `GET /internal/tenants/{tenantId}/agent-config` → `{ "config": { …fields above… }, "version": 12 }`.
+- **Backend provides:** store one document per agent; make them readable by the engine:
+  `GET /internal/tenants/{tenantId}/agents` → `{ "agents": [{ agentId, name, status, isDefault }] }` and
+  `GET /internal/tenants/{tenantId}/agents/{agentId}/config` → `{ "config": { …fields above… }, "version": 12 }`
+  (no `agentId` ⇒ the default agent's). **Plan limits** ("your plan includes 3 agents") are yours: the engine asks
+  through one hook, `assertCanAddAgent()` in `src/lib/tenant/registry.js` (today: always allowed, with an engine
+  safety cap of 25 active agents).
   Writes come from the dashboard, validated by the rules in `src/app/api/agent-config/route.js`
   (the engine keeps the validation code and can expose it as `POST /api/agent-config/validate` — say if wanted).
-- **Responses the engine gives today** (`/api/agent-config`): `GET → { config, locale }`;
-  `PUT → { config }` or `400 { error }` with all problems translated.
-- **Engine change:** make `getAgentConfig()` fetch from the backend (cache stays); `saveAgentConfig()` goes away.
+- **Responses the engine gives today** (`/api/agent-config?agentId=`): `GET → { config, locale }`;
+  `PUT → { config }` or `400 { error }` with all problems translated; `404` for an agent that is not this tenant's.
+  Agents: `GET /api/agents` → `{ agents }` (default first; a tenant that saved nothing shows its default with
+  `id: null`); `POST /api/agents { name, copyFrom? }` → `201 { agent }` (starts as a copy of another agent's
+  settings); `PATCH /api/agents/:id { name?, status?, makeDefault? }` → `{ agent }`.
+- **Engine change:** make `getAgentConfig()` / `listAgents()` fetch from the backend (cache stays);
+  `saveAgentConfig()`, `createAgent()`, `updateAgent()` go away.
 
 ### B3 — "What the agent collects" settings
 
@@ -288,10 +303,12 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 - **Events emitted now:**
   | type | data |
   | --- | --- |
-  | `record.submitted` | `{ recordId, recordType, reference, conversationId }` |
+  | `record.submitted` | `{ recordId, recordType, reference, agentId, conversationId }` |
   | `record.updated` | `{ recordId, status, detailsChanged? }` |
-  | `handoff.requested` | `{ conversationId, channel, reason: asked\|topic\|not_understood\|frustrated, contactId }` — a caller was passed to a person |
-  | `handoff.unavailable` | `{ conversationId, channel, reason, contactId: null }` — a person was needed but the business was closed |
+  | `handoff.requested` | `{ conversationId, agentId, channel, reason: asked\|topic\|not_understood\|frustrated, contactId }` — a caller was passed to a person |
+  | `handoff.unavailable` | `{ conversationId, agentId, channel, reason, contactId: null }` — a person was needed but the business was closed |
+  `agentId` = which of the tenant's agents handled it. Conversations, calls (`call_logs.agent_id`) and requests
+  (`records.agent_id`) carry it too, so usage and reports can be split per agent (and, with B11, per number).
   Event data carries **ids and references, not the customer's details** — read them from the record.
   *Open question:* do you want the details inside the event instead?
 - **Backend provides:** `POST /internal/events` that verifies an **HMAC signature** (shared secret, B6) and is
@@ -330,9 +347,11 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 
 - **What:** buying/porting numbers, mapping the **dialled number → tenant**, billing for it.
 - **Engine today:** voice works from the browser only. The call logger already has `from_number/to_number`.
-- **Backend provides:** number purchase flow and the mapping table; and a lookup the engine's webhook uses:
-  `GET /internal/numbers/{e164}` → `{ "tenantId": "…" }` (after the engine verifies the Twilio **webhook
-  signature** — the tenant is never taken from anything the caller supplies).
+- **Backend provides:** number purchase flow and the mapping table — each number points to exactly ONE agent, an agent
+  may have many numbers; and a lookup the engine's webhook uses:
+  `GET /internal/numbers/{e164}` → `{ "tenantId": "…", "agentId": "…" }` (after the engine verifies the Twilio
+  **webhook signature** — the tenant is never taken from anything the caller supplies). A number that is unknown,
+  released or linked to no agent is refused politely by the engine.
 - **Engine builds (later):** the Twilio transport (μ-law 8 kHz ⇄ 16 kHz PCM, barge-in, call setup).
 
 ### B11b — Passing a call to a person (the transfer seam)
@@ -367,18 +386,21 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 ## 4. Engine API surface today (what exists right now)
 
 All routes: server-to-server, header `x-internal-key`, `?tenantId=` required (except `/api/locales`).
-Mutating routes also pass the B1 gate. Errors: `{ "error": string }`.
+Mutating routes also pass the B1 gate. Errors: `{ "error": string }`. `?agentId=` is optional everywhere it appears:
+without it, the tenant's default agent (settings, chat, calls) or every agent (lists). An archived agent is refused
+(`409`) where it would answer a caller (chat, voice).
 
 | Route | Purpose | Success |
 | --- | --- | --- |
-| `GET/PUT /api/agent-config` | read / patch agent settings (B2) | `{config,locale}` / `{config}` |
+| `GET/PUT /api/agent-config[?agentId=]` | read / patch one agent's settings (B2) | `{config,locale}` / `{config}` |
+| `GET/POST /api/agents`, `PATCH /api/agents/:id` | list / add / rename, archive, make default (B2) | `{agents}` / `{agent}` |
 | `GET /api/agent-config/catalog` | capability catalogue | `{locale,capabilities}` |
-| `GET/PUT /api/collect` | collect settings + catalogue (B3) | `{collect,version,catalog,locale}` |
-| `GET /api/records`, `GET/PATCH /api/records/:id` | requests (B4) — console only | `{data,total,counts}` / row |
+| `GET/PUT /api/collect[?agentId=]` | one agent's collect settings + catalogue (B3) | `{agentId,collect,version,catalog,locale}` |
+| `GET /api/records[?agentId=]`, `GET/PATCH /api/records/:id` | requests (B4) — console only | `{data,total,counts}` / row |
 | `GET/POST /api/knowledge`, `…/:id`, `…/:id/retry`, `…/jobs*`, `…/search` | knowledge (B5) | see B5 |
-| `POST /api/chat` | test chat, **SSE**: `session`, `chunk`, `done`, `error` | `done` = `{reply,model,sources,collection,…}` |
-| `POST /api/voice/session` | one-minute single-use ticket for the voice WebSocket | `{ticket,url,healthUrl,expiresAt}` |
-| `GET /api/voice/calls`, `/api/voice/calls/:id` | call history (turns, timeline) | list / detail |
+| `POST /api/chat[?agentId=]` | test chat, **SSE**: `session`, `chunk`, `done`, `error` | `done` = `{reply,model,sources,collection,…}` |
+| `POST /api/voice/session[?agentId=]` | one-minute single-use ticket for the voice WebSocket (agent signed in) | `{ticket,agentId,url,healthUrl,expiresAt}` |
+| `GET /api/voice/calls[?agentId=]`, `/api/voice/calls/:id` | call history (turns, timeline) | list / detail |
 | `GET /api/locales` | UI strings (public) | catalog |
 
 Voice gateway (separate process, `npm run voice`, port 3001): `GET /health`, `GET /voices/preview`,
@@ -393,7 +415,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 446, `npm run test:collect`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 543, `npm run test:collect`, `npm run test:agents`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -401,6 +423,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
   of the same row, withdraw, idempotency (`submissionKey`), draft expiry (30 min).
 - Voice from the browser: local STT/TTS (+ Groq Whisper for Urdu), barge-in, full call logging.
 - Test console (`page.js`) and the stand-ins (`src/lib/standins/`).
+- Several agents per tenant: each with its own settings, checklist, call forwarding, voice and language; chat, calls
+  and requests are stamped with the agent; a default agent keeps single-agent tenants unchanged.
 
 **To do on my side:**
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
@@ -424,8 +448,11 @@ the usage-event shape (B8); which `/internal` routes come first.
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261020100000_two_languages_and_collect` — adds
-`agent_configs.collect` / `collect_version`, `conversations.collect_draft`, the `customers` and `records`
-tables, and relabels any Italian/`auto` leftovers (reply/UI language → `en`). After applying any migration:
+similarity index (`CLAUDE.md` §6.1). Latest: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
+one row per agent (`name`, `status`, `default_for`; the one-row-per-tenant unique index is dropped), and
+`conversations`, `call_logs`, `records` gain `agent_id`. Every existing row becomes its tenant's default agent and
+existing conversations/calls/requests are stamped with it, so nothing changes for a current tenant. Before it:
+`20261021120000_conversation_handoff_state` (`conversations.handoff_state`) and
+`20261020100000_two_languages_and_collect` (collect settings, `customers`, `records`). After applying any migration:
 `npx prisma generate`, restart `npm run dev` **and** `npm run voice` (the gateway keeps its own Prisma client and
 a 60 s settings cache), then `npm run db:check`.

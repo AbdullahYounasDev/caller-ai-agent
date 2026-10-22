@@ -21,9 +21,10 @@ import { PcmPlayer } from "./pcm-player";
  *
  * @param {object} args
  * @param {string} args.tenantId
+ * @param {string|null} [args.agentId]  which agent answers (null = the default agent)
  * @param {string} args.uiLocale  sent to the session route for its error messages
  */
-export function useVoiceCall({ tenantId, uiLocale }) {
+export function useVoiceCall({ tenantId, agentId = null, uiLocale }) {
   // idle → preparing → live → ended | error
   const [status, setStatus] = useState("idle");
   const [callState, setCallState] = useState(CALL_STATES.CONNECTING);
@@ -107,7 +108,7 @@ export function useVoiceCall({ tenantId, uiLocale }) {
     let session;
     try {
       const res = await fetch(
-        `/api/voice/session?tenantId=${encodeURIComponent(tenantId)}&locale=${encodeURIComponent(uiLocale)}`,
+        `/api/voice/session?tenantId=${encodeURIComponent(tenantId)}${agentId ? `&agentId=${encodeURIComponent(agentId)}` : ""}&locale=${encodeURIComponent(uiLocale)}`,
         { method: "POST" }
       );
       session = await res.json().catch(() => ({}));
@@ -232,7 +233,7 @@ export function useVoiceCall({ tenantId, uiLocale }) {
       call.meter = requestAnimationFrame(tick);
     };
     call.meter = requestAnimationFrame(tick);
-  }, [tenantId, uiLocale, fail, teardown]);
+  }, [tenantId, agentId, uiLocale, fail, teardown]);
 
   const hangup = useCallback(() => {
     const call = live.current;

@@ -14,7 +14,8 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
  *   3. gateway verifies the HMAC with the shared secret, checks expiry, and refuses a
  *      ticket it has already seen
  *
- * A ticket names ONE tenant, lives LIMITS.sessionTicketTtlMs (a minute — it only has
+ * A ticket names ONE tenant and ONE of its agents (signed, so the browser cannot swap the
+ * agent after the route checked it — CLAUDE.md §6.27), lives LIMITS.sessionTicketTtlMs (a minute — it only has
  * to survive the round trip to the socket), and is single-use. It is not a login and
  * grants nothing beyond opening one call for that tenant.
  *
@@ -52,14 +53,15 @@ const sign = (payload, secret) => createHmac("sha256", secret).update(payload).d
 /**
  * @param {object} args
  * @param {string} args.tenantId
+ * @param {string|null} [args.agentId]  null = the tenant's default agent
  * @param {number} args.ttlMs
  * @param {string} args.secret
  * @param {number} [args.now]
  * @returns {{ticket: string, expiresAt: number}}
  */
-export function issueTicket({ tenantId, ttlMs, secret, now = Date.now() }) {
+export function issueTicket({ tenantId, agentId = null, ttlMs, secret, now = Date.now() }) {
   const expiresAt = now + ttlMs;
-  const payload = b64url(JSON.stringify({ t: tenantId, e: expiresAt, n: randomBytes(12).toString("base64url") }));
+  const payload = b64url(JSON.stringify({ t: tenantId, a: agentId, e: expiresAt, n: randomBytes(12).toString("base64url") }));
   return { ticket: `${payload}.${sign(payload, secret)}`, expiresAt };
 }
 
@@ -77,7 +79,7 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
   return {
     /**
      * @param {string} ticket
-     * @returns {{ok: true, tenantId: string} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
+     * @returns {{ok: true, tenantId: string, agentId: string|null} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
      */
     verify(ticket) {
       const at = now();
@@ -98,14 +100,14 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
       } catch {
         return { ok: false, reason: "malformed" };
       }
-      if (typeof claims?.t !== "string" || typeof claims?.e !== "number" || typeof claims?.n !== "string") {
+      if (typeof claims?.t !== "string" || typeof claims?.e !== "number" || typeof claims?.n !== "string" || (claims.a != null && typeof claims.a !== "string")) {
         return { ok: false, reason: "malformed" };
       }
       if (claims.e < at) return { ok: false, reason: "expired" };
       if (used.has(claims.n)) return { ok: false, reason: "replayed" };
 
       used.set(claims.n, claims.e);
-      return { ok: true, tenantId: claims.t };
+      return { ok: true, tenantId: claims.t, agentId: claims.a ?? null };
     },
   };
 }

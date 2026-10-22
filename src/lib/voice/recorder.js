@@ -30,16 +30,17 @@ export class CallRecorder {
    *
    * @param {object} args
    * @param {string} args.tenantId
+   * @param {string|null} [args.agentId]  the agent answering — stored on the conversation and the call
    * @param {"browser"|"twilio"} args.transport
    * @param {object} args.engine       which models serve it — stored on the row
    * @param {string} [args.fromNumber]
    * @param {string} [args.toNumber]
    * @param {object} [args.db]         Prisma client; injectable for tests
    */
-  static async open({ tenantId, transport, engine, fromNumber = null, toNumber = null, db = prisma }) {
-    const conversation = await db.conversation.create({ data: { tenantId, channel: "voice" } });
+  static async open({ tenantId, agentId = null, transport, engine, fromNumber = null, toNumber = null, db = prisma }) {
+    const conversation = await db.conversation.create({ data: { tenantId, agentId, channel: "voice" } });
     const call = await db.callLog.create({
-      data: { tenantId, conversationId: conversation.id, transport, engine, fromNumber, toNumber },
+      data: { tenantId, agentId, conversationId: conversation.id, transport, engine, fromNumber, toNumber },
     });
     return new CallRecorder({ db, tenantId, callId: call.id, conversationId: conversation.id });
   }

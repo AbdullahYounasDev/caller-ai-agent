@@ -20,8 +20,8 @@ import { formatDuration } from "./format";
  * Same standing as the chat panel: a test surface for the same brain a phone call will
  * use, not a product channel (§2).
  */
-export function VoiceCallPanel({ tenantId, uiLocale, t, dir, cardClass }) {
-  const call = useVoiceCall({ tenantId, uiLocale });
+export function VoiceCallPanel({ tenantId, agentId, uiLocale, t, dir, cardClass }) {
+  const call = useVoiceCall({ tenantId, agentId, uiLocale });
   const [historyKey, setHistoryKey] = useState(0);
   const busy = call.status === "preparing" || call.status === "live";
 
@@ -33,9 +33,9 @@ export function VoiceCallPanel({ tenantId, uiLocale, t, dir, cardClass }) {
     }
   }, [call.status]);
 
-  // A different business is a different line: never keep a call open across the switch.
+  // A different business (or agent) is a different line: never keep a call open across the switch.
   const { hangup } = call;
-  useEffect(() => () => hangup(), [tenantId, hangup]);
+  useEffect(() => () => hangup(), [tenantId, agentId, hangup]);
 
   return (
     <section className={`${cardClass} flex flex-col gap-4`} dir={dir}>
@@ -145,7 +145,7 @@ export function VoiceCallPanel({ tenantId, uiLocale, t, dir, cardClass }) {
         </details>
       )}
 
-      <CallHistory tenantId={tenantId} t={t} refreshKey={historyKey} />
+      <CallHistory tenantId={tenantId} agentId={agentId} t={t} refreshKey={historyKey} />
     </section>
   );
 }

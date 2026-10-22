@@ -33,7 +33,7 @@ once — name, purpose, tone, hours, what it may do, what it knows — and that
 configuration applies identically on every channel.
 
 An adapter's only job is: parse the transport, ensure a `Conversation` row
-exists, call `respond()`, translate the reply back into that transport.
+exists (stamped with the AGENT it is held with — §6.27), call `respond()`, translate the reply back into that transport.
 **No prompt text, no retrieval, no model calls in an adapter, ever.** That rule
 is the reason behaviour cannot drift between the test chat and a phone call.
 
@@ -98,6 +98,7 @@ string and scope every query by it.
 
 **DECIDED — agent configuration lives on our side.** `agent_configs` is in
 `ai_engine`; the partner's dashboard edits it through `PUT /api/agent-config`.
+**A tenant has one or more agents** (one `agent_configs` row each, one of them the default — §6.27).
 Persona and capabilities change whenever the prompt pipeline changes, so keeping
 them here means prompt iteration never waits on his migrations.
 
@@ -105,7 +106,7 @@ them here means prompt iteration never waits on his migrations.
 
 | Seam | Question it answers | Change it when |
 | --- | --- | --- |
-| [`tenant/config.js`](src/lib/tenant/config.js) | What has this business configured? | We need a field that lives in `tenant_core` |
+| [`tenant/config.js`](src/lib/tenant/config.js) | What has this business (and each of its agents, §6.27) configured? | We need a field that lives in `tenant_core` |
 | [`tenant/registry.js`](src/lib/tenant/registry.js) | May this tenant be served? | Billing/suspension/quota exists — edit `assertTenantServiceable()` and **nothing else** |
 
 Never let tenant-state checks leak into route handlers. The day one is missed is
@@ -145,6 +146,7 @@ scripts/
   eval-questions.mjs           # the labelled question set, shared by both real-path evals
   eval-embedding-variants.mjs  # picks an embedding scheme IN MEMORY before anything is re-embedded (§6.2, §6.20)
   test-collect*.mjs            # `npm run test:collect` — request-taking end to end against the real DB, faked models, ZERO quota (§6.25)
+  test-agents.mjs              # `npm run test:agents` — several agents per tenant against the real DB, faked models, ZERO quota (§6.27)
   test-reembed*.mjs            # `npm run test:reembed` — ingest/re-embed invariants with a faked embedder, no quota
   repro-tenant-recall.mjs      # synthetic multi-tenant data: does the shared HNSW index lose a tenant's rows? (§6.1)
   backfill-search-config.mjs   # `npm run db:backfill-search` — label chunks with their document's language; no embeddings (§6.3)
@@ -155,13 +157,15 @@ src/app/
   page.js                      # THE TEST CONSOLE — tabs: agent · knowledge · collected · call · chat
   collect/CollectPanel.js      # the "what the agent collects" checklist + the list of requests taken (§6.25)
   handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
+  agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
     voice/session/route.js     # checks the tenant, issues a one-minute ticket for the gateway's WebSocket (§6.24)
     voice/gateway/route.js     # where the gateway is (health + voice preview URLs) — for the voice picker
     voice/calls/route.js       # recent calls (summary); voice/calls/[id] = one call's turns + timeline
-    collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned)
+    agents/route.js            # list / add a tenant's agents; agents/[id] = rename, archive/restore, make default (§6.27)
+    collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned, per agent)
     records/route.js           # list requests the agent took; records/[id] = read / confirm / decline one
     agent-config/route.js      # GET/PUT — partner's dashboard contract
     agent-config/catalog/      # capability list, translated, for his UI
@@ -216,7 +220,8 @@ src/lib/
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
   standins/                    # fake backend (customers, records, events) behind fixed interfaces — what Haseeb replaces (§6.25)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
-  tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18)
+  tenant/ config.js, registry.js   # ★ the two seams; registry.js also has requireServiceableTenant() (§6.18) and the plan's agent limit hook
+  tenant/agent-request.js      # which agent a request is for: ?agentId= → requireAgent(), agentScope() (§6.27)
   i18n/   index.js, catalogs.js    # en + it active; ar + ur dormant
   security/rate-limit.js       # generic limiter — first wired up on /api/chat (§6.18)
   db.js                        # PrismaClient singleton
@@ -1919,6 +1924,69 @@ transfer (Twilio does not exist yet); the real model's wording of the handoff an
 "nothing in the documents" signal fires on real BUSINESS documents (a business with thin knowledge will hand off more —
 `afterMisses` is the owner's dial).
 
+### 6.27 Several agents per tenant
+
+**The model (decided with the owner):** the AI engine is ONE brain (`respond()`). An **agent** is one setup the brain
+answers with — one `agent_configs` row: business name, purpose, tone, hours, reply language, voices, what it collects,
+who it forwards calls to. A tenant has **one or more** agents (a restaurant chain: one per branch; a call centre: one per
+line or client). Later each phone number points to exactly ONE agent, and an agent may have many numbers (§9.2) — that
+mapping is the backend's (docs/handoff-to-backend.md B11). **Knowledge is shared by all of a tenant's agents** for now;
+choosing documents per agent is the next step, not built.
+
+**Rules that must not drift:**
+
+- **The default agent keeps every single-agent caller unchanged.** `agent_configs.default_for = tenant_id` marks it — a
+  plain UNIQUE column (NULLs never collide), so the database guarantees one default per tenant without a partial index
+  Prisma could not see (§6.1). Anything that names no agent (`?agentId=` omitted, `getAgentConfig(tenantId)`) is the
+  default agent. A tenant that has saved nothing has NO row and gets `DEFAULTS` (`agentId: null`); a READ never creates
+  a row (`listAgents` lists an unsaved default as `id: null` — the console's tenant box would otherwise leave an agent
+  behind for every half-typed tenant id); the first SAVE creates it (`ensureDefaultAgent`, race-safe on the unique).
+- **Every lookup is scoped by tenantId AND agentId together** (`findFirst({ id, tenantId })`): another tenant's agent id
+  is `AgentNotFoundError` → 404, never served, saved, renamed or copied (test:agents checks all four).
+- **A conversation is held with ONE agent, fixed when it starts.** `conversations.agent_id` is written by the adapter
+  (chat route; `CallRecorder.open` for voice); the adapter passes the same id to `respond()`, which REFUSES a mismatch
+  (throws) rather than answer with another agent's persona, checklist or forwarding list. The chat route treats a
+  conversation id of another agent as a new conversation. `agent_id` NULL (rows from before agents, or a tenant with no
+  row yet) = the default agent: lists of the default agent include them (`agentScope(agentId, includeUnassigned)`).
+- **A voice call resolves "the default" to an id at pick-up** (`CallSession.start`), so a call keeps its agent even if the
+  owner moves the default mid-call. The agent is SIGNED into the voice ticket (`ticket.js` claim `a`), so a browser
+  cannot swap agents after `/api/voice/session` checked it.
+- **Archived, never deleted.** Calls, conversations and requests point at agents. Archived = stops ANSWERING (chat and
+  voice refuse it with 409, `requireAgent({ serving: true })`; a call whose agent was archived after its ticket fails
+  set-up) but its settings and history stay readable. The default cannot be archived; an archived agent cannot become
+  default — something must always answer a request that names no agent. Moving the default is one transaction that
+  clears the old one FIRST (the unique would collide otherwise).
+- **`uiLocale` is the TENANT's** (the dashboard language): it lives on the default agent; saving it through any agent
+  writes the default row, and every agent reports it. Everything else is per agent.
+- **A new agent starts as a COPY** of another agent's settings (`copyFrom`, default: the default agent) — branches and
+  lines share most settings; a blank agent would make the owner retype them. Its `collectVersion` restarts at 1.
+- **Names** are trimmed, ≤60 chars, unique among the tenant's ACTIVE agents (case-insensitive, checked in code — an
+  archived agent's name can be reused). The default may stay unnamed (the console shows the business name).
+- **Limits:** the engine's safety cap is 25 active agents (`MAX_AGENTS_PER_TENANT`); a PLAN's limit belongs in
+  `registry.js assertCanAddAgent()` — same "edit only this function" rule as `assertTenantServiceable()` (§4).
+- **Cache:** keyed per (tenant, agent); `invalidateAgentConfig(tenantId)` clears every agent of the tenant, because a
+  change to one (default moved, dashboard language) changes what another reads.
+- **Events carry `agentId`** (`record.submitted`, `handoff.requested/unavailable`), and `call_logs.agent_id` /
+  `records.agent_id` exist, so usage and reports can be split per agent (and per number, with telephony).
+- **Migration** `20261022120000_multiple_agents_per_tenant` (hand-written, HNSW line removed): drops the one-row-per-
+  tenant unique, adds `name`/`status`/`default_for`, adds `agent_id` to conversations/call_logs/records, and makes every
+  existing row its tenant's default agent, stamping existing conversations, calls and requests with it.
+
+**API** (all optional `?agentId=`; without it, the default agent for settings/serving and every agent for lists):
+`GET/PUT /api/agent-config`, `GET/PUT /api/collect`, `POST /api/chat`, `POST /api/voice/session`,
+`GET /api/records`, `GET /api/voice/calls`; and `GET/POST /api/agents`, `PATCH /api/agents/:id`
+(`{ name?, status?, makeDefault? }`). Route-side parsing and errors live in `tenant/agent-request.js` only.
+
+**Console:** an agent bar above the tabs (`AgentPicker`); every tab — settings, what it collects, calls, chat — shows the
+picked agent; switching agents starts a new chat conversation and hangs up a live call. Knowledge is the shared library.
+
+**Verified:** `npm test` (543 — incl. tickets carry the agent and cannot be re-signed, a call uses its agent for config,
+call record and every turn, the default resolved at pick-up, an archived agent does not answer), `npm run test:agents`
+(the rules above against the real DB, with the real `respond()` and a faked model), `test:collect` unchanged, the HTTP
+routes by hand on a dev server, and the console driven in a browser (create → copy → edit → switch) in English and Urdu.
+**Not built:** knowledge per agent; phone numbers (backend, B11) and the Twilio transport (§9.2); per-agent analytics
+screens.
+
 ---
 
 ## 7. Languages
@@ -1994,6 +2062,7 @@ right language, with history persisted per tenant.
 | Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
+| **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge is shared per tenant |
 | **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
@@ -2216,9 +2285,10 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 539 unit tests: handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 543 unit tests: handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip in en/it, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 #   -- --call [--tenant=ID] [--say="…"] [--lang=it]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+npm run test:agents      # several agents per tenant end to end against the real DB, faked models — spends no quota (§6.27)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
 npm run test:openrouter  # OpenRouter integration vs. a local stand-in

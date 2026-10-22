@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { requireAgent } from "@/lib/tenant/agent-request";
 import { hit } from "@/lib/security/rate-limit";
 import { translator, resolveLocale } from "@/lib/i18n";
 import { issueTicket, ticketSecret } from "@/lib/voice/ticket";
@@ -10,7 +11,9 @@ import { gatewayUrls } from "@/lib/voice/gateway-url";
 /**
  * START A VOICE CALL — the test console's "Call" button lands here first.
  *
- *   POST /api/voice/session?tenantId=…   → { ticket, url, healthUrl, expiresAt }
+ *   POST /api/voice/session?tenantId=…[&agentId=…]   → { ticket, agentId, url, healthUrl, expiresAt }
+ *
+ * `agentId` picks which agent answers (default agent if omitted); it is signed into the ticket.
  *
  * This route does the CHECKING; the gateway does the CALLING. Internal auth, the tenant
  * check (§4, §6.18) and a per-tenant rate limit all happen here, inside the Next.js app
@@ -55,6 +58,9 @@ export async function POST(request) {
       return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
+    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, serving: true });
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+
     const limited = hit({ key: `voice:session:${tenantId}`, ...TENANT_SESSION_LIMIT });
     if (!limited.ok) {
       return NextResponse.json(
@@ -68,8 +74,8 @@ export async function POST(request) {
       return NextResponse.json({ error: "VOICE_SESSION_SECRET is not configured on the server" }, { status: 500 });
     }
 
-    const { ticket, expiresAt } = issueTicket({ tenantId, ttlMs: LIMITS.sessionTicketTtlMs, secret });
-    return NextResponse.json({ ticket, expiresAt, ...gatewayUrls(request) });
+    const { ticket, expiresAt } = issueTicket({ tenantId, agentId: agent.agentId, ttlMs: LIMITS.sessionTicketTtlMs, secret });
+    return NextResponse.json({ ticket, agentId: agent.agentId, expiresAt, ...gatewayUrls(request) });
   } catch (err) {
     console.error("POST /api/voice/session failed:", err);
     return NextResponse.json({ error: "Something went wrong" }, { status: 500 });

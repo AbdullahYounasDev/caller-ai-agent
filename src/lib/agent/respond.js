@@ -31,6 +31,9 @@ const extractDetails = createExtractor({ generate: generateExtraction });
  *
  * @param {object} args
  * @param {string} args.tenantId
+ * @param {string|null} [args.agentId] - which of the tenant's agents answers (CLAUDE.md §6.27);
+ *        null/omitted = the default agent. The adapter passes the agent the CONVERSATION was
+ *        started with; a mismatch is refused below rather than answered in the wrong voice.
  * @param {string} args.conversationId
  * @param {string} args.channel - "chat" | "voice"
  * @param {string} args.userMessage
@@ -48,6 +51,7 @@ const extractDetails = createExtractor({ generate: generateExtraction });
  */
 export async function respond({
   tenantId,
+  agentId = null,
   conversationId,
   channel,
   userMessage,
@@ -84,7 +88,7 @@ export async function respond({
   // earlier than it could have started, which is the price of resolving
   // follow-ups at all (§6.19).
   const [config, recentMessages, conversation] = await Promise.all([
-    getAgentConfig(tenantId),
+    getAgentConfig(tenantId, { agentId }),
     // MOST RECENT MAX_HISTORY_MESSAGES, not the oldest — see §6.17. `desc` +
     // `.reverse()` below is what turns "most recent N" back into the
     // chronological order the model expects.
@@ -95,9 +99,15 @@ export async function respond({
     }),
     prisma.conversation.findUnique({
       where: { id: conversationId },
-      select: { locale: true, collectDraft: true, handoffState: true },
+      select: { locale: true, collectDraft: true, handoffState: true, agentId: true },
     }),
   ]);
+  // A conversation is held with ONE agent from its first message (the adapter decides which and
+  // stores it). Answering it with another would mix two businesses' personas, checklists and
+  // forwarding lists in one transcript — a caller bug, so it fails loudly.
+  if (conversation?.agentId && config.agentId && conversation.agentId !== config.agentId) {
+    throw new Error(`Conversation ${conversationId} belongs to agent ${conversation.agentId}, not ${config.agentId}`);
+  }
   // `desc` fetched the NEWEST N messages, newest first — reversed here so the
   // model still reads the conversation in the order it actually happened.
   // The just-persisted message from step 1 is always the newest of all, so
@@ -136,7 +146,7 @@ export async function respond({
           history: earlierTurns,
           topK: MAX_CONTEXT_CHUNKS,
         }),
-    takeRequest({ tenantId, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
+    takeRequest({ tenantId, agentId: config.agentId ?? null, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
   ]);
   const chunks = turn.chunks;
   const retrievalMs = since(retrievalStartedAt);
@@ -300,7 +310,7 @@ export async function respond({
     emitEngineEvent({
       type: handoffTurn.result.kind === "handoff" ? "handoff.requested" : "handoff.unavailable",
       tenantId,
-      data: { conversationId, channel, reason: handoffTurn.result.reason ?? null, contactId: handoffTurn.result.contacts?.[0]?.id ?? null },
+      data: { conversationId, agentId: config.agentId ?? null, channel, reason: handoffTurn.result.reason ?? null, contactId: handoffTurn.result.contacts?.[0]?.id ?? null },
     });
   }
 
@@ -362,7 +372,7 @@ export async function respond({
  *
  * @returns {Promise<{plan: object|null, draftWrite: Promise<void>|null}>}
  */
-async function takeRequest({ tenantId, conversationId, channel, config, userMessage, earlierTurns, storedDraft }) {
+async function takeRequest({ tenantId, agentId, conversationId, channel, config, userMessage, earlierTurns, storedDraft }) {
   if (!enabledRecordTypes(config.collect).length) return { plan: null, draftWrite: null };
   try {
     const result = await advanceCollection({
@@ -376,7 +386,7 @@ async function takeRequest({ tenantId, conversationId, channel, config, userMess
         newId: randomUUID,
         extract: extractDetails,
         submit: (record) =>
-          createRecord(tenantId, { ...record, conversationId, channel, timezone: config.timezone, configVersion: config.collectVersion }),
+          createRecord(tenantId, { ...record, agentId, conversationId, channel, timezone: config.timezone, configVersion: config.collectVersion }),
         update: (recordId, record) => updateRecordDetails(tenantId, recordId, record),
         withdraw: (recordId) => withdrawRecord(tenantId, recordId),
       },
@@ -425,11 +435,11 @@ export async function trimLastReply({ tenantId, conversationId, spokenText }) {
  * { kind: "rephrase" } to ask the caller to repeat — or null when the business has no one to
  * hand to (the session then just asks again). No model call, no reply: only rules and state.
  *
- * @param {{tenantId: string, conversationId: string}} args
+ * @param {{tenantId: string, agentId?: string|null, conversationId: string}} args
  */
-export async function noteUnheard({ tenantId, conversationId }) {
+export async function noteUnheard({ tenantId, agentId = null, conversationId }) {
   const [config, conversation] = await Promise.all([
-    getAgentConfig(tenantId),
+    getAgentConfig(tenantId, { agentId }),
     prisma.conversation.findUnique({ where: { id: conversationId }, select: { handoffState: true } }),
   ]);
   if (!handoffAvailable(config.escalation)) return null;
@@ -458,7 +468,7 @@ export async function noteUnheard({ tenantId, conversationId }) {
     contacts: action.contacts,
     summary: summariseForPerson({ reason: action.reason, callerMessages: recent.map((m) => m.content).reverse() }),
   };
-  emitEngineEvent({ type: "handoff.requested", tenantId, data: { conversationId, channel: "voice", reason: action.reason, contactId: action.contacts[0]?.id ?? null } });
+  emitEngineEvent({ type: "handoff.requested", tenantId, data: { conversationId, agentId: config.agentId ?? null, channel: "voice", reason: action.reason, contactId: action.contacts[0]?.id ?? null } });
   return result;
 }
 

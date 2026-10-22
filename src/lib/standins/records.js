@@ -2,6 +2,7 @@ import { randomInt } from "node:crypto";
 import { prisma } from "@/lib/db";
 import { upsertCustomer } from "./customers";
 import { emitEngineEvent } from "./events";
+import { agentScope } from "@/lib/tenant/agent-request";
 
 /**
  * STAND-IN for the backend's bookings / callback requests and the staff screen that works
@@ -47,6 +48,7 @@ const isUniqueViolation = (err, field) => err?.code === "P2002" && String(err?.m
  * @param {string} input.summary
  * @param {string|null} input.scheduledAt          "2026-10-22T17:00", the business's wall clock
  * @param {string} input.language
+ * @param {string|null} [input.agentId]          the agent that took it (null = default agent)
  * @param {string|null} [input.conversationId]
  * @param {string} [input.channel]
  * @param {string} [input.timezone]
@@ -74,6 +76,7 @@ export async function createRecord(tenantId, input) {
           tenantId,
           reference: newReference(input.type),
           type: input.type,
+          agentId: input.agentId ?? null,
           conversationId: input.conversationId ?? null,
           customerId: customer.id,
           channel: input.channel ?? "chat",
@@ -87,7 +90,7 @@ export async function createRecord(tenantId, input) {
         },
         select: { id: true, reference: true },
       });
-      emitEngineEvent({ type: "record.submitted", tenantId, data: { recordId: row.id, recordType: input.type, reference: row.reference, conversationId: input.conversationId ?? null } });
+      emitEngineEvent({ type: "record.submitted", tenantId, data: { recordId: row.id, recordType: input.type, reference: row.reference, agentId: input.agentId ?? null, conversationId: input.conversationId ?? null } });
       return { ...row, created: true };
     } catch (err) {
       // Two near-simultaneous confirmations: the other one won; hand back its row.
@@ -149,6 +152,7 @@ const SELECT = {
   reference: true,
   type: true,
   status: true,
+  agentId: true,
   conversationId: true,
   channel: true,
   language: true,
@@ -163,16 +167,21 @@ const SELECT = {
 
 /**
  * @param {string} tenantId
- * @param {{status?: string, type?: string, take?: number, skip?: number}} [filter]
+ * @param {{status?: string, type?: string, agentId?: string|null, includeUnassigned?: boolean, take?: number, skip?: number}} [filter]
+ *        agentId: only the requests that agent took; omitted = every agent's. The status
+ *        counts follow the same agent filter, so the badges match the list beside them.
+ *        includeUnassigned: also rows with no agent — they were taken by the DEFAULT agent
+ *        before it had a row, so pass it when agentId is the default agent.
  * @returns {Promise<{data: object[], total: number, counts: Record<string, number>}>}
  */
-export async function listRecords(tenantId, { status, type, take = 50, skip = 0 } = {}) {
+export async function listRecords(tenantId, { status, type, agentId, includeUnassigned = false, take = 50, skip = 0 } = {}) {
   if (!tenantId) throw new Error("listRecords requires a tenantId");
-  const where = { tenantId, ...(RECORD_STATUSES.includes(status) ? { status } : {}), ...(type ? { type } : {}) };
+  const scope = { tenantId, ...agentScope(agentId, includeUnassigned) };
+  const where = { ...scope, ...(RECORD_STATUSES.includes(status) ? { status } : {}), ...(type ? { type } : {}) };
   const [data, total, grouped] = await Promise.all([
     prisma.record.findMany({ where, orderBy: { createdAt: "desc" }, take: Math.min(Math.max(take, 1), 100), skip: Math.max(skip, 0), select: SELECT }),
     prisma.record.count({ where }),
-    prisma.record.groupBy({ by: ["status"], where: { tenantId }, _count: { _all: true } }),
+    prisma.record.groupBy({ by: ["status"], where: scope, _count: { _all: true } }),
   ]);
   const counts = Object.fromEntries(RECORD_STATUSES.map((s) => [s, 0]));
   for (const g of grouped) counts[g.status] = g._count._all;

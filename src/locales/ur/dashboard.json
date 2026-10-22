@@ -302,5 +302,22 @@
   "chat.handoff.rephrase": "کالر سے دوبارہ بتانے کو کہا",
   "chat.handoff.handed_off": "پہلے ہی کسی فرد کو منتقل ہو چکی",
   "handoff.afterMisses.option_one": "{count} بار",
-  "handoff.afterMisses.option_other": "{count} بار"
+  "handoff.afterMisses.option_other": "{count} بار",
+  "agents.label": "ایجنٹ",
+  "agents.help": "ہر ایجنٹ کی اپنی ترتیبات، چیک لسٹ، کال فارورڈنگ، کالز اور درخواستیں ہوتی ہیں۔ نالج میں موجود دستاویزات سب ایجنٹس کے لیے مشترک ہیں۔",
+  "agents.default": "بنیادی",
+  "agents.archivedTag": "آرکائیو",
+  "agents.new": "نیا ایجنٹ",
+  "agents.newName": "نئے ایجنٹ کا نام",
+  "agents.namePlaceholder": "مثلاً ڈبلن برانچ، سیلز لائن",
+  "agents.copyHelp": "نیا ایجنٹ \"{name}\" کی ترتیبات کی نقل سے شروع ہوگا۔ بعد میں آپ سب کچھ بدل سکتے ہیں۔",
+  "agents.created": "ایجنٹ بن گیا۔ اب آپ اسی میں تبدیلیاں کر رہے ہیں۔",
+  "agents.rename": "نام بدلیں",
+  "agents.renameLabel": "ایجنٹ کا نام",
+  "agents.makeDefault": "بنیادی بنائیں",
+  "agents.archive": "آرکائیو کریں",
+  "agents.archiveConfirm": "\"{name}\" کو آرکائیو کریں؟ یہ جواب دینا بند کر دے گا، مگر اس کی کالز اور درخواستیں محفوظ رہیں گی۔",
+  "agents.restore": "بحال کریں",
+  "agents.showArchived": "آرکائیو شدہ دکھائیں",
+  "agents.archivedHelp": "یہ ایجنٹ آرکائیو ہے: یہ چیٹ یا کالز کا جواب نہیں دیتا۔ دوبارہ استعمال کے لیے اسے بحال کریں۔"
 }

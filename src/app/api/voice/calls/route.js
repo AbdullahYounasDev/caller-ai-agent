@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { checkInternalAuth } from "@/lib/auth/internal";
+import { uiLocaleFor } from "@/lib/tenant/ui-locale";
+import { translator } from "@/lib/i18n";
+import { requireAgent, agentScope } from "@/lib/tenant/agent-request";
 
 /**
  * CALL HISTORY — the most recent calls for a tenant, newest first.
  *
- *   GET /api/voice/calls?tenantId=…&limit=20
+ *   GET /api/voice/calls?tenantId=…[&agentId=…]&limit=20
+ *
+ * With `agentId`, only that agent's calls; without it, every agent's. Each call says which
+ * agent answered it (`agentId`).
  *
  * A summary per call (status, duration, turns, interruptions, median latency, and how
  * many of its turns the knowledge base could not answer). The full transcript, turns and
@@ -21,12 +27,21 @@ export async function GET(request) {
     if (!tenantId) return NextResponse.json({ error: "tenantId is required" }, { status: 400 });
     const limit = Math.min(Math.max(Number(request.nextUrl.searchParams.get("limit")) || 20, 1), 100);
 
+    let scope = {};
+    if (request.nextUrl.searchParams.get("agentId")) {
+      const tr = translator(await uiLocaleFor(request, tenantId));
+      const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr });
+      if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+      scope = agentScope(agent.agentId, agent.config.isDefault);
+    }
+
     const calls = await prisma.callLog.findMany({
-      where: { tenantId },
+      where: { tenantId, ...scope },
       orderBy: { createdAt: "desc" },
       take: limit,
       select: {
         id: true,
+        agentId: true,
         transport: true,
         status: true,
         endReason: true,

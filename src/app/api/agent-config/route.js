@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
-import { getAgentConfig, saveAgentConfig } from "@/lib/tenant/config";
+import { saveAgentConfig } from "@/lib/tenant/config";
 import { getCapability } from "@/lib/agent/capabilities/catalog";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
+import { requireAgent } from "@/lib/tenant/agent-request";
 import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
 import { validateHandoffConfig } from "@/lib/handoff/config";
@@ -11,8 +12,13 @@ import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 /**
  * THE CONTRACT WITH THE PARTNER'S DASHBOARD.
  *
- *   GET  /api/agent-config?tenantId=…            read a tenant's agent configuration
- *   PUT  /api/agent-config?tenantId=…            patch it (only the keys you send are written)
+ *   GET  /api/agent-config?tenantId=…[&agentId=…]   read one agent's configuration
+ *   PUT  /api/agent-config?tenantId=…[&agentId=…]   patch it (only the keys you send are written)
+ *
+ * `agentId` picks one of the tenant's agents (GET /api/agents lists them); without it, the
+ * tenant's DEFAULT agent — so a dashboard written before agents existed keeps working. The
+ * response carries `agentId`, `name`, `isDefault` and `status`; manage those through
+ * /api/agents. `uiLocale` is the tenant's (the dashboard language), whichever agent is edited.
  *
  * Both accept `&locale=` — the UI LOCALE, i.e. the language the business owner
  * is reading the dashboard in. Validation messages come back in that language,
@@ -48,8 +54,9 @@ export async function GET(request) {
 
     // skipCache: the dashboard must never show a business a stale copy of the
     // settings it is about to edit — that's how edits get silently overwritten.
-    const config = await getAgentConfig(tenantId, { skipCache: true });
-    return NextResponse.json({ config, locale });
+    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, skipCache: true });
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+    return NextResponse.json({ config: agent.config, locale });
   } catch (err) {
     console.error("GET /api/agent-config failed:", err);
     return NextResponse.json(
@@ -80,6 +87,9 @@ export async function PUT(request) {
       return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
     }
 
+    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr });
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+
     const patch = await request.json().catch(() => null);
     if (!patch || typeof patch !== "object") {
       return NextResponse.json({ error: tr("validation:body.invalid") }, { status: 400 });
@@ -93,7 +103,9 @@ export async function PUT(request) {
       );
     }
 
-    const config = await saveAgentConfig(tenantId, patch);
+    // agent.config.isDefault: a named default agent is saved as "the default" (agentId null), so a
+    // tenant with no row yet gets one created rather than a 404.
+    const config = await saveAgentConfig(tenantId, patch, { agentId: agent.config.isDefault ? null : agent.agentId });
     // Echo the locale the SAVED config now implies, so a dashboard that just
     // changed its own language knows to re-fetch its strings.
     return NextResponse.json({ config, locale: config.uiLocale });

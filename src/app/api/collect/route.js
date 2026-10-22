@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { getAgentConfig, saveCollectConfig } from "@/lib/tenant/config";
+import { saveCollectConfig } from "@/lib/tenant/config";
+import { requireAgent } from "@/lib/tenant/agent-request";
 import { checkInternalAuth } from "@/lib/auth/internal";
 import { requireServiceableTenant } from "@/lib/tenant/registry";
 import { uiLocaleFor } from "@/lib/tenant/ui-locale";
@@ -11,10 +12,10 @@ import { describeCatalog, validateCollectConfig } from "@/lib/collect/config";
  * WHAT THE AGENT COLLECTS — the settings behind the console's "What your agent collects"
  * tab, and the contract with the partner's dashboard for the same screen.
  *
- *   GET  /api/collect?tenantId=…   the tenant's settings, plus the catalogue to draw them
+ *   GET  /api/collect?tenantId=…[&agentId=…]   one agent's settings (default agent if omitted), plus the catalogue to draw them
  *                                  from (every field, request type and industry preset,
  *                                  each with its English and Urdu wording)
- *   PUT  /api/collect?tenantId=…   body { collect: {...} } — replace the settings
+ *   PUT  /api/collect?tenantId=…[&agentId=…]   body { collect: {...} } — replace the settings
  *
  * The whole document is replaced on every save (not patched): it is one coherent set of
  * choices — which details, for which kinds of request, in which order — and a half-merged
@@ -36,8 +37,10 @@ export async function GET(request) {
     if (!tenantId) return NextResponse.json({ error: tr("validation:tenantId.required") }, { status: 400 });
 
     // skipCache: the screen must never show an owner a stale copy of what it is about to edit.
-    const config = await getAgentConfig(tenantId, { skipCache: true });
-    return NextResponse.json({ collect: config.collect, version: config.collectVersion, catalog: describeCatalog(), locale });
+    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, skipCache: true });
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+    const config = agent.config;
+    return NextResponse.json({ agentId: agent.agentId, collect: config.collect, version: config.collectVersion, catalog: describeCatalog(), locale });
   } catch (err) {
     console.error("GET /api/collect failed:", err);
     return NextResponse.json({ error: err.message || "Something went wrong" }, { status: 500 });
@@ -57,6 +60,9 @@ export async function PUT(request) {
     const serviceable = await requireServiceableTenant({ tenantId, tr });
     if (!serviceable.ok) return NextResponse.json({ error: serviceable.error }, { status: serviceable.status });
 
+    const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr });
+    if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
+
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object" || Array.isArray(body) || typeof body.collect !== "object" || body.collect === null) {
       return NextResponse.json({ error: tr("validation:body.invalid") }, { status: 400 });
@@ -67,8 +73,8 @@ export async function PUT(request) {
       return NextResponse.json({ error: tr("common:state.error"), details: problems.map((p) => describeProblem(p, tr, locale)), locale }, { status: 400 });
     }
 
-    const saved = await saveCollectConfig(tenantId, config);
-    return NextResponse.json({ collect: saved.collect, version: saved.collectVersion, locale });
+    const saved = await saveCollectConfig(tenantId, config, { agentId: agent.config.isDefault ? null : agent.agentId });
+    return NextResponse.json({ agentId: saved.agentId, collect: saved.collect, version: saved.collectVersion, locale });
   } catch (err) {
     console.error("PUT /api/collect failed:", err);
     return NextResponse.json({ error: err.message || "Something went wrong" }, { status: 500 });
