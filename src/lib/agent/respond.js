@@ -16,6 +16,18 @@ import { writeDraft } from "@/lib/collect/store";
 import { createRecord, updateRecordDetails, withdrawRecord } from "@/lib/standins/records";
 
 const MAX_HISTORY_MESSAGES = 20;
+
+/**
+ * The adapter withdrew this turn before its reply was heard (the voice caller carried on talking —
+ * voice/session.js): everything the turn wrote has been put back, the caller's message included, so
+ * the adapter can send the whole sentence again as ONE message.
+ */
+export class TurnSupersededError extends Error {
+  constructor() {
+    super("The turn was withdrawn: the caller carried on talking");
+    this.name = "TurnSupersededError";
+  }
+}
 const MAX_CONTEXT_CHUNKS = 5;
 
 // One extractor for the whole process (lib/collect/extract.js): it carries no state, and the
@@ -48,6 +60,10 @@ const extractDetails = createExtractor({ generate: generateExtraction });
  *        progress while the turn is still running — the voice gateway's live timeline
  *        (§6.24). It cannot change anything about the turn, and a throwing callback is
  *        swallowed: reporting on a reply must never break the reply.
+ * @param {AbortSignal} [args.signal] - the adapter withdraws the turn (voice: the caller carried on
+ *        before the reply was heard). Honoured until the reply is stored: the turn's writes — the
+ *        caller's message, the request draft, the handoff state — are put back and
+ *        TurnSupersededError is thrown. Once the reply is stored the turn simply completes.
  */
 export async function respond({
   tenantId,
@@ -57,6 +73,7 @@ export async function respond({
   userMessage,
   onChunk,
   onStage,
+  signal,
 }) {
   const stage = (name, data) => {
     try {
@@ -70,9 +87,32 @@ export async function respond({
   // 1. Persist the incoming message. Same `messages` table regardless of
   // channel, keyed by conversationId — so a conversation that starts in the
   // test chat and continues by phone is one query with the full history.
-  await prisma.message.create({
+  const userRow = await prisma.message.create({
     data: { conversationId, tenantId, channel, role: "user", content: userMessage },
+    select: { id: true },
   });
+
+  // WITHDRAWING THE TURN (args.signal). Everything this turn writes before its reply is stored is
+  // undone here, in one place: the request draft and the handoff state go back to what they were
+  // (exactly what a FAILED reply already did, below), and — only when withdrawn — the caller's
+  // message itself goes too, because the adapter is about to send it again as part of a longer one.
+  const undo = { collection: null, handoffWrite: null, previous: null };
+  const putBack = async ({ removeMessage }) => {
+    if (undo.collection?.draftWrite) {
+      await undo.collection.draftWrite;
+      await writeDraft(conversationId, undo.previous?.collectDraft ?? null).catch(() => {});
+    }
+    if (undo.handoffWrite) {
+      await undo.handoffWrite;
+      await prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: undo.previous?.handoffState ?? null } }).catch(() => {});
+    }
+    if (removeMessage) await prisma.message.delete({ where: { id: userRow.id } }).catch(() => {});
+  };
+  const checkpoint = async () => {
+    if (!signal?.aborted) return;
+    await putBack({ removeMessage: true });
+    throw new TurnSupersededError();
+  };
 
   // 2. Everything the business configured about its agent — name, purpose,
   // tone, languages, what it's allowed to do, hours. Cached, so this is
@@ -114,6 +154,8 @@ export async function respond({
   // it is always the LAST element after this reverse, never silently outside
   // the window (see §6.17 for what went wrong before this).
   const priorMessages = recentMessages.reverse();
+  undo.previous = conversation;
+  await checkpoint();
 
   // 3. Tenant knowledge relevant to this message — the actual RAG step, now
   // resolved against the conversation so a follow-up is searched as the
@@ -153,6 +195,7 @@ export async function respond({
         }),
     takeRequest({ tenantId, agentId: config.agentId ?? null, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
   ]);
+  undo.collection = collection;
   const chunks = turn.chunks;
   const retrievalMs = since(retrievalStartedAt);
   const sources = [...new Set(chunks.map((c) => c.sourceTitle))];
@@ -204,6 +247,8 @@ export async function respond({
   const handoffWrite = handoffTurn.changed
     ? prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: handoffTurn.state } }).catch((err) => console.error("[handoff] could not save the state:", err))
     : null;
+  undo.handoffWrite = handoffWrite;
+  await checkpoint();
 
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
   const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan, handoff: handoffTurn.plan, opener: turn.opener });
@@ -260,6 +305,8 @@ export async function respond({
   const markers = createMarkerFilter();
   const passOn = onChunk
     ? (text) => {
+        // Withdrawn mid-stream: stop taking the model's words (the throw ends the stream).
+        if (signal?.aborted) throw new TurnSupersededError();
         if (!text) return;
         if (firstTokenMs === null) {
           firstTokenMs = since(generationStartedAt);
@@ -279,15 +326,9 @@ export async function respond({
     // have moved on either: put the draft back as it was. (If the turn had SAVED a request,
     // restoring the draft is still right: the customer's next "yes" saves the same
     // submission key, which returns the same record rather than a second one.)
-    if (collection.draftWrite) {
-      await collection.draftWrite;
-      await writeDraft(conversationId, conversation?.collectDraft ?? null).catch(() => {});
-    }
-    if (handoffWrite) {
-      await handoffWrite;
-      await prisma.conversation.update({ where: { id: conversationId }, data: { handoffState: conversation?.handoffState ?? null } }).catch(() => {});
-    }
-    throw err;
+    const withdrawn = err instanceof TurnSupersededError || signal?.aborted;
+    await putBack({ removeMessage: withdrawn });
+    throw withdrawn ? new TurnSupersededError() : err;
   }
   if (passOn) passOn(markers.end());
   const { text: assistantReply, type: markedType } = stripMarker(rawReply);
@@ -304,6 +345,8 @@ export async function respond({
   }
   await collection.draftWrite;
   await handoffWrite;
+  // Last chance to withdraw: past this point the reply is stored and the turn completes.
+  await checkpoint();
 
   // 8. Persist the reply.
   await prisma.message.create({

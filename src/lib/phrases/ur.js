@@ -102,6 +102,34 @@ export const OPENERS = {
   ],
 };
 
+/** PAUSES — what a caller says about the call itself (see en.js PAUSES). */
+export const PAUSES = {
+  holdOn: [
+    "ایک منٹ/سیکنڈ/لمحہ",
+    "ذرا ایک منٹ/سیکنڈ/لمحہ",
+    "ایک منٹ رکیں/رکو/رکیے/رکئے",
+    "رکیں/رکو/رکیے/رکئے",
+    "ذرا رکیں/رکو/رکیے/رکئے",
+    "انتظار کریں/کرو/کیجیے/کیجئے",
+    "میں دیکھتا/دیکھتی ہوں",
+    "میں چیک کرتا/کرتی ہوں",
+  ],
+  stillHere: [
+    "جی",
+    "جی ہاں",
+    "ہاں",
+    "ہاں جی",
+    "میں یہیں ہوں",
+    "میں لائن پر ہوں",
+    "جی میں ہوں",
+    "ہیلو",
+    "جی ہیلو",
+  ],
+};
+
+/** Question words (see en.js QUESTION_WORDS). */
+export const QUESTION_WORDS = ["کیا", "کتنا", "کتنی", "کتنے", "کب", "کہاں", "کیوں", "کون", "کیسے", "کونسا", "کونسی"];
+
 /** Words with no meaning of their own in an opener (see en.js FILLER). */
 export const FILLER = [
   "جی", "جناب", "ہیلو", "ہائے", "السلام", "علیکم", "اسلام", "سلام", "وعلیکم", "آداب",

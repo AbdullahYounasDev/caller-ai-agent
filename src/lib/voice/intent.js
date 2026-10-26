@@ -25,6 +25,10 @@ export const INTENTS = {
   ACKNOWLEDGEMENT: "acknowledgement",
   GOODBYE: "goodbye",
   HUMAN_REQUEST: "human_request",
+  /** "Hold on, let me find my card" — the agent waits (voice/session.js onPause). */
+  HOLD: "hold",
+  /** "Yes, I'm here" in answer to "are you still there?". */
+  PRESENCE: "presence",
 };
 
 export const OUTCOMES = {

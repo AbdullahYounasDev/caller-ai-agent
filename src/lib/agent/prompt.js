@@ -477,6 +477,16 @@ export function voiceLine(kind, language, variant = 0) {
       en: ["I can't hear you, so I'll end the call now. Thank you for calling, and please call again any time. Goodbye."],
       ur: ["آپ کی آواز نہیں آ رہی، اس لیے کال ختم کی جا رہی ہے۔ کال کرنے کا شکریہ، آپ جب چاہیں دوبارہ کال کریں۔ خدا حافظ۔"],
     },
+    // The caller asked the agent to wait ("hold on", "ek minute"), and the reply when they answer
+    // "are you still there?" (voice/session.js onPause). Neither goes into the conversation.
+    take_your_time: {
+      en: ["Sure, take your time. I'm here.", "No problem, take your time."],
+      ur: ["جی، آرام سے، کوئی جلدی نہیں۔", "کوئی بات نہیں، آرام سے دیکھ لیجیے۔"],
+    },
+    listening: {
+      en: ["Great. Go ahead whenever you're ready.", "Okay, go ahead."],
+      ur: ["جی، آپ جب چاہیں بات کریں۔", "جی، بتائیے۔"],
+    },
     closing: {
       en: ["Thank you for calling. Goodbye."],
       ur: ["کال کرنے کا شکریہ۔ خدا حافظ۔"],

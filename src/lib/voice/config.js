@@ -76,6 +76,12 @@ export const LIMITS = {
 export const SILENCE = {
   checkInAfterMs: 15_000,
   endAfterCheckInMs: 10_000,
+  /**
+   * After the caller asked the agent to wait ("hold on, let me find my card", "ek minute" —
+   * lib/phrases PAUSES): someone fetching a card or a diary needs more than 15 s, and asking
+   * "are you still there?" at them sounds impatient. Back to normal at their next real message.
+   */
+  hold: { checkInAfterMs: 60_000, endAfterCheckInMs: 20_000 },
 };
 
 /**
@@ -129,6 +135,16 @@ export const CONTINUATION = {
   holdMs: 1200,
   /** Halves that may be joined into one message. */
   maxMerges: 2,
+  /**
+   * The LATE merge, for a sentence that did not LOOK unfinished ("I want to book an appointment."
+   * … "for tomorrow at five"): when the caller starts speaking again within this long of the end of
+   * the previous utterance AND has not heard a word of the answer yet, the turn in flight is
+   * withdrawn (its writes undone — respond.js `signal`) and both halves are answered as one message.
+   * It costs a finished sentence nothing: no turn waits for it. Once the agent has spoken, speech is
+   * an ordinary interruption (BARGE_IN). 3 s: past that, a caller who speaks into the silence is
+   * more likely saying "hello?" than finishing a sentence.
+   */
+  lateMergeWithinMs: 3000,
 };
 
 export const TTS = {

@@ -16,6 +16,48 @@
  * every group still matches its examples and that nothing here matches an ordinary question).
  */
 
+/**
+ * PAUSES — what a caller says about the CALL itself, not the business (voice/session.js):
+ *   holdOn     "hold on, let me find my card" — the agent says "take your time" and waits longer
+ *              before asking "are you still there?";
+ *   stillHere  the answer to "are you still there?" — "yes, I'm here". Only read that way right
+ *              after the agent has asked it; anywhere else "yes" is an answer to the conversation.
+ * Neither is sent to the brain, so neither enters the conversation: the next real question
+ * follows straight on from the exchange before the pause.
+ */
+export const PAUSES = {
+  holdOn: [
+    "hold on",
+    "hang on",
+    "one moment/second/sec/minute/min",
+    "just a moment/second/sec/minute/min",
+    "give me a moment/second/sec/minute/min",
+    "wait a moment/second/sec/minute/min",
+    // Not a bare "wait": "oh wait, one more thing" is the caller carrying on, not asking to hold.
+    "bear with me",
+    "let me check/find/get/look/grab",
+    "let me just check/find/get/look/grab",
+    "i need a moment/second/minute",
+    "can you hold/wait",
+    "please hold/wait",
+  ],
+  stillHere: [
+    "yes/yeah/yep/yup",
+    "i am here",
+    "yes i am here",
+    "i am still here",
+    "still here",
+    "i am on the line",
+    "i am still on the line",
+    "hello",
+    "yes hello",
+    "here",
+  ],
+};
+
+/** Question words: "wait, how much is it?" asks something — it is not a request to hold. */
+export const QUESTION_WORDS = ["what", "how", "when", "where", "why", "which", "who", "whats", "hows", "whose"];
+
 /** Words that name the business itself — used inside the phrases below. */
 const BUSINESS = "company/business/firm/organisation/organization/agency/clinic/practice/hospital/restaurant/cafe/shop/store/brand/office/centre/center/team/place/service/outfit/establishment/startup";
 
