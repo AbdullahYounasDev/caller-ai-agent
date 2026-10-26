@@ -60,3 +60,61 @@ export function float32ToPcm16(samples) {
   }
   return out;
 }
+
+/**
+ * Cut the near-silence a TTS engine leaves at the start and end of every piece it speaks
+ * (sentences.js cuts a reply into pieces). Each piece is synthesised on its own, so that
+ * silence is paid at EVERY join — inside a sentence it reads as the agent stopping mid-thought.
+ * The session then adds back exactly the pause the join needs (TTS in config.js).
+ *
+ * Speech is found by short-window energy: a window counts as speech when its RMS reaches
+ * `relative` × the loudest window (or `floor`, whichever is higher). A little of the quiet is
+ * kept on each side (`keepLeadMs`, `keepTailMs`), so a soft first or last sound ("s", "f",
+ * "h") is never clipped. Audio with no window above the threshold is returned unchanged.
+ *
+ * @param {Float32Array} samples
+ * @param {number} sampleRate
+ * @param {{relative?: number, floor?: number, keepLeadMs?: number, keepTailMs?: number, windowMs?: number}} [options]
+ * @returns {{samples: Float32Array, leadMs: number, tailMs: number}} what was kept, and how much was cut from each end
+ */
+export function trimSilence(samples, sampleRate, { relative = 0.02, floor = 0.002, keepLeadMs = 20, keepTailMs = 40, windowMs = 5 } = {}) {
+  const win = Math.max(1, Math.round((sampleRate * windowMs) / 1000));
+  const windows = Math.floor(samples.length / win);
+  if (!windows) return { samples, leadMs: 0, tailMs: 0 };
+  const rms = new Float32Array(windows);
+  let peak = 0;
+  for (let w = 0; w < windows; w++) {
+    let sum = 0;
+    for (let i = w * win; i < (w + 1) * win; i++) sum += samples[i] * samples[i];
+    rms[w] = Math.sqrt(sum / win);
+    if (rms[w] > peak) peak = rms[w];
+  }
+  const threshold = Math.max(peak * relative, floor);
+  let first = 0;
+  while (first < windows && rms[first] < threshold) first++;
+  if (first === windows) return { samples, leadMs: 0, tailMs: 0 };
+  let last = windows - 1;
+  while (last > first && rms[last] < threshold) last--;
+
+  const start = Math.max(0, first * win - Math.round((sampleRate * keepLeadMs) / 1000));
+  const end = Math.min(samples.length, (last + 1) * win + Math.round((sampleRate * keepTailMs) / 1000));
+  return {
+    samples: start === 0 && end === samples.length ? samples : samples.slice(start, end),
+    leadMs: Math.round((start / sampleRate) * 1000),
+    tailMs: Math.round(((samples.length - end) / sampleRate) * 1000),
+  };
+}
+
+/**
+ * `samples` followed by `ms` of silence.
+ * @param {Float32Array} samples
+ * @param {number} sampleRate
+ * @param {number} ms
+ */
+export function withTrailingSilence(samples, sampleRate, ms) {
+  const pad = Math.round((sampleRate * Math.max(0, ms)) / 1000);
+  if (!pad) return samples;
+  const out = new Float32Array(samples.length + pad);
+  out.set(samples);
+  return out;
+}

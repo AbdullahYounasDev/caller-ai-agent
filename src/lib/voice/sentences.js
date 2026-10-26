@@ -38,7 +38,15 @@
  * comma (or ; : ، ) in the window, else before a STRONG joining word ("which", "because",
  * "according to", Urdu "کیونکہ"…), else before a weak one ("and", "or" — weak because they
  * often sit inside a noun phrase: "availability and support hours"), else at a space.
- * Never inside a word.
+ * Never inside a word — and, at a plain space, never right after a word that leads into the
+ * next one ("tell me about | your name", "the | price") or right before an Urdu postposition
+ * ("آپ | کا نام"): spoken as two pieces, that join is heard as the agent stopping mid-thought.
+ *
+ * Where a chunk ended decides the pause after it (chunkEnding → TTS in config.js): a full
+ * pause after a sentence, a short one at a comma, none at all between two pieces of one
+ * sentence. And a call whose speech is being made slower than it plays (the CPU is busy) is
+ * switched to whole sentences (`wholeSentences`): a gap then falls between sentences, where a
+ * listener expects one, never in the middle of one.
  * ─────────────────────────────────────────────────────────────────────────
  *
  * Pure and dependency-free (tests/voice-units.test.mjs).
@@ -79,6 +87,42 @@ const STRONG_JOINER =
   / (?=(?:but|so|because|which|who|while|until|unless|whereas|although|according to|including|except|لیکن|مگر|کیونکہ|جو|جب|تاکہ|اگرچہ)\s)/giu;
 /** Words that MAY start a clause but often join two nouns — used only when nothing better exists. */
 const WEAK_JOINER = / (?=(?:and|or|that|اور|یا|کہ)\s)/giu;
+
+/**
+ * A chunk must not END on one of these: each leads into the word after it ("about | your name",
+ * "the | Pro plan", "can | help"). English, Urdu script and Roman Urdu.
+ */
+const LEADS_INTO = new Set(
+  (
+    "a an the my your our their his her its this that these those to of for with about from by in on at into onto as than " +
+    "and or but nor so if very more most less not no is are was were be been am will would can could shall should may might must " +
+    "do does did have has had i we they he she i'm i'd i'll you're we're it's please just also " +
+    "اور یا کہ جو اگر لیکن مگر بھی میرا میری میرے آپ ہم یہ وہ اس ان " +
+    "aur ya ke ki ka jo agar lekin magar bhi mera meri mere aap hum ye yeh woh is un"
+  ).split(" ")
+);
+
+/**
+ * A chunk must not START on one of these: Urdu postpositions and helpers attach to the word
+ * BEFORE them ("آپ کا", "نام سے", "کیا ہے") — a piece that opens with one sounds broken off.
+ */
+const ATTACHES_BACK = new Set(
+  ("کا کی کے کو سے میں پر نے تک ہی ہے ہیں تھا تھی تھے گا گی گے والا والی والے سکتے سکتی سکتا رہے رہی رہا " +
+    "ka ki ke ko se mein par ne tak hi hai hain tha thi the ga gi ge wala wali wale sakte sakti sakta rahe rahi raha").split(" ")
+);
+
+const bareWord = (word) => String(word ?? "").toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, "");
+
+/** A number leads into what it counts ("two | visits", "149 | euros", "پانچ | ہزار"). */
+const NUMBER_WORD =
+  /^(?:\p{N}+(?:[.,]\p{N}+)*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand|ایک|دو|تین|چار|پانچ|چھ|سات|آٹھ|نو|دس|سو|ہزار|ek|aik|do|teen|char|paanch|chay|saat|aath|das|sau|hazar)$/u;
+
+/** A plain space where a piece may end: not after a word that leads on, not before one that attaches back. */
+function goodSpace(text, at) {
+  const before = bareWord(text.slice(0, at).trimEnd().split(/\s+/).at(-1));
+  const after = bareWord(text.slice(at).trimStart().split(/\s+/)[0]);
+  return !LEADS_INTO.has(before) && !NUMBER_WORD.test(before) && !ATTACHES_BACK.has(after);
+}
 
 /** "Dr." or "e.g." — a single period after a known abbreviation. */
 function endsWithAbbreviation(text) {
@@ -122,8 +166,28 @@ function breakPoint(text, limit, commaLimit = limit) {
   if (strong > 0) return strong;
   const weak = lastMatch(WEAK_JOINER, limit, false);
   if (weak > 0) return weak;
+  // A plain space: the last good one in the window ("tell me about your name" breaks after
+  // "name", not after "about"), else — with nothing better — the last space at all.
+  for (let space = text.lastIndexOf(" ", limit); space >= MIN_CHUNK_CHARS; space = text.lastIndexOf(" ", space - 1)) {
+    if (goodSpace(text, space)) return space;
+  }
   const space = text.lastIndexOf(" ", limit);
   return space >= MIN_CHUNK_CHARS ? space : -1;
+}
+
+/**
+ * How a chunk ended — which decides the pause after it (TTS in config.js):
+ *   "sentence"  . ! ? … ۔ ؟ — a full pause
+ *   "comma"     , ; : ، — a short one
+ *   "joined"    cut between two words of one sentence — no pause at all: the next piece follows on
+ * @param {string} chunk
+ * @returns {"sentence"|"comma"|"joined"}
+ */
+export function chunkEnding(chunk) {
+  const text = String(chunk ?? "").trimEnd().replace(/["'”’)\]]+$/, "");
+  if (/[.!?…۔؟]$/.test(text)) return "sentence";
+  if (/[,;:،]$/.test(text)) return "comma";
+  return "joined";
 }
 
 /**
@@ -147,14 +211,20 @@ export function sanitizeForSpeech(text) {
 
 /** Turns a stream of text deltas into speakable chunks, in order. */
 export class SentenceChunker {
-  constructor() {
+  /**
+   * @param {{wholeSentences?: boolean}} [options] speak whole sentences only (cut one only past
+   *   MAX_CHUNK_CHARS) — for a call whose speech is made slower than it plays (session.js)
+   */
+  constructor({ wholeSentences = false } = {}) {
     this.buffer = "";
     this.firstLength = null;
     this.sentChars = 0;
+    this.wholeSentences = wholeSentences;
   }
 
   /** The most characters the NEXT chunk may have (see PROGRESSIVE CHUNK SIZES above). */
   limit() {
+    if (this.wholeSentences) return MAX_CHUNK_CHARS;
     if (this.firstLength == null) return FIRST_CHUNK_CHARS;
     const allowed = Math.round(this.firstLength + CHUNK_GROWTH * this.sentChars);
     return Math.min(MAX_CHUNK_CHARS, Math.max(MIN_LATER_CHUNK_CHARS, allowed));
@@ -173,19 +243,27 @@ export class SentenceChunker {
       const limit = this.limit();
       let sentence = firstSentenceEnd(this.buffer);
 
-      // A tiny FIRST sentence ("Sure!") waits for the next one and goes out with it,
-      // when the pair fits — alone it is too short to cover the next chunk's synthesis.
+      // A tiny FIRST sentence ("Sure!") waits for the next one and goes out with it — alone it
+      // is too short to cover the next chunk's synthesis (measured with npm run voice:gaps: "Sure!"
+      // spoken alone before a long sentence left ~0.7 s of silence after it). The pair goes whole
+      // when it fits; otherwise "Sure!" takes the START of the next sentence with it, cut below.
+      let tinyFirst = false;
       if (sentence && this.firstLength == null && sentence.end < MIN_CHUNK_CHARS) {
         const second = firstSentenceEnd(this.buffer.slice(sentence.next));
         if (!second) {
-          if (this.buffer.length <= limit) break; // the next sentence is still arriving
+          if (this.buffer.length <= Math.floor(limit * FIRST_CHUNK_COMMA_SLACK)) break; // the next sentence is still arriving
+          tinyFirst = true;
+          sentence = null;
         } else if (sentence.next + second.end <= limit) {
+          sentence = { end: sentence.next + second.end, next: sentence.next + second.next };
+        } else {
+          tinyFirst = true;
           sentence = { end: sentence.next + second.end, next: sentence.next + second.next };
         }
       }
 
       // A whole sentence that fits: speak it as written.
-      if (sentence && sentence.end <= limit) {
+      if (sentence && sentence.end <= limit && !tinyFirst) {
         this.emit(out, this.buffer.slice(0, sentence.end), sentence.next);
         continue;
       }
@@ -195,7 +273,7 @@ export class SentenceChunker {
       // chunk waits until it has seen as far as its comma slack reaches — mid-stream, the
       // comma it would prefer may simply not have arrived yet.
       const stretch = sentence ? this.buffer.slice(0, sentence.end) : this.buffer;
-      const reach = this.firstLength == null ? Math.floor(limit * FIRST_CHUNK_COMMA_SLACK) : limit;
+      const reach = this.firstLength == null && !this.wholeSentences ? Math.floor(limit * FIRST_CHUNK_COMMA_SLACK) : limit;
       if (stretch.length > reach || (sentence && stretch.length > limit)) {
         const at = breakPoint(stretch, limit, reach);
         if (at > 0) {

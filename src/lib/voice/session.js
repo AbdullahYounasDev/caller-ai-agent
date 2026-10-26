@@ -1,9 +1,9 @@
 import { createSerialQueue } from "./serial";
-import { SentenceChunker } from "./sentences";
+import { SentenceChunker, chunkEnding } from "./sentences";
 import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, INTENTS, OUTCOMES } from "./intent";
 import { median } from "./recorder";
-import { BARGE_IN, CLOSING, CONTINUATION, FILLER, LIMITS, SILENCE, UNHEARD, VAD } from "./config";
+import { BARGE_IN, CLOSING, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
@@ -117,6 +117,11 @@ export class CallSession {
     this.checkInAsked = false;
     // "normal", or "hold" after the caller asked the agent to wait: the silence check-in waits longer.
     this.patience = "normal";
+    // How much slower than real time this machine is making speech on this call (synthesis time ÷
+    // audio time, a running average of reply pieces). Past TTS.slowRatio the call speaks whole
+    // sentences, so a gap falls between sentences instead of inside one (sentences.js).
+    this.ttsRatio = null;
+    this.wholeSentences = false;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -470,7 +475,7 @@ export class CallSession {
     this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms, ...(carry?.index != null ? { replaces: true } : {}) });
 
     const filler = this.scheduleFiller(turn);
-    const chunker = new SentenceChunker();
+    const chunker = new SentenceChunker({ wholeSentences: this.wholeSentences });
     const say = (sentence) => {
       turn.sentences.push(sentence);
       turn.speaking = turn.speaking.then(() => this.speak(turn, sentence));
@@ -560,6 +565,9 @@ export class CallSession {
       llmMs: result?.timings?.generationMs ?? null,
       ttsFirstAudioMs: turn.firstAudioSynthMs,
       responseMs,
+      // Silences heard between pieces of the reply: how many, and the longest (§6.24).
+      gapCount: turn.gaps.length,
+      maxGapMs: turn.gaps.length ? Math.max(...turn.gaps) : 0,
     };
     const summary = {
       index,
@@ -803,7 +811,25 @@ export class CallSession {
       speechEndedAt: null,
       firstAudioAt: null,
       firstAudioSynthMs: null,
+      // Silences the caller heard between pieces of this reply (ms), see speak().
+      gaps: [],
     };
+  }
+
+  /**
+   * Keep a running measure of how fast speech is being made on this call, and switch to whole
+   * sentences once it falls behind real time (TTS.slowRatio). Cached lines say nothing about
+   * the machine's speed and are ignored. One way only: a call that has had gaps does not go back
+   * to fragments mid-call.
+   */
+  noteSynthesisSpeed(audio) {
+    if (audio.cached || !audio.speechMs || audio.ms == null) return;
+    const ratio = audio.ms / audio.speechMs;
+    this.ttsRatio = this.ttsRatio == null ? ratio : 0.6 * this.ttsRatio + 0.4 * ratio;
+    if (!this.wholeSentences && this.ttsRatio > TTS.slowRatio) {
+      this.wholeSentences = true;
+      this.log("tts.slow", { ratio: Math.round(this.ttsRatio * 100) / 100 });
+    }
   }
 
   /**
@@ -818,9 +844,14 @@ export class CallSession {
       previous: turn.language ?? this.lastLanguage,
     });
 
+    // The pause after this piece is the one its JOIN needs: none between two pieces of one
+    // sentence, a short one at a comma, a breath after a sentence (TTS in config.js).
+    const ending = chunkEnding(sentence);
+    const pauseMs = ending === "joined" ? TTS.joinPauseMs : ending === "comma" ? TTS.commaPauseMs : TTS.sentencePauseMs;
+
     let audio;
     try {
-      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache });
+      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache, pauseMs });
     } catch (err) {
       console.error("[voice] TTS failed:", err);
       this.log("tts.failed", { turn: turn.index, message: String(err?.message ?? err).slice(0, 200) });
@@ -828,6 +859,19 @@ export class CallSession {
     }
     // Interrupted while this sentence was being synthesised: it is never sent.
     if (turn.cancelled || this.ended) return;
+    this.noteSynthesisSpeed(audio);
+
+    // A GAP the caller hears: the previous piece of this reply finished playing before this one
+    // was ready. Logged with where it fell — inside a sentence is the one that sounds like the
+    // agent has finished talking.
+    if (turn.spoken.length > 0 && this.audioPlaysUntil != null) {
+      const gapMs = Math.round(this.now() - this.audioPlaysUntil);
+      if (gapMs >= TTS.gapLogMs) {
+        const after = chunkEnding(turn.spoken[turn.spoken.length - 1]);
+        turn.gaps.push(gapMs);
+        this.log("tts.gap", { turn: turn.index, ms: gapMs, piece: turn.spoken.length + 1, inSentence: after !== "sentence" });
+      }
+    }
 
     if (turn.firstAudioAt == null) {
       turn.firstAudioAt = this.now();

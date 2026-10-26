@@ -152,9 +152,37 @@ export const TTS = {
    *  sound better a touch quicker") — callers heard it as rushed. Do not raise it
    *  without listening to a call. */
   speed: 1.0,
-  /** Silence after every synthesised sentence, so separately synthesised sentences do
-   *  not run into each other (tts.js). */
-  sentencePauseMs: 160,
+  /**
+   * THE PAUSE AT EACH JOIN between two separately synthesised pieces (tts.js, sentences.js
+   * chunkEnding). The engine's own quiet at both ends is trimmed first (`trim`), so these are
+   * the pauses the caller actually hears, plus the ~60 ms `trim` keeps.
+   *   after a sentence   a breath, as a person leaves one (it was 160 ms ON TOP of ~150 ms of
+   *                      engine quiet; 240 + the kept 60 ≈ the same ~300 ms rhythm as before);
+   *   at a comma         shorter;
+   *   inside a sentence  none: the next piece follows straight on. This is the fix for "tell me
+   *                      about …… your name" — that join used to carry ~300 ms of silence before
+   *                      any synthesis delay was added to it.
+   */
+  sentencePauseMs: 240,
+  commaPauseMs: 120,
+  joinPauseMs: 0,
+  /**
+   * Trimming the engine's own silence at the start and end of every piece (audio.js
+   * trimSilence). Measured on this repo's voices (2% of peak, 10 ms windows): Kokoro leaves
+   * 50–100 ms before and 70–90 ms after each piece, Piper up to 190 ms after. 20 ms / 40 ms are
+   * kept so a soft first or last sound is never clipped. null turns trimming off.
+   */
+  trim: { relative: 0.02, keepLeadMs: 20, keepTailMs: 40 },
+  /**
+   * A call whose speech is made SLOWER than it plays cannot avoid gaps by chunking — every piece
+   * takes longer to make than the one before it takes to play. Above this ratio (synthesis time ÷
+   * audio time, averaged over the call's last pieces) the call switches to whole sentences, so a
+   * gap falls between two sentences, where a listener expects a pause, and never inside one.
+   * Measured: Kokoro ~0.57 on an idle laptop, ~1.2 on battery with the browser busy (§6.24).
+   */
+  slowRatio: 0.9,
+  /** A wait between two pieces of one reply longer than this is logged as `tts.gap` (the caller heard it). */
+  gapLogMs: 120,
 };
 
 /** The gateway's own port. The browser connects to it directly (Next.js route

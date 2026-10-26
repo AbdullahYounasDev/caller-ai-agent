@@ -3,7 +3,7 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { CallSession } from "@/lib/voice/session";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "@/lib/voice/protocol";
-import { BARGE_IN, CLOSING, SILENCE } from "@/lib/voice/config";
+import { BARGE_IN, CLOSING, SILENCE, TTS } from "@/lib/voice/config";
 
 /**
  * The whole call flow with every dependency faked: no models, no database, no network,
@@ -11,7 +11,7 @@ import { BARGE_IN, CLOSING, SILENCE } from "@/lib/voice/config";
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId, line } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId, line, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -45,13 +45,18 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
   // TTS: one second of audio per sentence; remembers what it was asked to say, and with
   // which voice.
   const spoken = [];
+  const synthArgs = [];
   const prepared = [];
   const tts = {
     prepare: async (ids) => prepared.push(...ids),
-    synthesize: async ({ text, language, voiceId, cache }) => {
+    synthesize: async (args) => {
+      const { text, language, voiceId, cache } = args;
       // Fixed lines (greeting, fillers) are synthesised with cache: true; a reply never is.
       spoken.push(cache ? { text, language, voiceId, cache } : { text, language, voiceId });
-      return { samples: new Float32Array(22050), sampleRate: 22050, ms: 7, voiceId };
+      synthArgs.push(args);
+      // A slow machine: the piece is ready only after `synthDelayMs` of (fake) time.
+      if (synthDelayMs && !cache) await new Promise((resolve) => clock.setTimeout(resolve, synthDelayMs));
+      return { samples: new Float32Array(22050), sampleRate: 22050, ms: synthMs, voiceId, ...(speechMs ? { speechMs } : {}) };
     },
   };
 
@@ -128,6 +133,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
     session,
     sent,
     spoken,
+    synthArgs,
     prepared,
     sttCalls,
     recorded,
@@ -1008,5 +1014,72 @@ describe("CallSession", () => {
     await h.settle();
     assert.equal(h.calls.length, 2);
     assert.equal(h.calls[1].userMessage, "Yes.");
+  });
+
+  // ── no long silences inside the agent's own sentences ─────────────────────
+
+  test("each piece gets the pause its join needs: none inside a sentence, short at a comma, full after a sentence", async () => {
+    const h = harness({
+      transcripts: ["When are you open?"],
+      replies: [streams("Our clinic is open from nine in the morning until six in the evening, Monday to Saturday. We are closed on Sundays.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    const reply = h.synthArgs.filter((a) => !a.cache);
+    const byEnding = reply.map((a) => [a.text.trim().slice(-1), a.pauseMs]);
+    for (const [last, pauseMs] of byEnding) {
+      if (/[.!?]/.test(last)) assert.equal(pauseMs, TTS.sentencePauseMs);
+      else if (last === ",") assert.equal(pauseMs, TTS.commaPauseMs);
+      else assert.equal(pauseMs, TTS.joinPauseMs, "no pause between two pieces of one sentence");
+    }
+    assert.ok(byEnding.some(([, p]) => p === TTS.joinPauseMs), "the long sentence was cut, and that join has no pause");
+  });
+
+  test("a piece that is not ready when the previous one ends is logged as a gap the caller heard", async () => {
+    const h = harness({
+      transcripts: ["When are you open?"],
+      replies: [streams("Our clinic is open from nine in the morning until six in the evening, Monday to Saturday.")],
+      synthDelayMs: 1500, // each piece takes 1.5 s to make and plays for 1 s
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(12_000);
+    await h.settle();
+    const gaps = h.recorded.events.filter((e) => e.type === "tts.gap");
+    assert.ok(gaps.length >= 1, "the gap is on the timeline");
+    assert.ok(gaps.every((g) => g.data.ms >= TTS.gapLogMs && g.data.inSentence === true));
+    const timings = h.recorded.turns[0].timings;
+    assert.equal(timings.gapCount, gaps.length);
+    assert.ok(timings.maxGapMs >= 400);
+  });
+
+  test("a call whose speech is made slower than it plays switches to whole sentences", async () => {
+    const long = "Our clinic is open from nine in the morning until six in the evening, Monday to Saturday.";
+    const h = harness({
+      transcripts: ["When are you open?"],
+      replies: [streams(long)],
+      synthMs: 1300, // 1.3 s to make…
+      speechMs: 1000, // …1 s of speech: slower than real time
+    });
+    await h.session.start();
+    // The greeting is the first speech made on the call: it already shows the machine is slow.
+    assert.ok(h.recorded.events.some((e) => e.type === "tts.slow"));
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    const reply = h.synthArgs.filter((a) => !a.cache).map((a) => a.text);
+    assert.deepEqual(reply, [long], "the reply is spoken as one whole sentence, never cut inside it");
+  });
+
+  test("a machine that keeps up never switches", async () => {
+    const h = harness({ transcripts: ["When are you open?"], replies: [streams("We open at nine in the morning and close at six in the evening every weekday.")], synthMs: 500, speechMs: 1000 });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.ok(!h.recorded.events.some((e) => e.type === "tts.slow"));
   });
 });
