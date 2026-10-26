@@ -1,3 +1,5 @@
+import { detectOpener } from "@/lib/phrases";
+
 /**
  * THE SMALL WORDS OF ASKING FOR A PERSON — pure, free, no model call (tests/handoff.test.mjs).
  *
@@ -104,9 +106,14 @@ const PROFILE_QUESTION = edged(
   ].join("|")
 );
 
-/** @returns {boolean} the question is one the business profile (name, purpose, hours) answers */
+/**
+ * @returns {boolean} the question is one the business profile (name, purpose, hours) answers — the
+ *   hours and address patterns above, or any generic opener ("tell me about your company",
+ *   "aap kya karte hain", "are you a robot?" — the word lists in lib/phrases)
+ */
 export function isProfileQuestion(message) {
-  return PROFILE_QUESTION.test(String(message ?? ""));
+  const text = String(message ?? "");
+  return PROFILE_QUESTION.test(text) || detectOpener(text) !== null;
 }
 
 /**

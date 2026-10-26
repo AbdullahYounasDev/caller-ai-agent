@@ -9,6 +9,7 @@ import {
   DEFAULT_QUERY_STRATEGY,
 } from "@/lib/agent/query";
 import { requireAgent } from "@/lib/tenant/agent-request";
+import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { translator } from "@/lib/i18n";
 
@@ -192,7 +193,8 @@ export async function POST(request) {
     const agent = await agentFor(request, tenantId);
     if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
 
-    const turn = await retrieveForTurn({ tenantId, agentId: agent.agentId, message: q, history, topK, strategy, rewriteTimeoutMs, keywordQuery });
+    const businessName = agent.config.businessName === PLACEHOLDER_BUSINESS_NAME ? "" : agent.config.businessName;
+    const turn = await retrieveForTurn({ tenantId, agentId: agent.agentId, message: q, history, topK, strategy, rewriteTimeoutMs, keywordQuery, businessName });
 
     return NextResponse.json({
       query: q,

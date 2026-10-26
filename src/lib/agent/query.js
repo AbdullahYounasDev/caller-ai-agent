@@ -2,6 +2,7 @@ import { generateRewrite } from "./llm";
 import { CircuitOpenError } from "./breaker";
 import { retrieveRelevantChunks } from "./retrieve";
 import { buildQueryRewriteInstruction, buildQueryRewriteInput } from "./prompt";
+import { detectOpener, OVERVIEW_KINDS } from "@/lib/phrases";
 
 /**
  * CONVERSATION-AWARE RETRIEVAL — what gets SEARCHED for, as opposed to what the
@@ -273,12 +274,22 @@ export async function rewriteQuery({ history, message, timeoutMs = REWRITE_TIMEO
  * `concat` follows the same rule with a free query builder. `raw` never builds
  * one.
  *
+ * GENERIC OPENERS come first, before any of that (§6.20): "who are you", "tell me about your
+ * company", "aap kya karte hain" (lib/phrases — word lists per language). Searched as typed they
+ * find nothing — no business word to match — so they are searched as "<business name>: <message>"
+ * (trigger "overview"): a question that names the business lands on its own overview pages. The
+ * gate is untouched (only the search key changes), no rewrite is spent, and a false positive
+ * only costs a search for the company's own overview. "Are you a robot?" is not searched at all
+ * (trigger "ai_check"): the prompt answers it, honestly, without documents.
+ *
  * @param {object} args
  * @param {string} args.tenantId
  * @param {string|null} [args.agentId] the agent answering — every search of the turn (raw,
  *   rewritten, the empty-first-pass retry) is limited to what it may use (§6.28)
  * @param {boolean} [args.wholeLibrary] debug/eval only, see retrieveRelevantChunks
  * @param {string} args.message the customer's latest message
+ * @param {string} [args.businessName] the agent's business name, for the opener search (none or the
+ *   placeholder: openers are searched as typed)
  * @param {Array<{role: string, content: string}>} args.history turns BEFORE this
  *   message, oldest first (NOT including it)
  * @param {number} [args.topK]
@@ -290,7 +301,8 @@ export async function rewriteQuery({ history, message, timeoutMs = REWRITE_TIMEO
  * @param {boolean} [args.speculative] override of SPECULATIVE_RAW_SEARCH (tests, eval)
  * @param {{retrieve?: Function, rewrite?: Function}} [args.deps] stubs for tests ONLY
  * @returns {Promise<{chunks: object[], searchQuery: string, strategy: string,
- *   trigger: null|"heuristic"|"empty", rewrite: null|{query: string, status: string, ms: number, error?: string}}>}
+ *   trigger: null|"heuristic"|"empty"|"overview"|"ai_check", rewrite: null|{query: string, status: string, ms: number, error?: string},
+ *   opener: null|{kind: string, language: string}}>}
  */
 export async function retrieveForTurn({
   tenantId,
@@ -299,6 +311,7 @@ export async function retrieveForTurn({
   message,
   history,
   topK,
+  businessName = "",
   strategy = DEFAULT_QUERY_STRATEGY,
   rewriteTimeoutMs,
   keywordQuery,
@@ -308,7 +321,15 @@ export async function retrieveForTurn({
   const retrieveChunks = deps.retrieve ?? retrieveRelevantChunks;
   const rewrite = deps.rewrite ?? rewriteQuery;
   const retrieve = (query) => retrieveChunks({ tenantId, agentId, wholeLibrary, query, topK, keywordQuery });
-  const resolved = { searchQuery: message, strategy, trigger: null, rewrite: null };
+  const resolved = { searchQuery: message, strategy, trigger: null, rewrite: null, opener: null };
+
+  const found = detectOpener(message, { businessName });
+  if (found) {
+    const opener = { kind: found.kind, language: found.language };
+    if (!OVERVIEW_KINDS.has(found.kind)) return { chunks: [], ...resolved, trigger: "ai_check", opener };
+    const anchored = businessName.trim() ? `${businessName.trim()}: ${message}` : message;
+    return { chunks: await retrieve(anchored), ...resolved, searchQuery: anchored, trigger: "overview", opener };
+  }
 
   if (strategy === "raw" || !history.length) {
     return { chunks: await retrieve(message), ...resolved };

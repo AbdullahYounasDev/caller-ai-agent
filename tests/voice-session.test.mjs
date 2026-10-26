@@ -193,15 +193,16 @@ describe("CallSession", () => {
     assert.equal(await h.session.start(), true);
 
     assert.equal(h.notified(SERVER.READY)[0].callId, "call-1");
-    assert.equal(h.recorded.greeting, "Hello, thanks for calling Nyron. How can I help you today?");
-    // Spoken sentence by sentence, so the first is heard while the second is synthesised.
-    assert.deepEqual(h.spoken.slice(0, 2), [
+    assert.equal(h.recorded.greeting, "Hello, thanks for calling Nyron. You're speaking with an AI assistant. How can I help you today?");
+    // Spoken sentence by sentence, so the first is heard while the next is synthesised.
+    assert.deepEqual(h.spoken.slice(0, 3), [
       { text: "Hello, thanks for calling Nyron.", language: "en", voiceId: "kokoro:af_heart", cache: true },
+      { text: "You're speaking with an AI assistant.", language: "en", voiceId: "kokoro:af_heart", cache: true },
       { text: "How can I help you today?", language: "en", voiceId: "kokoro:af_heart", cache: true },
     ]);
     // The holding lines are synthesised ahead (cached), but only the greeting is PLAYED.
-    assert.deepEqual(h.spoken.slice(2).map((s) => s.cache), [true, true, true]);
-    assert.equal(h.sent.audio.length, 2);
+    assert.deepEqual(h.spoken.slice(3).map((s) => s.cache), [true, true, true]);
+    assert.equal(h.sent.audio.length, 3);
     // The greeting's voice is loaded before it is spoken.
     assert.equal(h.prepared[0], "kokoro:af_heart");
     // The recogniser is taught the business's name.
@@ -231,7 +232,7 @@ describe("CallSession", () => {
 
     // Two sentences, synthesised and sent in order, after the greeting.
     assert.deepEqual(h.spoken.filter((s) => !s.cache).map((s) => s.text), ["The Pro plan is 149 euro a month.", "Anything else?"]);
-    assert.equal(h.sent.audio.length, 4); // the greeting's two sentences + the reply's two
+    assert.equal(h.sent.audio.length, 5); // the greeting's three sentences + the reply's two
     assert.deepEqual(h.notified(SERVER.AGENT_TEXT).slice(1).map((n) => n.text), ["The Pro plan is 149 euro a month.", "Anything else?"]);
 
     const [turn] = h.recorded.turns;
@@ -370,7 +371,7 @@ describe("CallSession", () => {
     // understand Urdu and English whichever language it answers in.
     assert.deepEqual(h.sttCalls, [{ vocabulary: ["Nyron"] }]);
     // Urdu greeting, male voice → masculine verb.
-    assert.match(`${h.spoken[0].text} ${h.spoken[1].text}`, /^السلام علیکم، Nyron کو کال کرنے کا شکریہ۔ .*سکتا ہوں؟$/);
+    assert.match(`${h.spoken[0].text} ${h.spoken[1].text} ${h.spoken[2].text}`, /^السلام علیکم، Nyron کو کال کرنے کا شکریہ۔ آپ ایک اے آئی اسسٹنٹ سے بات کر رہے ہیں۔ .*سکتا ہوں؟$/);
     assert.equal(h.spoken[0].voiceId, "kokoro:hm_omega");
 
     h.hear(utterance);

@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { getAgentConfig } from "@/lib/tenant/config";
+import { getAgentConfig, PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { retrieveForTurn } from "./query";
 import { buildSystemInstruction } from "./prompt";
 import { generateReply, generateReplyStream, generateExtraction } from "./llm";
@@ -139,7 +139,7 @@ export async function respond({
   const skipSearch = readsAsAnswer({ collect: config.collect, agent: config, draft: conversation?.collectDraft ?? null, message: userMessage, nowMs: Date.now() });
   const [turn, collection] = await Promise.all([
     skipSearch
-      ? Promise.resolve({ chunks: [], searchQuery: userMessage, trigger: "skipped", rewrite: null })
+      ? Promise.resolve({ chunks: [], searchQuery: userMessage, trigger: "skipped", rewrite: null, opener: null })
       : retrieveForTurn({
           tenantId,
           // Only the documents THIS agent may answer from: the shared library plus its own (§6.28).
@@ -147,6 +147,9 @@ export async function respond({
           message: userMessage,
           history: earlierTurns,
           topK: MAX_CONTEXT_CHUNKS,
+          // "Who are you?" is searched with the business's name in front (§6.20); a placeholder
+          // name is no name.
+          businessName: config.businessName === PLACEHOLDER_BUSINESS_NAME ? "" : config.businessName,
         }),
     takeRequest({ tenantId, agentId: config.agentId ?? null, conversationId, channel, config, userMessage, earlierTurns, storedDraft: conversation?.collectDraft ?? null }),
   ]);
@@ -203,7 +206,7 @@ export async function respond({
     : null;
 
   // 5. Turn configuration into behavior. All prompt text lives in prompt.js.
-  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan, handoff: handoffTurn.plan });
+  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection: collection.plan, handoff: handoffTurn.plan, opener: turn.opener });
 
   // 6. Shape stored history into Gemini's `contents` format.
   let history = priorMessages.map((m) => ({

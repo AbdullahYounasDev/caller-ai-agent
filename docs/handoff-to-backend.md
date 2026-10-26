@@ -134,6 +134,8 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward" }` | **call forwarding** to a person (CLAUDE.md §6.26). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
   | `capabilities` | `{ "<capabilityId>": { enabled, channels, params } }` | catalogue: `GET /api/agent-config/catalog` |
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
+  | `greeting` | `{ "en"?: string ≤400, "ur"?: string ≤400 }` | the owner's own **call greeting** per language; `{business}` is the only placeholder. Empty/missing = the engine's built-in greeting, which says the caller is speaking with an AI assistant (and that the call is recorded, only while `recordCalls` is on). Spoken exactly as written; the dashboard should show the engine's warnings when it leaves those notices out (`src/lib/voice/greeting.js greetingNotices` — the UK/Ireland require them, the owner decides) |
+  | `recordCalls` | boolean | the owner switched **call recording** on for this agent. Today it only changes the built-in greeting; when Twilio exists the transport records by it, and **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
   | `collect`, `collectVersion` | see B3 | |
 
 - **Backend provides:** store one document per agent; make them readable by the engine:
@@ -453,7 +455,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 567, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 594, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -467,12 +469,18 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
   agent answering.
 - The phone-number lookup: dialled number → business → agent, refusing (never guessing) unknown, released, unlinked,
   archived-agent and suspended cases; calls record the number they came in on (B11). The numbers are a stand-in.
+- Call greeting per agent (`greeting`, `recordCalls` in the settings above): the owner's words or a built-in greeting
+  with the AI notice (and the recording notice only while recording is on), with warnings — never refusals — when
+  the owner's text leaves them out.
+- Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are
+  recognised by word lists per language (`src/lib/phrases/`) and searched with the business's name.
 
 **To do on my side:**
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
 2. Real outbox + signed event sender (B7).
 3. Usage events (B8) once the shape is agreed.
-4. Twilio webhook + transport (B11) on top of the built lookup; compliance wording (AI disclosure, recording consent).
+4. Twilio webhook + transport (B11) on top of the built lookup, recording calls when `recordCalls` is on (the greeting's
+   disclosure wording is done).
 5. Fix: an utterance cut by a pause arrives as two turns; agent memory after a long pause.
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.
 7. Later: speech models on a server and a paid LLM key (infrastructure, not code).
@@ -483,15 +491,18 @@ deployment, storage/billing/messaging/Twilio-account keys on the backend, only `
 event-signing secret shared (B6).
 
 **Still open — decisions I need from you:** who sends WhatsApp/SMS (B9); whether events carry customer details (B7);
-the usage-event shape (B8); which `/internal` routes come first; who owns the Twilio account and the purchase calls (B11).
+the usage-event shape (B8); which `/internal` routes come first; who owns the Twilio account and the purchase calls (B11);
+where call recordings are stored and for how long (`recordCalls` above).
 
 ---
 
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261024100000_phone_numbers` — the stand-in `phone_numbers` table
-(B11) and `call_logs.phone_number_id`; changes no existing row. Before it: `20261023100000_knowledge_per_agent` — the
+similarity index (`CLAUDE.md` §6.1). Latest: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
+`{}` = the built-in greeting) and `agent_configs.record_calls` (default false); existing agents now greet with the AI
+notice and say nothing about recording. Before it: `20261024100000_phone_numbers` — the stand-in `phone_numbers` table
+(B11) and `call_logs.phone_number_id`; changes no existing row. Before that: `20261023100000_knowledge_per_agent` — the
 table `knowledge_source_agents` (which agents may use a document; no row = shared, so nothing changes for existing
 documents). Before that: `20261022120000_multiple_agents_per_tenant` — `agent_configs` is
 one row per agent (`name`, `status`, `default_for`; the one-row-per-tenant unique index is dropped), and

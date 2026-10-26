@@ -115,5 +115,10 @@
   "numbers.route.released": "That number was released and no longer rings anyone.",
   "numbers.route.unassigned": "That number is not linked to an agent yet. Link it in the Numbers tab.",
   "numbers.route.agent_archived": "That number rings an archived agent. Link it to an active agent.",
-  "numbers.route.tenant_unserviceable": "This business cannot take calls right now."
+  "numbers.route.tenant_unserviceable": "This business cannot take calls right now.",
+  "greeting.invalid": "The greeting must be a text for each language.",
+  "greeting.unknownLanguage": "“{value}” is not a language your agent can speak.",
+  "greeting.tooLong": "The greeting is too long — keep it under {max} characters.",
+  "greeting.unknownPlaceholder": "“{value}” would be read out to callers as it is. The only placeholder is {allowed}.",
+  "recordCalls.invalid": "Call recording must be on or off."
 }

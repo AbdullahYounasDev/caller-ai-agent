@@ -121,6 +121,7 @@
   "voice.intent.human_request": "Asked for a person",
   "voice.outcome.answered": "Answered",
   "voice.outcome.no_knowledge": "No answer in your documents",
+  "voice.outcome.profile": "Answered from your business profile",
   "voice.outcome.conversational": "Small talk",
   "voice.outcome.handoff_requested": "Handoff requested",
   "voice.outcome.failed": "Failed",
@@ -368,5 +369,19 @@
   "numbers.lookupNo.agent_archived": "That number rings an archived agent. Link it to an active agent.",
   "numbers.lookupNo.tenant_unserviceable": "This business cannot take calls right now.",
   "voice.dialAs": "Call as if dialling:",
-  "voice.dialDirect": "This agent directly"
+  "voice.dialDirect": "This agent directly",
+  "greeting.title": "Call greeting",
+  "greeting.help": "What the agent says the moment it answers a call. Leave a box empty to use the built-in greeting. Write {placeholder} where the business name should go.",
+  "greeting.recordCalls": "Record calls",
+  "greeting.recordCallsHelp": "When on, the built-in greeting tells callers the call is being recorded. When off, it says nothing about recording. Recording itself starts once phone numbers are connected; test calls from this console are never recorded.",
+  "greeting.label.en": "Greeting in English",
+  "greeting.label.ur": "Greeting in Urdu",
+  "greeting.inUse": "used on calls now",
+  "greeting.ownText": "Your own greeting",
+  "greeting.builtIn": "Built-in greeting",
+  "greeting.useBuiltIn": "Use the built-in greeting",
+  "greeting.preview": "Callers hear:",
+  "greeting.notice.noAiNotice": "Your greeting does not tell callers they are speaking with an AI assistant. In the UK and Ireland (and the EU) callers must be told this, and it is good practice everywhere. It is your choice: the greeting is spoken exactly as you wrote it.",
+  "greeting.notice.noRecordingNotice": "Call recording is on, but your greeting does not tell callers the call is recorded. The UK, Ireland and most other countries require callers to be told. It is your choice: the greeting is spoken exactly as you wrote it.",
+  "greeting.notice.recordingWhileOff": "Your greeting says the call is recorded, but call recording is off. Turn recording on, or remove that sentence so callers are not told something untrue."
 }

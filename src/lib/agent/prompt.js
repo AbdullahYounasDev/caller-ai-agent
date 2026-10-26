@@ -3,6 +3,7 @@ import { t, DEFAULT_LOCALE } from "@/lib/i18n";
 import { PLACEHOLDER_BUSINESS_NAME } from "@/lib/tenant/config";
 import { humanizeTitle } from "./chunk";
 import { SPOKEN_LANGUAGES, voiceFor } from "@/lib/voice/speech/voices";
+import { buildGreeting } from "@/lib/voice/greeting";
 import { digitsAsWords } from "@/lib/collect/validate";
 import { markerFor } from "@/lib/collect/marker";
 
@@ -126,9 +127,11 @@ function voiceHearingInstruction(config) {
  * @param {Array<{source: string, content: string}>} args.chunks retrieved knowledge
  * @param {object|null} [args.collection] this turn's plan for taking a customer's request
  *   (lib/collect/engine.js); null when the business takes none
+ * @param {{kind: string}|null} [args.opener] this message is a generic opener (lib/phrases, §6.20):
+ *   "who are you", "what do you do", "are you a robot?"
  * @returns {string}
  */
-export function buildSystemInstruction({ config, channel, chunks = [], collection = null, handoff = null }) {
+export function buildSystemInstruction({ config, channel, chunks = [], collection = null, handoff = null, opener = null }) {
   const sections = [];
 
   // --- 1. Who the agent is -------------------------------------------------
@@ -139,6 +142,9 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   const identity = [`You are the AI assistant for ${config.businessName}.`];
   identity.push("Speak as part of the business — say 'we' and 'our', never refer to it in the third person.");
   identity.push("Never state or imply that you are a generic AI model, and never name the technology behind you.");
+  // Callers are told at pick-up (or not — the greeting is the owner's, lib/voice/greeting.js), but
+  // a direct question always gets a true answer: claiming to be a person is never acceptable.
+  identity.push("If the customer asks whether they are talking to a person, a robot or an AI, say honestly that you are the business's AI assistant; never claim to be a human.");
   sections.push(identity.join(" "));
 
   // --- 2. Tone + channel style --------------------------------------------
@@ -334,6 +340,24 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
     );
   }
 
+  // THIS MESSAGE IS A GENERIC OPENER (lib/phrases, §6.20). Said on most calls, first: "who are you",
+  // "tell me about your company", "aap kya karte hain". Without a word on it the model, seeing an
+  // overview chunk or none, sometimes declined. It still may say nothing the profile or the passages
+  // do not — the exception above keeps its limits.
+  if (opener?.kind === "aiCheck") {
+    sections.push(
+      "THIS MESSAGE asks whether you are a person or a machine. Say plainly, in one sentence, that you are the AI " +
+        `assistant for ${hasName ? config.businessName : "this business"}, then ask how you can help.`
+    );
+  } else if (opener) {
+    sections.push(
+      "THIS MESSAGE is a general question about the business — who you are, what it does or what it offers. " +
+        "Answer it in two or three short sentences from ABOUT THIS BUSINESS and from any passage above that " +
+        "describes the business as a whole. Mention kinds of products or services only if they are named there. " +
+        "Then ask what they would like help with."
+    );
+  }
+
   // CONFLICTING DOCUMENTS. Businesses keep the same fact in two documents and
   // correct only one — a price list and a pricing sheet that disagree. Both retrieve,
   // both look authoritative, and a model left to choose picks whichever reads better
@@ -376,38 +400,22 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
  * THE AGENT'S OPENING LINE ON A CALL — spoken the instant the call connects, before the
  * caller says anything (§6.24).
  *
- * A fixed template, NOT a model call, on purpose: it is the one moment of the call where
- * latency is pure dead air (the caller is waiting to hear someone pick up), it costs no
- * quota, and there is nothing to retrieve yet. It lives here because every word the agent
- * says that is not generated is still agent wording, and prompt.js is where that is
- * reviewed — not in the voice code.
+ * A fixed text, NOT a model call, on purpose: it is the one moment of the call where latency is
+ * pure dead air, it costs no quota, and there is nothing to retrieve yet. Each agent has its OWN:
+ * the owner's words, or the built-in greeting that tells the caller they are speaking with an AI
+ * assistant (and, only while recording is on, that the call is recorded). The wording and the
+ * rules live in lib/voice/greeting.js — pure, because the console previews it as the owner types.
  *
  * Its language: the business's reply language. The INTERFACE language is deliberately not
  * consulted (§7: it must never leak into what the agent says).
  *
- * Voice-safe (no markdown, digits or URLs), and a question, so the caller knows it is
- * their turn. In Urdu the closing verb agrees with the VOICE's gender ("سکتی" / "سکتا") —
- * the same rule voiceGenderInstruction gives the model for everything after.
- *
  * @param {object} config from getAgentConfig()
- * @returns {{text: string, language: "en"|"ur"}}
+ * @returns {{text: string, language: "en"|"ur", custom: boolean}}
  */
 export function buildVoiceGreeting(config) {
-  const language = config?.replyLanguage === "ur" ? "ur" : "en";
   const name =
     config?.businessName && config.businessName !== PLACEHOLDER_BUSINESS_NAME ? config.businessName : null;
-
-  let text;
-  if (language === "ur") {
-    const can = voiceFor(config?.voices, "ur").gender === "female" ? "سکتی" : "سکتا";
-    text = `السلام علیکم، ${name ? `${name} کو ` : ""}کال کرنے کا شکریہ۔ میں آپ کی کیا مدد کر ${can} ہوں؟`;
-  } else {
-    text = name
-      ? `Hello, thanks for calling ${name}. How can I help you today?`
-      : "Hello, thanks for calling. How can I help you today?";
-  }
-
-  return { text, language };
+  return buildGreeting(config, { businessName: name });
 }
 
 /**

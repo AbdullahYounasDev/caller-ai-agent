@@ -34,6 +34,9 @@ export const OUTCOMES = {
   NO_KNOWLEDGE: "no_knowledge",
   /** Small talk: greetings, thanks, goodbyes. Nothing to answer. */
   CONVERSATIONAL: "conversational",
+  /** "Who are you?", "what do you do?" with nothing in the documents: answered from the business
+   *  profile (§6.20) — not a gap in the documents. */
+  PROFILE: "profile",
   /** The caller asked for a person. Today the agent can only promise it (§6.11). */
   HANDOFF_REQUESTED: "handoff_requested",
   FAILED: "failed",
@@ -68,7 +71,8 @@ const GREETING_ONLY = new RegExp(
  * @param {object} turn
  * @param {string} turn.callerText   what the caller said
  * @param {string[]} [turn.sources]  document titles retrieval handed the model
- * @param {null|"heuristic"|"empty"} [turn.trigger] whether the follow-up step fired (§6.19)
+ * @param {null|"heuristic"|"empty"|"overview"|"ai_check"|"skipped"} [turn.trigger] how the turn was searched
+ *   (§6.19; "overview"/"ai_check" = a generic opener, §6.20)
  * @param {string|null} [turn.rewriteStatus]
  * @param {boolean} [turn.failed]
  * @param {string|null} [turn.requestState] what taking a request did this turn (respond().collection.state)
@@ -93,6 +97,8 @@ export function classifyTurn({ callerText, sources = [], trigger = null, rewrite
   // Giving a phone number to a booking is not a question the documents failed to answer: it
   // used to be logged "unanswered" (and was searched for nothing — respond.js skips that now).
   else if (requestState && requestState !== "idle") outcome = OUTCOMES.CONVERSATIONAL;
+  // A generic opener (lib/phrases) is answered from the business profile when no document matched.
+  else if (trigger === "overview" || trigger === "ai_check") outcome = OUTCOMES.PROFILE;
   else if ([INTENTS.GREETING, INTENTS.ACKNOWLEDGEMENT, INTENTS.GOODBYE].includes(intent)) {
     outcome = OUTCOMES.CONVERSATIONAL;
   } else outcome = OUTCOMES.NO_KNOWLEDGE;

@@ -7,6 +7,7 @@ import {
 } from "@/lib/i18n";
 import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config";
 import { emptyHandoffConfig, normalizeHandoffConfig } from "@/lib/handoff/config";
+import { normalizeGreeting } from "@/lib/voice/greeting";
 import { assertCanAddAgent } from "@/lib/tenant/registry";
 import { countNumbersForAgent } from "@/lib/standins/numbers";
 
@@ -54,6 +55,10 @@ const DEFAULTS = {
   // { [spokenLanguage]: voiceId } — empty means every language uses its default voice
   // (lib/voice/speech/voices.js voiceFor()).
   voices: {},
+  // The call's opening line (lib/voice/greeting.js): the owner's words per language, empty = the
+  // built-in greeting (AI notice; recording notice only while recordCalls is on).
+  greeting: {},
+  recordCalls: false,
   // What the agent collects for a customer's request (lib/collect/config.js). Off until the
   // business sets it up, so an existing tenant's agent behaves exactly as before.
   collect: emptyCollectConfig(),
@@ -192,6 +197,8 @@ function normalizeConfig(row, tenantUiLocale) {
     escalation: normalizeHandoffConfig(row.escalation),
     capabilities: row.capabilities ?? {},
     voices: row.voices && typeof row.voices === "object" && !Array.isArray(row.voices) ? row.voices : {},
+    greeting: normalizeGreeting(row.greeting),
+    recordCalls: row.recordCalls === true,
     // Normalized on every read: a stored document that has drifted from the schema degrades
     // to the nearest valid one instead of reaching the engine malformed.
     collect: normalizeCollectConfig(row.collect),
@@ -211,6 +218,8 @@ const AGENT_SETTINGS = [
   "escalation",
   "capabilities",
   "voices",
+  "greeting",
+  "recordCalls",
 ];
 
 /**
@@ -260,6 +269,7 @@ export async function saveAgentConfig(tenantId, patch, { agentId = null } = {}) 
   // Stored in its normalised form (international phone numbers, trimmed text): what is read
   // back is exactly what the transfer will dial.
   if (data.escalation !== undefined) data.escalation = normalizeHandoffConfig(data.escalation);
+  if (data.greeting !== undefined) data.greeting = normalizeGreeting(data.greeting);
 
   const row = await targetRow(tenantId, agentId);
   // The dashboard language belongs to the tenant, so it is written to the default agent

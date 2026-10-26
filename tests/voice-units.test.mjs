@@ -322,10 +322,11 @@ describe("spoken language and fixed agent lines", () => {
 
   test("the greeting names the business, in its fixed language, and never a placeholder", () => {
     assert.deepEqual(buildVoiceGreeting({ businessName: "Nyron", replyLanguage: "en" }), {
-      text: "Hello, thanks for calling Nyron. How can I help you today?",
+      text: "Hello, thanks for calling Nyron. You're speaking with an AI assistant. How can I help you today?",
       language: "en",
+      custom: false,
     });
-    assert.equal(buildVoiceGreeting({ businessName: "this business", replyLanguage: "en" }).text, "Hello, thanks for calling. How can I help you today?");
+    assert.equal(buildVoiceGreeting({ businessName: "this business", replyLanguage: "en" }).text, "Hello, thanks for calling. You're speaking with an AI assistant. How can I help you today?");
     // Older stored values ("auto", Italian) degrade to English; the interface language must not leak in (§7).
     for (const replyLanguage of ["auto", "it", undefined]) assert.equal(buildVoiceGreeting({ businessName: "X", replyLanguage, uiLocale: "ur" }).language, "en");
     assert.equal(buildVoiceGreeting({ businessName: "X", replyLanguage: "en", uiLocale: "ur" }).language, "en");

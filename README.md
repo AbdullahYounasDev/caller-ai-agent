@@ -23,6 +23,10 @@ failures behind each rule, what works and what does not, and the measured number
   Whisper for Urdu), barge-in, full call logging.
 - **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
 - **Passing a caller to a person** (call forwarding) and ending calls politely.
+- **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
+  an AI assistant (and that the call is recorded, only when the agent's recording switch is on).
+- **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,
+  Urdu and Roman Urdu — the word lists are plain files in `src/lib/phrases/`, one per language.
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.
 - **Not built yet:** the Twilio webhook and phone transport (real phone calls), and the backend's half (stood in here).
 
