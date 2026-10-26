@@ -118,10 +118,10 @@ export class CallSession {
     // "normal", or "hold" after the caller asked the agent to wait: the silence check-in waits longer.
     this.patience = "normal";
     // How much slower than real time this machine is making speech on this call (synthesis time ÷
-    // audio time, a running average of reply pieces). Past TTS.slowRatio the call speaks whole
-    // sentences, so a gap falls between sentences instead of inside one (sentences.js).
+    // audio time, a running average). Past TTS.slowRatio gaps cannot be avoided by chunking — the
+    // call logs it once (`tts.slow`) so a slow machine is visible, not guessed at.
     this.ttsRatio = null;
-    this.wholeSentences = false;
+    this.reportedSlow = false;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -475,7 +475,7 @@ export class CallSession {
     this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms, ...(carry?.index != null ? { replaces: true } : {}) });
 
     const filler = this.scheduleFiller(turn);
-    const chunker = new SentenceChunker({ wholeSentences: this.wholeSentences });
+    const chunker = new SentenceChunker();
     const say = (sentence) => {
       turn.sentences.push(sentence);
       turn.speaking = turn.speaking.then(() => this.speak(turn, sentence));
@@ -817,17 +817,17 @@ export class CallSession {
   }
 
   /**
-   * Keep a running measure of how fast speech is being made on this call, and switch to whole
-   * sentences once it falls behind real time (TTS.slowRatio). Cached lines say nothing about
-   * the machine's speed and are ignored. One way only: a call that has had gaps does not go back
-   * to fragments mid-call.
+   * Keep a running measure of how fast speech is being made on this call. Past TTS.slowRatio the
+   * pieces of a reply cannot all be ready in time, whatever the chunking (sentences.js says what
+   * was tried): logged once per call (`tts.slow`), so the call's timeline says WHY it had gaps.
+   * Cached lines say nothing about the machine's speed and are ignored.
    */
   noteSynthesisSpeed(audio) {
     if (audio.cached || !audio.speechMs || audio.ms == null) return;
     const ratio = audio.ms / audio.speechMs;
     this.ttsRatio = this.ttsRatio == null ? ratio : 0.6 * this.ttsRatio + 0.4 * ratio;
-    if (!this.wholeSentences && this.ttsRatio > TTS.slowRatio) {
-      this.wholeSentences = true;
+    if (!this.reportedSlow && this.ttsRatio > TTS.slowRatio) {
+      this.reportedSlow = true;
       this.log("tts.slow", { ratio: Math.round(this.ttsRatio * 100) / 100 });
     }
   }

@@ -432,7 +432,7 @@ export function buildVoiceGreeting(config) {
  * start of every slow turn is exactly what makes an agent sound like a machine. Every
  * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
  *
- * @param {"filler"|"fallback"} kind
+ * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"} kind
  * @param {"en"|"ur"} language
  * @param {number} [variant]  any integer; picks one of the phrasings
  * @returns {string}

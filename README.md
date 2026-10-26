@@ -20,7 +20,8 @@ failures behind each rule, what works and what does not, and the measured number
 - **Knowledge:** PDF / DOCX / TXT / MD / CSV uploads (scanned PDFs via OCR), typed text, website crawling; hybrid
   vector + keyword search with a measured relevance threshold.
 - **Voice calls from the browser** through a separate voice gateway: local speech recognition and synthesis (Groq
-  Whisper for Urdu), barge-in, full call logging.
+  Whisper for Urdu), barge-in, full call logging. A sentence cut by a pause is answered as one message, "hold on"
+  gets a longer wait, and the agent's own sentences have no long silences in the middle.
 - **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
 - **Passing a caller to a person** (call forwarding) and ending calls politely.
 - **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
@@ -76,6 +77,7 @@ testing; see CLAUDE.md §8.
 | `npm run db:check` | verify the HNSW index, pgvector features, language columns, embedding scheme |
 | `npm run i18n:check` | English / Urdu translation key and placeholder parity |
 | `npm run voice:smoke` | speech benchmark (no quota); `-- --call` places a real call with a synthetic caller |
+| `npm run voice:gaps` | silence at every join inside a spoken reply, with the real voices (no quota) |
 | `npm run eval:real` | the retrieval gate: real pipeline, `test-docs/` corpus, compared with a saved baseline |
 | `npm run reembed:dry` / `reembed` | count / run a resumable re-embed of existing documents |
 

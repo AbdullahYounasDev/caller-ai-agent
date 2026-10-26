@@ -63,8 +63,8 @@ describe("where a piece ended decides the pause after it", () => {
 });
 
 describe("cutting a long sentence", () => {
-  const cut = (text, options) => {
-    const chunker = new SentenceChunker(options);
+  const cut = (text) => {
+    const chunker = new SentenceChunker();
     return [...chunker.push(text), ...chunker.flush()];
   };
 
@@ -84,11 +84,14 @@ describe("cutting a long sentence", () => {
     }
   });
 
-  test("whole-sentence mode (a slow machine) never cuts a sentence that fits", () => {
-    const text = "Our clinic is open from nine in the morning until six in the evening, Monday to Saturday. We are closed on Sundays.";
-    const pieces = cut(text, { wholeSentences: true });
-    assert.deepEqual(pieces, ["Our clinic is open from nine in the morning until six in the evening, Monday to Saturday.", "We are closed on Sundays."]);
-    // The normal mode cuts the first sentence to speak sooner.
-    assert.ok(cut(text).length > 2);
+  test("a tiny first sentence ('Sure!') never goes out alone before a long one", () => {
+    const pieces = cut("Sure! A root canal treatment usually takes two visits, and the fee depends on the tooth, which our dentist will confirm after a quick check-up.");
+    assert.match(pieces[0], /^Sure! A root canal/);
+    assert.deepEqual(cut("Sure! We open at nine."), ["Sure! We open at nine."]);
+  });
+
+  test("never right after a number ('two | visits')", () => {
+    const pieces = cut("A root canal treatment usually takes about two visits here at our clinic in total for most adult patients today.");
+    for (const p of pieces.slice(0, -1)) assert.doesNotMatch(p, /\b(?:two|\d+)$/, `"${p}" ends on a number`);
   });
 });

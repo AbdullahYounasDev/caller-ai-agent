@@ -143,6 +143,7 @@ scripts/
   voice-gateway.mjs            # `npm run voice` — starts the voice gateway process (§6.24)
   voice-models.mjs             # `npm run voice:models` — resumable download of the speech models
   voice-smoke.mjs              # `npm run voice:smoke` — speech benchmark, ZERO quota; `-- --call` = a real call with a synthetic caller
+  voice-gaps.mjs               # `npm run voice:gaps` — silence at every join inside a spoken reply, real voices, before vs now, ZERO quota (§6.24)
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
   eval-retrieval.mjs           # fast fixture-only smoke check — not the hybrid pipeline (§6.3)
@@ -234,7 +235,7 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
-  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot, filler, greeting notice words) · index.js = the matcher, pure
+  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
@@ -1731,9 +1732,31 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   already sent**. First chunk ≤ 48 chars (may run to a comma within 25% more), later chunks
   40–240 and the cap is STRICT. Breaks: comma → strong joiner ("which", "because", "according
   to", "کیونکہ"…) → weak joiner ("and", "اور") → space; never mid-word. A tiny first sentence
-  ("Sure!") waits and goes out with the next. Measured: a 230-char second sentence left ~6 s of
+  ("Sure!") waits and goes out with the next — and when the pair is too long it takes the START of
+  the next sentence with it, never goes out alone (alone it left ~0.7 s of silence after it,
+  `voice:gaps`). Measured: a 230-char second sentence left ~6 s of
   silence; a fixed per-index schedule still left 810 ms (comma slack on chunk 2); the derived rule
   measured **0 gaps on four real calls** (`voice:smoke -- --call` reports gaps).
+- **No long silences INSIDE a sentence** — the "tell me about …… your name" complaint. Measured on
+  the real voices first: every engine starts and ends a piece with its own quiet (Kokoro 50–100 ms
+  before, 70–90 ms after; Piper up to 190 ms after), and 160 ms was added after EVERY piece — so a
+  sentence cut in two had ~300 ms of dead air at the join before any synthesis delay. Now:
+  `audio.js trimSilence` cuts the engine's quiet (20 ms / 40 ms kept so soft sounds survive);
+  `tts.synthesize({pauseMs})` adds the pause the JOIN needs, from `sentences.js chunkEnding`: none
+  between two pieces of one sentence (`TTS.joinPauseMs` 0), 120 ms at a comma, 240 ms after a
+  sentence (≈ the old ~300 ms rhythm once trimmed); and a cut never lands right after a word that
+  leads on ("about | your", "the | price", a number: "two | visits") or right before an Urdu
+  postposition ("آپ | کا"). **`npm run voice:gaps`** (real voices, this sandbox CPU, replies streamed
+  at 400 chars/s): silence inside a sentence **Kokoro English 313 → 135 ms average (max 180),
+  Kokoro Urdu 359 → 100 ms, Piper 317 → 132 ms**; between sentences unchanged (~300 ms). Speech is
+  still understood: `voice:smoke` 0% word error on every voice at 16 kHz and simulated phone audio
+  after trimming. **A machine that makes speech slower than it plays still has gaps** (synthesis
+  ×2: 0.5 s average, 1.2 s max inside a sentence) — no chunking can avoid that. Speaking whole
+  sentences on a slow machine was measured and **rejected**: it moves the waits between sentences
+  and makes them 2.5 s on average, up to 3.2 s (4.2 s even at normal speed) — which also sounds
+  like the agent has finished. The call instead logs `tts.slow` once (`TTS.slowRatio` 0.9) and every
+  gap the caller heard (`tts.gap`, with `inSentence`; the turn's timings carry `gapCount` and
+  `maxGapMs`). The fixes for a slow machine are the fast voice or the speech server (§9.2).
 - **Fixed lines are synthesised once** (`tts.js` cache, `cache: true`): greeting, fillers and the
   apology are the same words call after call, and Kokoro needs ~2.5 s for a greeting. The fillers
   are pre-warmed after the greeting. A reply is never cached. The greeting is spoken sentence by
@@ -1751,8 +1774,7 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   client, the rest of the reply is never synthesised, the turn is logged `interrupted` with
   `spokenText` = what was actually heard. "Audible" is the client's playback report OR the
   gateway's own estimate from the audio it sent — the second does not depend on the transport, so
-  Twilio inherits it. **Known limit:** the full reply is still persisted to `messages`, so on the
-  next turn the model believes the caller heard all of it.
+  Twilio inherits it. The stored reply is then cut to what was heard (turn-quality item 5 below).
 - **Filler:** no reply audio `FILLER.afterMs` (2.5 s) after the caller stopped AND the model has
   produced nothing yet → a short holding line, rotated ("Let me check that for you.", "Sure, just
   a moment."…). It used to fire on every turn — even "what are your hours?" — 0.9 s before the
@@ -1761,8 +1783,9 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
 - **A failed turn does not end the call:** the caller hears `voiceLine("fallback")`, the turn is
   logged `outcome: failed` with the error, and the call keeps listening.
 - **Intent is rule-based, never a model call** (`intent.js`): question | followup (the rewrite
-  actually changed the search) | greeting | acknowledgement | goodbye | human_request; outcome
-  answered (has sources) | no_knowledge | conversational | handoff_requested | failed. A model
+  actually changed the search) | greeting | acknowledgement | goodbye | human_request | hold ("hold
+  on") | presence ("yes, I'm here"); outcome answered (has sources) | profile (a generic opener
+  answered from the business profile, §6.20) | no_knowledge | conversational | handoff_requested | failed. A model
   classifier would spend the scarce chat quota (§8 limitation 3) on every turn for something no
   caller hears; a semantic taxonomy belongs in an offline job over `call_turns`.
 - **Logging never slows a turn:** `recorder.js` tracks every write and `close()` awaits them, but
@@ -1784,6 +1807,17 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
      in `config.js`). A transcript ending on a joining word or comma ("…with", "…اور", ",") is held 1.2 s
      (after the 0.5 s of VAD silence); if the caller carries on, the halves are joined (`utterance.merged`),
      else the held half is answered as it is. A finished sentence never waits.
+     **And the LATE merge**, for a first half that sounded finished ("I want to book an appointment." …
+     "for tomorrow at five"): if the caller starts speaking again within `CONTINUATION.lateMergeWithinMs`
+     (3 s) of the end of the previous utterance AND has not heard a word of the answer yet, the turn in
+     flight is WITHDRAWN and both halves are answered as one message, shown under the same turn number
+     (`turn.withdrawn`, `utterance.merged` with `late`). `respond({ signal })`: a withdrawn turn puts back
+     everything it wrote — the caller's message, the request draft, the handoff state, the same rollback a
+     failed reply already had — and throws `TurnSupersededError`; honoured until the reply is stored (after
+     that it is an ordinary interruption, item 5). Costs a finished sentence nothing: no turn waits for it.
+     If the rest was noise, the first half is answered alone. Past 3 s, or once the agent has spoken, the
+     new speech is its own turn. (Tests: voice-session for the call flow; `test:collect` withdraws turns
+     against the real database — before and mid-stream — and checks the message and the draft are put back.)
   3. **Doubled transcripts are collapsed** (`collapseRepeats`): a phrase of 3+ words written twice by the
      recogniser reaches the brain once (`stt.deduped`). "No, no, no" and "very very good" are left alone.
   4. **No "one moment" filler while collecting details** (`turn.collecting`, set from the `retrieved` stage's
@@ -1791,6 +1825,15 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   5. **An interrupted reply is stored as what was heard** (`respond.js trimLastReply`, called by the session
      after a barge-in): the brain persists the whole generated reply; the spoken part replaces it (or it is
      dropped if nothing was spoken), so the next turn never builds on words the caller did not hear.
+  6. **The conversation is not interrupted by a pause** (`session.js onPause`, `lib/phrases` PAUSES —
+     English, Urdu script, Roman Urdu). "Hold on, let me find my card" / "ek minute" / "ذرا رکیں" →
+     a fixed "take your time" (`voiceLine("take_your_time")`) and the silence check-in waits 60 s instead
+     of 15 (`SILENCE.hold`, back to normal at the next real message). "Yes, I'm here" right after "are you
+     still there?" → a fixed "go ahead" (`voiceLine("listening")`); anywhere else "yes" is an answer and
+     goes to the brain. A question is never a hold ("wait, how much is it?"). Neither the pause line nor
+     the check-in is sent to the brain or stored as a message, so the next real question follows straight
+     on from the exchange before the pause — the model's memory of it is not broken by "are you still
+     there? / yes". Logged as turns with intent `hold` / `presence`.
   **Not done:** echo of the agent's own voice through speakers (4–13 "interruptions" per call without
   headphones) needs an echo guard tested on real audio.
 - **Limits** (`config.js`): 15 min per call, 3 concurrent calls per
@@ -1961,7 +2004,8 @@ engine's, behind three seams, so Twilio is a transport swap:
 **Ending a call well** (`voice/config.js SILENCE`, `CLOSING`; tests in voice-session):
 - **Never hangs up on silence without asking.** 15 s after the AGENT stopped talking (not from the caller's last word,
   never while the agent is thinking or speaking) → "Are you still there?"; 10 s more → a polite goodbye line, then the call
-  ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end.
+  ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end. A caller who
+  said "hold on" gets 60 s and then 20 s (`SILENCE.hold`, §6.24 turn-quality item 6).
 - **A finished conversation ends itself.** Caller says goodbye (short message ≤ 8 words, never mid-request) → the agent
   answers → 2.5 s of quiet → the call ends (`agent_goodbye`); speech in that quiet keeps it open.
 - **Solution-oriented but never hurried** (`prompt.js HELPING_STYLE`, in every prompt): work toward an answer, a request
@@ -2223,7 +2267,7 @@ right language, with history persisted per tenant.
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
-| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking: no mid-reply gaps on real calls. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Twilio not built |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Twilio not built |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -2291,7 +2335,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 594 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 619 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2325,8 +2369,9 @@ right language, with history persisted per tenant.
    routes come first — agents and their settings, document availability, phone numbers, customers and
    requests are all stood in here today (§4) — replace the stand-ins as his side lands, and decide who
    sends the customer's confirmation (WhatsApp/SMS).
-   Then the conversation-memory fixes seen in testing (an utterance cut by a pause arrives as two
-   turns; the agent should see the previous exchange after a pause) and measuring Urdu end to end.
+   Then measuring Urdu end to end. (The conversation-memory fixes seen in testing — a sentence cut by a
+   pause, the previous exchange kept across a long pause — and the silences inside the agent's own
+   sentences are done, §6.24; a real call on the user's own machine is still to be listened to.)
 1. **Finish the once-only embedding pass (§6.20), as soon as a paid key or the
    quota allows ~800 texts** — with an Urdu corpus in it now, since Italian is gone (§6.3 note): `eval:embedding-variants` → adopt a scheme in
    `embed-scheme.js` and bump the version → `reembed` → `db:check` → the two
@@ -2468,8 +2513,9 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 594 unit tests: generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 619 unit tests: pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
+npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
 npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
 npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent (greeting and recording switch included), against the real DB, faked models — spends no quota (§6.27, §6.28)

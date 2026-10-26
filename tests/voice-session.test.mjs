@@ -1056,25 +1056,21 @@ describe("CallSession", () => {
     assert.ok(timings.maxGapMs >= 400);
   });
 
-  test("a call whose speech is made slower than it plays switches to whole sentences", async () => {
-    const long = "Our clinic is open from nine in the morning until six in the evening, Monday to Saturday.";
+  test("a call whose speech is made slower than it plays says so on its timeline, once", async () => {
     const h = harness({
       transcripts: ["When are you open?"],
-      replies: [streams(long)],
+      replies: [streams("Our clinic is open from nine in the morning until six in the evening, Monday to Saturday.")],
       synthMs: 1300, // 1.3 s to make…
       speechMs: 1000, // …1 s of speech: slower than real time
     });
     await h.session.start();
-    // The greeting is the first speech made on the call: it already shows the machine is slow.
-    assert.ok(h.recorded.events.some((e) => e.type === "tts.slow"));
     await h.pump(3000);
     h.hear({ type: "start" }, utterance);
     await h.settle();
-    const reply = h.synthArgs.filter((a) => !a.cache).map((a) => a.text);
-    assert.deepEqual(reply, [long], "the reply is spoken as one whole sentence, never cut inside it");
+    assert.equal(h.recorded.events.filter((e) => e.type === "tts.slow").length, 1);
   });
 
-  test("a machine that keeps up never switches", async () => {
+  test("a machine that keeps up is never reported slow", async () => {
     const h = harness({ transcripts: ["When are you open?"], replies: [streams("We open at nine in the morning and close at six in the evening every weekday.")], synthMs: 500, speechMs: 1000 });
     await h.session.start();
     await h.pump(3000);

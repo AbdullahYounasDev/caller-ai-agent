@@ -19,7 +19,8 @@
  *   +  the pause added after it  +  the quiet at the start of this one.
  * Reported twice from the same synthesis: BEFORE (the engine's own quiet kept, 160 ms after every
  * piece) and NOW (quiet trimmed, the pause chosen by where the piece ended — TTS in config.js).
- * Joins INSIDE a sentence are the ones a caller hears as the agent having finished.
+ * Joins INSIDE a sentence are the ones a caller hears as the agent having finished. The second
+ * block, "whole sentences", is the slow-machine mode that was measured and REJECTED (sentences.js).
  */
 process.loadEnvFile?.(".env");
 
@@ -64,9 +65,13 @@ function edgeQuietMs(samples, sampleRate) {
   return { lead: trimmed.leadMs, tail: trimmed.tailMs };
 }
 
-/** Stream the reply into the chunker at CHARS_PER_SEC; returns pieces with the time each became ready. */
+/**
+ * Stream the reply into the chunker at CHARS_PER_SEC; returns pieces with the time each became ready.
+ * `wholeSentences` emulates the REJECTED slow-machine mode (sentences.js) so the comparison can be re-run:
+ * the pieces of each sentence are joined back into one.
+ */
 function stream(text, wholeSentences) {
-  const chunker = new SentenceChunker({ wholeSentences });
+  const chunker = new SentenceChunker();
   const out = [];
   const step = 4;
   for (let i = 0; i < text.length; i += step) {
@@ -74,7 +79,18 @@ function stream(text, wholeSentences) {
     for (const piece of chunker.push(text.slice(i, i + step))) out.push({ text: piece, readyAt: at });
   }
   for (const piece of chunker.flush()) out.push({ text: piece, readyAt: (text.length / CHARS_PER_SEC) * 1000 });
-  return out;
+  if (!wholeSentences) return out;
+  const whole = [];
+  let open = null;
+  for (const piece of out) {
+    open = open ? { text: `${open.text} ${piece.text}`, readyAt: piece.readyAt } : { ...piece };
+    if (chunkEnding(piece.text) === "sentence") {
+      whole.push(open);
+      open = null;
+    }
+  }
+  if (open) whole.push(open);
+  return whole;
 }
 
 const fmt = (ms) => `${Math.round(ms)}`.padStart(5);
@@ -129,7 +145,7 @@ for (const id of voiceIds) {
       }
     }
     const stat = (xs) => (xs.length ? `avg ${fmt(xs.reduce((a, b) => a + b, 0) / xs.length)} ms · max ${fmt(Math.max(...xs))} ms · ${xs.length} joins` : "no joins");
-    const label = wholeSentences ? "whole sentences" : "pieces";
+    const label = wholeSentences ? "whole sentences (rejected)" : "pieces";
     console.log(`  ${label.padEnd(16)} INSIDE a sentence  before: ${stat(inSentence.before)}`);
     console.log(`  ${"".padEnd(16)}                    now:    ${stat(inSentence.now)}`);
     console.log(`  ${"".padEnd(16)} BETWEEN sentences  before: ${stat(atSentence.before)}`);

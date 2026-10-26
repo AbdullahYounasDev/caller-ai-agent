@@ -174,11 +174,12 @@ export const TTS = {
    */
   trim: { relative: 0.02, keepLeadMs: 20, keepTailMs: 40 },
   /**
-   * A call whose speech is made SLOWER than it plays cannot avoid gaps by chunking — every piece
-   * takes longer to make than the one before it takes to play. Above this ratio (synthesis time ÷
-   * audio time, averaged over the call's last pieces) the call switches to whole sentences, so a
-   * gap falls between two sentences, where a listener expects a pause, and never inside one.
-   * Measured: Kokoro ~0.57 on an idle laptop, ~1.2 on battery with the browser busy (§6.24).
+   * A call whose speech is made about as slowly as it plays cannot avoid gaps by chunking — every
+   * piece takes longer to make than the one before it takes to play. Above this ratio (synthesis
+   * time ÷ audio time, a running average over the call) the call logs `tts.slow` once, so its
+   * timeline says why it had gaps. Measured: Kokoro ~0.57 on an idle laptop, ~1.2 on battery with
+   * the browser busy (§6.24). The fixes are the fast voice or the speech server (§9.2) — speaking
+   * whole sentences was measured and made it worse (sentences.js).
    */
   slowRatio: 0.9,
   /** A wait between two pieces of one reply longer than this is logged as `tts.gap` (the caller heard it). */

@@ -44,9 +44,14 @@
  *
  * Where a chunk ended decides the pause after it (chunkEnding → TTS in config.js): a full
  * pause after a sentence, a short one at a comma, none at all between two pieces of one
- * sentence. And a call whose speech is being made slower than it plays (the CPU is busy) is
- * switched to whole sentences (`wholeSentences`): a gap then falls between sentences, where a
- * listener expects one, never in the middle of one.
+ * sentence.
+ *
+ * Tried and REJECTED (npm run voice:gaps, Kokoro): speaking whole sentences only when the
+ * machine is slow. It removes the waits inside sentences but piles them up between sentences —
+ * 2.5 s on average and up to 3.2 s with synthesis 2× slower (pieces: 0.5 s average inside a
+ * sentence), up to 4.2 s even at normal speed — and three seconds of silence also sounds like the
+ * agent has finished. A machine that makes speech slower than it plays cannot avoid gaps by
+ * chunking; the fixes are the fast voice or the speech server (§9.2).
  * ─────────────────────────────────────────────────────────────────────────
  *
  * Pure and dependency-free (tests/voice-units.test.mjs).
@@ -211,20 +216,14 @@ export function sanitizeForSpeech(text) {
 
 /** Turns a stream of text deltas into speakable chunks, in order. */
 export class SentenceChunker {
-  /**
-   * @param {{wholeSentences?: boolean}} [options] speak whole sentences only (cut one only past
-   *   MAX_CHUNK_CHARS) — for a call whose speech is made slower than it plays (session.js)
-   */
-  constructor({ wholeSentences = false } = {}) {
+  constructor() {
     this.buffer = "";
     this.firstLength = null;
     this.sentChars = 0;
-    this.wholeSentences = wholeSentences;
   }
 
   /** The most characters the NEXT chunk may have (see PROGRESSIVE CHUNK SIZES above). */
   limit() {
-    if (this.wholeSentences) return MAX_CHUNK_CHARS;
     if (this.firstLength == null) return FIRST_CHUNK_CHARS;
     const allowed = Math.round(this.firstLength + CHUNK_GROWTH * this.sentChars);
     return Math.min(MAX_CHUNK_CHARS, Math.max(MIN_LATER_CHUNK_CHARS, allowed));
@@ -273,7 +272,7 @@ export class SentenceChunker {
       // chunk waits until it has seen as far as its comma slack reaches — mid-stream, the
       // comma it would prefer may simply not have arrived yet.
       const stretch = sentence ? this.buffer.slice(0, sentence.end) : this.buffer;
-      const reach = this.firstLength == null && !this.wholeSentences ? Math.floor(limit * FIRST_CHUNK_COMMA_SLACK) : limit;
+      const reach = this.firstLength == null ? Math.floor(limit * FIRST_CHUNK_COMMA_SLACK) : limit;
       if (stretch.length > reach || (sentence && stretch.length > limit)) {
         const at = breakPoint(stretch, limit, reach);
         if (at > 0) {
