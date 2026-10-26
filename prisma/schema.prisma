@@ -459,6 +459,15 @@ model AgentConfig {
   // capabilities, because the catalog of voices lives in code.
   voices Json @default("{}")
 
+  // --- the call's opening line (src/lib/voice/greeting.js) ---
+  /// The owner's own greeting per spoken language: { en: "Hi, this is {business}…", ur: "…" }.
+  /// A language left out (or empty) uses the built-in greeting, which says the caller is speaking
+  /// with an AI assistant — and, only while recordCalls is on, that the call is recorded.
+  greeting    Json    @default("{}")
+  /// The owner switched call recording on. Drives the built-in greeting's recording sentence today;
+  /// the phone transport will record by it when telephony exists (§9.2).
+  recordCalls Boolean @default(false) @map("record_calls")
+
   // --- what the agent collects (src/lib/collect/config.js) ---
   /// Which details the agent asks for, for which kinds of request (appointment, callback…),
   /// and the business's own lists (services, staff) and custom fields. One JSON document,

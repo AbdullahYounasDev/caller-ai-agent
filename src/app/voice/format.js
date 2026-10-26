@@ -30,6 +30,8 @@ export function outcomeClass(outcome) {
   switch (outcome) {
     case "answered":
       return "bg-green-50 text-green-700 ring-green-200";
+    case "profile":
+      return "bg-teal-50 text-teal-700 ring-teal-200";
     case "no_knowledge":
       return "bg-amber-50 text-amber-800 ring-amber-200";
     case "handoff_requested":

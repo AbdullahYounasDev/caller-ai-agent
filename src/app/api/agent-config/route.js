@@ -7,6 +7,7 @@ import { requireAgent } from "@/lib/tenant/agent-request";
 import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
 import { validateHandoffConfig } from "@/lib/handoff/config";
+import { greetingProblems } from "@/lib/voice/greeting";
 import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 
 /**
@@ -195,6 +196,18 @@ function validatePatch(patch, tr) {
     for (const problem of validateHandoffConfig(patch.escalation).problems) {
       errors.push(tr(`validation:handoff.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
     }
+  }
+
+  // The call's opening line (lib/voice/greeting.js). Refused only when it cannot be spoken as
+  // meant (too long, an unknown {placeholder} that would be read out literally); leaving out the
+  // AI or recording notice is the owner's choice and only WARNED about, in the console.
+  if (patch.greeting !== undefined) {
+    for (const problem of greetingProblems(patch.greeting)) {
+      errors.push(tr(`validation:greeting.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
+    }
+  }
+  if (patch.recordCalls !== undefined && typeof patch.recordCalls !== "boolean") {
+    errors.push(tr("validation:recordCalls.invalid"));
   }
 
   if (patch.capabilities !== undefined) {

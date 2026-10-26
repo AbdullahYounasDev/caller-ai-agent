@@ -115,5 +115,10 @@
   "numbers.route.released": "یہ نمبر چھوڑ دیا گیا ہے اور اب کسی کو نہیں ملتا۔",
   "numbers.route.unassigned": "یہ نمبر ابھی کسی ایجنٹ سے منسلک نہیں۔ نمبرز ٹیب میں اسے منسلک کریں۔",
   "numbers.route.agent_archived": "یہ نمبر ایک آرکائیو شدہ ایجنٹ کو ملتا ہے۔ اسے کسی فعال ایجنٹ سے منسلک کریں۔",
-  "numbers.route.tenant_unserviceable": "یہ کاروبار اس وقت کالز وصول نہیں کر سکتا۔"
+  "numbers.route.tenant_unserviceable": "یہ کاروبار اس وقت کالز وصول نہیں کر سکتا۔",
+  "greeting.invalid": "سلام ہر زبان کے لیے ایک متن ہونا چاہیے۔",
+  "greeting.unknownLanguage": "“{value}” ایسی زبان نہیں جو آپ کا ایجنٹ بول سکے۔",
+  "greeting.tooLong": "سلام بہت لمبا ہے — اسے {max} حروف سے کم رکھیں۔",
+  "greeting.unknownPlaceholder": "“{value}” کال کرنے والے کو ویسے ہی پڑھ کر سنایا جائے گا۔ صرف {allowed} استعمال ہو سکتا ہے۔",
+  "recordCalls.invalid": "کال ریکارڈنگ یا آن ہو یا آف۔"
 }

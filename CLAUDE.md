@@ -170,7 +170,7 @@ src/app/
   agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
   knowledge/DocumentAgents.js  # one document's "All agents / Only: …" and its editor, in the Knowledge tab (§6.28)
   numbers/NumbersPanel.js      # the Numbers tab: add / link / release a number, try the lookup (§6.29)
-  voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker
+  voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker, GreetingPanel (the Agent tab's call greeting + recording switch)
   api/
     chat/route.js              # internal test chat (SSE) — NOT a product channel
     voice/session/route.js     # checks the tenant, issues a one-minute ticket for the gateway's WebSocket (§6.24)
@@ -225,6 +225,7 @@ src/lib/
     transports/browser.js      # the console's WebSocket protocol; Twilio will be a sibling
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
+    greeting.js                # each agent's call greeting: built-in text (AI notice; recording notice only while recording is on), the owner's own text, the console's warnings — pure (§6.24)
     sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
   collect/                     # ★ REQUEST-TAKING (§6.25) — what the agent collects, validates and hands over
     catalog.js                 # field catalogue, record types, industry presets, limits — DATA, not code
@@ -233,6 +234,7 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
+  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
@@ -1348,17 +1350,37 @@ that it helps is NOT in yet. Honest expectation: it can help a file called
 chunk is 0.05–0.09 over the gate it may not be enough alone. Do not flip it
 without the before/after `eval:real` run.
 
-**Not built — overview-intent retrieval.** The candidate with no second
-threshold: detect overview intent with a free regex (en+it, anchored so "what
-do you do with my data" doesn't match) and search `"<businessName>: <question>"`
-— queries containing the brand already land at ~0.30. It changes only the
-search key, so the gate is untouched, and a false positive costs a retrieval
-of the company's own overview. It was not built because it cannot be measured
-without embeddings; measure it (overview + off-topic categories, anchored vs
-plain) before shipping.
-
-**Still true after this: `generic_overview` is 0% hit@1** — retrieval is
-unchanged; only the answer is better. §8's limitation stays.
+**BUILT — generic openers are recognised and searched with the business name (`lib/phrases`).**
+The words are DATA, one file per way of writing, so a speaker of the language can extend them
+without touching code: `src/lib/phrases/en.js`, `ur.js` (Urdu script), `roman-ur.js` (Urdu in
+English letters, with a `SPELLINGS` table — "ap/aap", "kia/kya", "batao/bataen" — because nobody
+spells Roman Urdu the same way twice). Five groups: `identity` ("who are you", "آپ کون ہیں",
+"ap kon ho"), `about` ("tell me about your company", "اپنی کمپنی کے بارے میں بتائیں"),
+`offerings` ("what do you do / sell / what services", "aap kya karte hain"), `help` ("how can you
+help me"), `aiCheck` ("are you a robot?", "kya aap insaan hain"). Plus each language's FILLER
+(please, ji, zara…) and the greeting's notice words (§6.24). `index.js` is the matcher: a phrase
+must match AND every other word must be filler or the business's own name (or its start —
+"Nyron" for "Nyron Software Solutions"); `about`/`offerings` allow one extra word. Pure, no model
+call — the first thing said on most calls must cost nothing.
+- **What a match does** (`query.js retrieveForTurn`, before the follow-up logic): an overview group
+  is searched as `"<businessName>: <message>"` (trigger `overview`, no rewrite spent); `aiCheck` is
+  not searched at all (trigger `ai_check`). The gate is untouched — only the search key changes —
+  and a false positive costs a search for the company's own overview. No name (placeholder) → the
+  message as typed. The prompt gets a per-message line (`THIS MESSAGE is a general question about
+  the business…` / `…asks whether you are a person or a machine…`), placed before the conflict rule,
+  which stays last; and EVERY prompt now says "if asked whether you are a person, a robot or an AI,
+  say honestly you are the business's AI assistant; never claim to be a human". A voice turn
+  answered this way with no document is logged outcome `profile` ("answered from your business
+  profile"), not `no_knowledge`; and `handoff/phrases.js isProfileQuestion` counts every opener, so
+  an opener never counts as "the agent did not understand" (§6.26).
+- **Measured, rules only (`tests/phrases.test.mjs`, no quota):** all 15 generic openers in
+  `eval-questions.mjs` (`generic_overview` 8, `report_phrasings` 7) are recognised and none of the
+  other 79 questions is. Tuned with that set in view — read it as "fits the set", not a live rate.
+- **NOT measured — the retrieval gain.** Whether `"<name>: <question>"` now clears the gate for the
+  About chunk needs embeddings (quota, §8 limitation 3). Expected from the probe above (queries
+  naming the brand land at ~0.30) but unproven; the `eval:real` run of §9.1 item 1 decides it
+  (`generic_overview`, `report_phrasings` and `off_topic` — no new leak). The profile answers the
+  openers either way.
 
 **Embedding quota is counted per TEXT, not per request** (probed directly with
 the quota at ~13 left: batches of 2, 3 and 5 succeeded; a batch of 10 got a
@@ -1618,8 +1640,25 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   and it is the box that moves to its own CPU server later (§9.2). It imports the SAME `respond()`
   through the `@/` alias loader — it is an adapter over the one brain (§1), not a second brain.
   `session.js` builds no prompt, does no retrieval and calls no model. Every spoken word that is
-  not generated (greeting, "one moment", the failure apology) lives in `prompt.js`
-  (`buildVoiceGreeting`, `voiceLine`).
+  not generated ("one moment", the failure apology) lives in `prompt.js` (`voiceLine`); the
+  greeting's wording lives in `lib/voice/greeting.js` (pure, because the console previews it as
+  the owner types) and is reached through `prompt.js buildVoiceGreeting`.
+- **The greeting is per AGENT and the owner's** (`agent_configs.greeting` `{en?, ur?}` +
+  `record_calls`, migration `20261026100000_agent_greeting`, hand-written, HNSW line removed;
+  console: Agent tab → `GreetingPanel`). Decided with the owner (Pakistan is the first market):
+  - An empty box = the BUILT-IN greeting: "Hello, thanks for calling {name}. You're speaking with
+    an AI assistant[, and this call is being recorded]. How can I help you today?" (Urdu the same,
+    "اے آئی" in Urdu script, verb by voice gender). The recording clause is there ONLY while
+    `recordCalls` is on — with recording off the built-in text never mentions recording.
+  - The owner's own text (≤400 chars, `{business}` the only placeholder — anything else in braces
+    is refused, it would be read out literally) is spoken EXACTLY as written. Nothing is added.
+  - Instead the console WARNS (`greetingNotices`), with the reason: no AI notice ("the UK and
+    Ireland (and the EU) require it… your choice"), recording on but not mentioned, recording
+    mentioned while off. Warnings are never refusals.
+  - A new agent copies both settings from the agent it starts from (§6.27).
+  - `recordCalls` records nothing yet (no telephony, browser calls are never recorded); it drives
+    the greeting today and is the switch the phone transport will obey. WHERE recordings are
+    stored is the backend's decision (handoff doc).
 - **`respond()` gained two OBSERVATION-only additions:** `onStage(stage, data)` ("retrieved",
   "first_token") and a returned `timings` object (+ `searchTrigger`). They change nothing about a
   turn, a throwing callback is swallowed, and the chat route ignores them.
@@ -1802,8 +1841,8 @@ the 0.5 s VAD window.
 
 **Not built:** Twilio transport (μ-law 8 kHz ⇄ PCM 16 kHz at the edge, Media Streams `mark` events
 for playback, webhook signature → dialled number → tenant in `registry.js`, and a REAL
-`transport.transfer`, §6.26); call recording (`recording_url` stays null); a per-tenant greeting;
-a local Urdu recogniser.
+`transport.transfer`, §6.26); call recording itself (`recording_url` stays null; the per-agent
+`recordCalls` switch and the greeting's notice exist); a local Urdu recogniser.
 
 ### 6.25 Taking a request — appointments and call-backs (the collect domain)
 
@@ -2065,8 +2104,9 @@ filter is independent of the vectors, the ranking within it is unchanged).
 
 **Every per-agent setting, audited end to end (test:agents, real `respond()`):** call forwarding (Dublin passes the
 caller to its own person, London has none), what the agent collects (one agent takes requests, the other does not), the
-reply language, the opening hours and the forwarding contacts each follow the AGENT; the dashboard language follows the
-tenant (§6.27). Records and calls carry the agent (§6.27).
+reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24) each
+follow the AGENT, and a generic opener is searched with that agent's own business name (§6.20); the dashboard language
+follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 80 checks since the greeting.)
 
 ### 6.29 Phone numbers — "this number was dialled: which business, which agent?"
 
@@ -2177,7 +2217,8 @@ right language, with history persisted per tenant.
 | Area | State |
 | --- | --- |
 | RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
-| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Retrieval of the About chunk for those openers is still 0% |
+| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
+| **Call greeting** | ✅ per agent: the owner's own words or a built-in greeting that says the caller is speaking with an AI assistant, and that the call is recorded only while the agent's recording switch is on; warnings (never refusals) when the owner's text leaves a notice out (§6.24). Recording itself is not built |
 | Keyword half | ✅ language-aware (`english`/`simple` per document — Urdu script is `simple`, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
@@ -2250,7 +2291,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 567 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 594 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2398,8 +2439,10 @@ What it will need:
 - **`call_logs` / `call_turns` / `call_events` exist and are written** (§6.24); the recording URL
   column is still unused — audio storage is not yet chosen.
 - **Compliance is not optional:** recording disclosure, consent, DNC lists,
-  permitted calling hours. The UK and Ireland (the first markets) require telling callers they are speaking to an
-  AI and that a call may be recorded; Pakistan has its own rules. Budget time.
+  permitted calling hours. The UK and Ireland require telling callers they are speaking to an
+  AI and that a call may be recorded; Pakistan has its own rules. Built: the per-agent greeting
+  whose built-in text says both (§6.24), and console warnings when an owner's own text drops them —
+  the owner decides. Not built: consent capture, DNC lists, calling-hours rules. Budget time.
 
 **To agree with the partner before telephony starts:** who provisions numbers,
 how the purchase flow is billed, and the usage-event shape for per-minute
@@ -2425,11 +2468,11 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 567 unit tests: phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 594 unit tests: generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
 npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
-npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent, against the real DB, faked models — spends no quota (§6.27, §6.28)
+npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent (greeting and recording switch included), against the real DB, faked models — spends no quota (§6.27, §6.28)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
 npm run test:reembed     # ingest/re-embed invariants against the real DB with a FAKED embedder — spends no quota (§6.10)
 npm run test:openrouter  # OpenRouter integration vs. a local stand-in

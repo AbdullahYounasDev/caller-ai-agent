@@ -7,6 +7,7 @@ import { EditorView } from "@codemirror/view";
 import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
 import { VoiceCallPanel } from "./voice/VoiceCallPanel";
 import { VoicePicker } from "./voice/VoicePicker";
+import { GreetingPanel } from "./voice/GreetingPanel";
 import { CollectPanel } from "./collect/CollectPanel";
 import { HandoffPanel } from "./handoff/HandoffPanel";
 import { AgentPicker } from "./agents/AgentPicker";
@@ -391,6 +392,8 @@ export default function Home() {
             replyLanguage: config.replyLanguage,
             capabilities: config.capabilities,
             voices: config.voices,
+            greeting: config.greeting ?? {},
+            recordCalls: Boolean(config.recordCalls),
             escalation: config.escalation,
           }),
         }
@@ -1148,6 +1151,15 @@ export default function Home() {
               voices={config.voices ?? {}}
               replyLanguage={config.replyLanguage}
               onChange={(voices) => patchConfig({ voices })}
+              t={t}
+              labelClass={label}
+              helpClass={help}
+              inputClass={inputCls}
+            />
+
+            <GreetingPanel
+              config={config}
+              onChange={patchConfig}
               t={t}
               labelClass={label}
               helpClass={help}

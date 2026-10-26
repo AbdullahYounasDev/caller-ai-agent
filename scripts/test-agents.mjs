@@ -22,7 +22,8 @@
  *     links removed with the document, a copied agent inheriting nothing restricted, another
  *     tenant's agent refused — and respond() itself answering each agent from its own documents
  *   - EVERY SETTING PER AGENT through the real respond(): call forwarding, what it collects, the
- *     reply language and the opening hours each follow the agent, not the tenant
+ *     reply language, the opening hours, the call greeting and the recording switch each follow the
+ *     agent, not the tenant; a generic opener is searched with the agent's own business name
  */
 if (!process.env.DATABASE_URL) {
   try {
@@ -34,6 +35,7 @@ if (!process.env.DATABASE_URL) {
 const { prisma } = await import("@/lib/db");
 const stub = await import("./test-collect-stub.mjs");
 const { respond } = await import("@/lib/agent/respond");
+const { buildVoiceGreeting } = await import("@/lib/agent/prompt");
 const config = await import("@/lib/tenant/config");
 const { getAgentConfig, saveAgentConfig, saveCollectConfig, listAgents, createAgent, updateAgent, invalidateAgentConfig, MAX_AGENTS_PER_TENANT } = config;
 const { presetConfig } = await import("@/lib/collect/config");
@@ -279,6 +281,28 @@ ok(dubHuman.instruction.includes("12:00") && !lonHuman.instruction.includes("12:
 ok(dubHuman.result.collection === null && lonHuman.result.collection !== null, "what the agent collects is per agent (London takes requests, Dublin does not)");
 ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).escalation.contacts.length === 1
   && (await getAgentConfig(KB, { agentId: kbLondon, skipCache: true })).escalation.contacts.length === 0, "forwarding contacts are stored per agent");
+
+// The call greeting and the recording switch (lib/voice/greeting.js) follow the agent too.
+await saveAgentConfig(KB, { businessName: "Roma Dublin", greeting: { en: "Welcome to {business}, our AI is here.", ur: "" }, recordCalls: true }, { agentId: kbDublin });
+await saveAgentConfig(KB, { businessName: "Roma London", greeting: {}, recordCalls: false }, { agentId: kbLondon });
+const dubCfg = await getAgentConfig(KB, { agentId: kbDublin, skipCache: true });
+const lonCfg = await getAgentConfig(KB, { agentId: kbLondon, skipCache: true });
+ok(dubCfg.recordCalls === true && lonCfg.recordCalls === false, "call recording is switched on per agent");
+ok(JSON.stringify(dubCfg.greeting) === JSON.stringify({ en: "Welcome to {business}, our AI is here." }), "the greeting is stored per agent, empty languages dropped");
+ok(buildVoiceGreeting({ ...dubCfg, replyLanguage: "en" }).text === "Welcome to Roma Dublin, our AI is here.", "Dublin's call opens with Dublin's own words");
+ok(/^Hello, thanks for calling Roma London\. You're speaking with an AI assistant\. How can I help/.test(buildVoiceGreeting(lonCfg).text), "London (no own text) opens with the built-in greeting — AI notice, no recording sentence");
+// Dublin answers in Urdu and has no Urdu text of its own: the built-in Urdu greeting, with the recording sentence.
+ok(/اے آئی اسسٹنٹ.*کال ریکارڈ کی جا رہی ہے/.test(buildVoiceGreeting(dubCfg).text), "Dublin in Urdu: built-in greeting, saying the call is recorded");
+const kbGalway = (await createAgent(KB, { name: "Galway", copyFrom: kbDublin })).id;
+const galCfg = await getAgentConfig(KB, { agentId: kbGalway, skipCache: true });
+ok(galCfg.recordCalls === true && galCfg.greeting.en === dubCfg.greeting.en, "a new agent copies the greeting and the recording switch of the agent it starts from");
+await saveAgentConfig(KB, { greeting: { en: "Galway here." } }, { agentId: kbGalway });
+ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).greeting.en === dubCfg.greeting.en, "…and changing the copy leaves the original alone");
+
+// A generic opener is searched with the agent's OWN business name in front (§6.20).
+const opener = await promptFor(kbLondon, "tell me about your company");
+ok(opener.result.searchQuery === "Roma London: tell me about your company" && opener.result.searchTrigger === "overview", "an opener is searched as '<this agent's business>: <question>'");
+ok(/THIS MESSAGE is a general question about the business/.test(opener.instruction), "…and the prompt is told it is a general question");
 }
 
 // ── the engine's cap on active agents ───────────────────────────────────────
