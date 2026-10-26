@@ -84,10 +84,10 @@ describe("cutting a long sentence", () => {
     }
   });
 
-  test("a tiny first sentence ('Sure!') never goes out alone before a long one", () => {
-    const pieces = cut("Sure! A root canal treatment usually takes two visits, and the fee depends on the tooth, which our dentist will confirm after a quick check-up.");
-    assert.match(pieces[0], /^Sure! A root canal/);
+  test("a tiny first sentence ('Sure!') joins a short next one; before a long one it goes first, on its own (speed)", () => {
     assert.deepEqual(cut("Sure! We open at nine."), ["Sure! We open at nine."]);
+    const pieces = cut("Sure! A root canal treatment usually takes two visits, and the fee depends on the tooth, which our dentist will confirm after a quick check-up.");
+    assert.equal(pieces[0], "Sure!");
   });
 
   test("never right after a number ('two | visits')", () => {

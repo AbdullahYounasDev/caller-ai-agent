@@ -1732,9 +1732,11 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   already sent**. First chunk ≤ 48 chars (may run to a comma within 25% more), later chunks
   40–240 and the cap is STRICT. Breaks: comma → strong joiner ("which", "because", "according
   to", "کیونکہ"…) → weak joiner ("and", "اور") → space; never mid-word. A tiny first sentence
-  ("Sure!") waits and goes out with the next — and when the pair is too long it takes the START of
-  the next sentence with it, never goes out alone (alone it left ~0.7 s of silence after it,
-  `voice:gaps`). Measured: a 230-char second sentence left ~6 s of
+  ("Sure!") waits and goes out with the next when the pair fits; when it does not, "Sure!" goes
+  out alone ON PURPOSE. Taking the start of the next sentence with it was tried: no gap after it,
+  but the first word came 2.1 s after the reply started instead of 0.54 s (a real call session,
+  real Kokoro); alone, the wait it costs is ~365 ms more pause BETWEEN two sentences, where a
+  listener expects one. Speed wins. Measured: a 230-char second sentence left ~6 s of
   silence; a fixed per-index schedule still left 810 ms (comma slack on chunk 2); the derived rule
   measured **0 gaps on four real calls** (`voice:smoke -- --call` reports gaps).
 - **No long silences INSIDE a sentence** — the "tell me about …… your name" complaint. Measured on
@@ -1746,7 +1748,9 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   between two pieces of one sentence (`TTS.joinPauseMs` 0), 120 ms at a comma, 240 ms after a
   sentence (≈ the old ~300 ms rhythm once trimmed); and a cut never lands right after a word that
   leads on ("about | your", "the | price", a number: "two | visits") or right before an Urdu
-  postposition ("آپ | کا"). **`npm run voice:gaps`** (real voices, this sandbox CPU, replies streamed
+  postposition ("آپ | کا"). Through a REAL call session (real Kokoro, a fake brain streaming three
+  replies like a fast LLM, this sandbox CPU): **0 gaps inside any sentence**; the only gap was 365 ms
+  after a lone "Sure!". **`npm run voice:gaps`** (real voices, this sandbox CPU, replies streamed
   at 400 chars/s): silence inside a sentence **Kokoro English 313 → 135 ms average (max 180),
   Kokoro Urdu 359 → 100 ms, Piper 317 → 132 ms**; between sentences unchanged (~300 ms). Speech is
   still understood: `voice:smoke` 0% word error on every voice at 16 kHz and simulated phone audio

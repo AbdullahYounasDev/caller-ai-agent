@@ -242,27 +242,23 @@ export class SentenceChunker {
       const limit = this.limit();
       let sentence = firstSentenceEnd(this.buffer);
 
-      // A tiny FIRST sentence ("Sure!") waits for the next one and goes out with it — alone it
-      // is too short to cover the next chunk's synthesis (measured with npm run voice:gaps: "Sure!"
-      // spoken alone before a long sentence left ~0.7 s of silence after it). The pair goes whole
-      // when it fits; otherwise "Sure!" takes the START of the next sentence with it, cut below.
-      let tinyFirst = false;
+      // A tiny FIRST sentence ("Sure!") waits for the next one and goes out with it,
+      // when the pair fits — alone it is too short to cover the next chunk's synthesis.
+      // When the pair does NOT fit, "Sure!" goes out alone, on purpose. Taking the start of the
+      // next sentence with it was tried: no gap after it, but the first word came ~1.7 s later
+      // (measured through a real call session: first audio 2.1 s instead of ~0.5 s). The wait it
+      // saves falls BETWEEN two sentences, where a listener expects a pause, so speed wins.
       if (sentence && this.firstLength == null && sentence.end < MIN_CHUNK_CHARS) {
         const second = firstSentenceEnd(this.buffer.slice(sentence.next));
         if (!second) {
-          if (this.buffer.length <= Math.floor(limit * FIRST_CHUNK_COMMA_SLACK)) break; // the next sentence is still arriving
-          tinyFirst = true;
-          sentence = null;
+          if (this.buffer.length <= limit) break; // the next sentence is still arriving
         } else if (sentence.next + second.end <= limit) {
-          sentence = { end: sentence.next + second.end, next: sentence.next + second.next };
-        } else {
-          tinyFirst = true;
           sentence = { end: sentence.next + second.end, next: sentence.next + second.next };
         }
       }
 
       // A whole sentence that fits: speak it as written.
-      if (sentence && sentence.end <= limit && !tinyFirst) {
+      if (sentence && sentence.end <= limit) {
         this.emit(out, this.buffer.slice(0, sentence.end), sentence.next);
         continue;
       }
