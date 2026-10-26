@@ -842,4 +842,171 @@ describe("CallSession", () => {
     await h.pump(CLOSING.afterGoodbyeMs + 6000);
     assert.equal(h.sent.closed, null);
   });
+
+  // ── a sentence cut by a pause, and pauses in the call (CLAUDE.md §6.24) ────
+
+  /** A respond() that has not answered yet — it ends only when the session withdraws the turn. */
+  const waitsUntilWithdrawn = async ({ signal }) =>
+    new Promise((_, reject) =>
+      signal.addEventListener("abort", () => {
+        const err = new Error("withdrawn");
+        err.name = "TurnSupersededError";
+        reject(err);
+      })
+    );
+
+  test("the caller carries on before hearing anything: both halves are answered as ONE message", async () => {
+    const h = harness({
+      transcripts: ["I want to book an appointment.", "for tomorrow at five."],
+      replies: [waitsUntilWithdrawn, streams("Sure, tomorrow at five.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(800); // the first half is being answered — nothing heard yet
+    h.hear({ type: "start" });
+    h.advance(900);
+    h.hear(utterance);
+    await h.settle();
+    await h.settle();
+
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.calls[0].signal.aborted, "the first answer was withdrawn");
+    assert.equal(h.calls[1].userMessage, "I want to book an appointment. for tomorrow at five.");
+    assert.equal(h.recorded.turns.length, 1, "one turn recorded, not two");
+    assert.equal(h.recorded.turns[0].index, 1);
+    assert.equal(h.recorded.turns[0].callerText, "I want to book an appointment. for tomorrow at five.");
+    // The console REPLACES the half it showed under turn 1.
+    const shown = h.notified(SERVER.TRANSCRIPT);
+    assert.deepEqual(shown.map((n) => [n.turn, Boolean(n.replaces)]), [[1, false], [1, true]]);
+    assert.ok(h.recorded.events.some((e) => e.type === "turn.withdrawn"));
+    assert.ok(h.recorded.events.some((e) => e.type === "utterance.merged" && e.data.late));
+    assert.ok(!h.spoken.some((x) => /trouble answering/.test(x.text)), "no apology: nothing failed");
+  });
+
+  test("speech that comes too long after the first half is its own question", async () => {
+    const h = harness({
+      transcripts: ["What are your hours?", "Hello?"],
+      replies: [streams("We open at nine."), streams("Yes, I'm here.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(4000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].userMessage, "Hello?");
+    assert.equal(h.recorded.turns.length, 2);
+  });
+
+  test("once the agent has started speaking, carrying on is an interruption, not a merge", async () => {
+    const h = harness({
+      transcripts: ["I want to book an appointment.", "for tomorrow at five."],
+      replies: [streams("Of course. What day suits you? We are open all week."), streams("Tomorrow at five works.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(200); // the first sentence of the answer has been sent
+    h.hear({ type: "start" });
+    h.advance(300);
+    h.hear(utterance);
+    await h.settle();
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].userMessage, "for tomorrow at five.", "the second half is its own message");
+    assert.ok(!h.recorded.events.some((e) => e.type === "turn.withdrawn"));
+  });
+
+  test("if the rest turns out to be noise, the first half is still answered", async () => {
+    const h = harness({
+      transcripts: ["I want to book an appointment.", ""],
+      replies: [waitsUntilWithdrawn, streams("Of course.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(500);
+    h.hear({ type: "start" });
+    h.advance(600);
+    h.hear(utterance);
+    await h.settle();
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].userMessage, "I want to book an appointment.");
+    assert.equal(h.recorded.turns.length, 1);
+  });
+
+  test("'hold on, let me find my card': a fixed 'take your time', no brain call, and a much longer wait", async () => {
+    const h = harness({ transcripts: ["Hold on, let me find my card."] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 0, "nothing for the brain: the conversation history is untouched");
+    assert.ok(h.spoken.some((x) => /take your time/i.test(x.text)));
+    assert.equal(h.recorded.turns[0].intent, "hold");
+    assert.equal(h.recorded.turns[0].outcome, "conversational");
+    // No "are you still there?" after the usual 15 s…
+    await h.pump(SILENCE.checkInAfterMs + 10_000);
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.check_in"));
+    // …only after the longer hold window (60 s from the "take your time"; 25 s have passed).
+    await h.pump(SILENCE.hold.checkInAfterMs - 20_000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("Urdu and Roman Urdu 'one minute' are a hold too, answered in the agent's language", async () => {
+    for (const said of ["ایک منٹ رکیں", "aik minute ruko"]) {
+      const h = harness({ transcripts: [said], config: { replyLanguage: "ur" } });
+      await h.session.start();
+      await h.pump(3000);
+      h.hear({ type: "start" }, utterance);
+      await h.settle();
+      assert.equal(h.calls.length, 0, said);
+      assert.equal(h.recorded.turns[0].intent, "hold", said);
+      assert.ok(h.spoken.some((x) => x.language === "ur" && /آرام سے/.test(x.text)), said);
+    }
+  });
+
+  test("after the hold, the next real question goes to the brain as usual and patience is back to normal", async () => {
+    const h = harness({ transcripts: ["One moment please.", "OK, my card ends in 4421."], replies: [streams("Thank you.")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(20_000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].userMessage, "OK, my card ends in 4421.");
+    await h.pump(SILENCE.checkInAfterMs + 5000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"), "the normal 15 s check-in again");
+  });
+
+  test("'yes, I'm here' answers the check-in — a fixed reply, nothing for the brain", async () => {
+    const h = harness({ transcripts: ["Yes, I'm here."] });
+    await h.session.start();
+    await h.pump(SILENCE.checkInAfterMs + 4000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 0);
+    assert.equal(h.recorded.turns[0].intent, "presence");
+    assert.ok(h.spoken.some((x) => /go ahead/i.test(x.text)));
+  });
+
+  test("a plain 'yes' with no check-in is an answer to the conversation, and goes to the brain", async () => {
+    const h = harness({ transcripts: ["Do you do root canals?", "Yes."], replies: [streams("We do. Shall I take your details?"), streams("Great.")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(4000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].userMessage, "Yes.");
+  });
 });
