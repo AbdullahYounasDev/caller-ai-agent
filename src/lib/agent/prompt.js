@@ -432,7 +432,7 @@ export function buildVoiceGreeting(config) {
  * start of every slow turn is exactly what makes an agent sound like a machine. Every
  * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
  *
- * @param {"filler"|"fallback"} kind
+ * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"} kind
  * @param {"en"|"ur"} language
  * @param {number} [variant]  any integer; picks one of the phrasings
  * @returns {string}
@@ -476,6 +476,16 @@ export function voiceLine(kind, language, variant = 0) {
     silence_goodbye: {
       en: ["I can't hear you, so I'll end the call now. Thank you for calling, and please call again any time. Goodbye."],
       ur: ["آپ کی آواز نہیں آ رہی، اس لیے کال ختم کی جا رہی ہے۔ کال کرنے کا شکریہ، آپ جب چاہیں دوبارہ کال کریں۔ خدا حافظ۔"],
+    },
+    // The caller asked the agent to wait ("hold on", "ek minute"), and the reply when they answer
+    // "are you still there?" (voice/session.js onPause). Neither goes into the conversation.
+    take_your_time: {
+      en: ["Sure, take your time. I'm here.", "No problem, take your time."],
+      ur: ["جی، آرام سے، کوئی جلدی نہیں۔", "کوئی بات نہیں، آرام سے دیکھ لیجیے۔"],
+    },
+    listening: {
+      en: ["Great. Go ahead whenever you're ready.", "Okay, go ahead."],
+      ur: ["جی، آپ جب چاہیں بات کریں۔", "جی، بتائیے۔"],
     },
     closing: {
       en: ["Thank you for calling. Goodbye."],

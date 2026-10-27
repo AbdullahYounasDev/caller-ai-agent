@@ -38,7 +38,20 @@
  * comma (or ; : ، ) in the window, else before a STRONG joining word ("which", "because",
  * "according to", Urdu "کیونکہ"…), else before a weak one ("and", "or" — weak because they
  * often sit inside a noun phrase: "availability and support hours"), else at a space.
- * Never inside a word.
+ * Never inside a word — and, at a plain space, never right after a word that leads into the
+ * next one ("tell me about | your name", "the | price") or right before an Urdu postposition
+ * ("آپ | کا نام"): spoken as two pieces, that join is heard as the agent stopping mid-thought.
+ *
+ * Where a chunk ended decides the pause after it (chunkEnding → TTS in config.js): a full
+ * pause after a sentence, a short one at a comma, none at all between two pieces of one
+ * sentence.
+ *
+ * Tried and REJECTED (npm run voice:gaps, Kokoro): speaking whole sentences only when the
+ * machine is slow. It removes the waits inside sentences but piles them up between sentences —
+ * 2.5 s on average and up to 3.2 s with synthesis 2× slower (pieces: 0.5 s average inside a
+ * sentence), up to 4.2 s even at normal speed — and three seconds of silence also sounds like the
+ * agent has finished. A machine that makes speech slower than it plays cannot avoid gaps by
+ * chunking; the fixes are the fast voice or the speech server (§9.2).
  * ─────────────────────────────────────────────────────────────────────────
  *
  * Pure and dependency-free (tests/voice-units.test.mjs).
@@ -79,6 +92,42 @@ const STRONG_JOINER =
   / (?=(?:but|so|because|which|who|while|until|unless|whereas|although|according to|including|except|لیکن|مگر|کیونکہ|جو|جب|تاکہ|اگرچہ)\s)/giu;
 /** Words that MAY start a clause but often join two nouns — used only when nothing better exists. */
 const WEAK_JOINER = / (?=(?:and|or|that|اور|یا|کہ)\s)/giu;
+
+/**
+ * A chunk must not END on one of these: each leads into the word after it ("about | your name",
+ * "the | Pro plan", "can | help"). English, Urdu script and Roman Urdu.
+ */
+const LEADS_INTO = new Set(
+  (
+    "a an the my your our their his her its this that these those to of for with about from by in on at into onto as than " +
+    "and or but nor so if very more most less not no is are was were be been am will would can could shall should may might must " +
+    "do does did have has had i we they he she i'm i'd i'll you're we're it's please just also " +
+    "اور یا کہ جو اگر لیکن مگر بھی میرا میری میرے آپ ہم یہ وہ اس ان " +
+    "aur ya ke ki ka jo agar lekin magar bhi mera meri mere aap hum ye yeh woh is un"
+  ).split(" ")
+);
+
+/**
+ * A chunk must not START on one of these: Urdu postpositions and helpers attach to the word
+ * BEFORE them ("آپ کا", "نام سے", "کیا ہے") — a piece that opens with one sounds broken off.
+ */
+const ATTACHES_BACK = new Set(
+  ("کا کی کے کو سے میں پر نے تک ہی ہے ہیں تھا تھی تھے گا گی گے والا والی والے سکتے سکتی سکتا رہے رہی رہا " +
+    "ka ki ke ko se mein par ne tak hi hai hain tha thi the ga gi ge wala wali wale sakte sakti sakta rahe rahi raha").split(" ")
+);
+
+const bareWord = (word) => String(word ?? "").toLowerCase().replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, "");
+
+/** A number leads into what it counts ("two | visits", "149 | euros", "پانچ | ہزار"). */
+const NUMBER_WORD =
+  /^(?:\p{N}+(?:[.,]\p{N}+)*|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand|ایک|دو|تین|چار|پانچ|چھ|سات|آٹھ|نو|دس|سو|ہزار|ek|aik|do|teen|char|paanch|chay|saat|aath|das|sau|hazar)$/u;
+
+/** A plain space where a piece may end: not after a word that leads on, not before one that attaches back. */
+function goodSpace(text, at) {
+  const before = bareWord(text.slice(0, at).trimEnd().split(/\s+/).at(-1));
+  const after = bareWord(text.slice(at).trimStart().split(/\s+/)[0]);
+  return !LEADS_INTO.has(before) && !NUMBER_WORD.test(before) && !ATTACHES_BACK.has(after);
+}
 
 /** "Dr." or "e.g." — a single period after a known abbreviation. */
 function endsWithAbbreviation(text) {
@@ -122,8 +171,28 @@ function breakPoint(text, limit, commaLimit = limit) {
   if (strong > 0) return strong;
   const weak = lastMatch(WEAK_JOINER, limit, false);
   if (weak > 0) return weak;
+  // A plain space: the last good one in the window ("tell me about your name" breaks after
+  // "name", not after "about"), else — with nothing better — the last space at all.
+  for (let space = text.lastIndexOf(" ", limit); space >= MIN_CHUNK_CHARS; space = text.lastIndexOf(" ", space - 1)) {
+    if (goodSpace(text, space)) return space;
+  }
   const space = text.lastIndexOf(" ", limit);
   return space >= MIN_CHUNK_CHARS ? space : -1;
+}
+
+/**
+ * How a chunk ended — which decides the pause after it (TTS in config.js):
+ *   "sentence"  . ! ? … ۔ ؟ — a full pause
+ *   "comma"     , ; : ، — a short one
+ *   "joined"    cut between two words of one sentence — no pause at all: the next piece follows on
+ * @param {string} chunk
+ * @returns {"sentence"|"comma"|"joined"}
+ */
+export function chunkEnding(chunk) {
+  const text = String(chunk ?? "").trimEnd().replace(/["'”’)\]]+$/, "");
+  if (/[.!?…۔؟]$/.test(text)) return "sentence";
+  if (/[,;:،]$/.test(text)) return "comma";
+  return "joined";
 }
 
 /**
@@ -175,6 +244,10 @@ export class SentenceChunker {
 
       // A tiny FIRST sentence ("Sure!") waits for the next one and goes out with it,
       // when the pair fits — alone it is too short to cover the next chunk's synthesis.
+      // When the pair does NOT fit, "Sure!" goes out alone, on purpose. Taking the start of the
+      // next sentence with it was tried: no gap after it, but the first word came ~1.7 s later
+      // (measured through a real call session: first audio 2.1 s instead of ~0.5 s). The wait it
+      // saves falls BETWEEN two sentences, where a listener expects a pause, so speed wins.
       if (sentence && this.firstLength == null && sentence.end < MIN_CHUNK_CHARS) {
         const second = firstSentenceEnd(this.buffer.slice(sentence.next));
         if (!second) {

@@ -138,6 +138,33 @@ export const OPENERS = {
   ],
 };
 
+/** PAUSES — what a caller says about the call itself (see en.js PAUSES), in canonical spelling. */
+export const PAUSES = {
+  holdOn: [
+    "ek/aik minute/mint/second/sec/lamha",
+    "zara ek/aik minute/mint/second/sec/lamha",
+    "ruko/rukain/rukiye/rukein/rukien/rukye",
+    "zara ruko/rukain/rukiye/rukein",
+    "intezar karein/karen/karo/kijiye",
+    "main dekhta/dekhti hoon",
+    "main check karta/karti hoon",
+  ],
+  stillHere: [
+    "ji/jee",
+    "haan/han",
+    "ji haan/han",
+    "haan/han ji",
+    "main hoon",
+    "main yahin hoon",
+    "main line par hoon",
+    "hello",
+    "ji/jee hello",
+  ],
+};
+
+/** Question words (see en.js QUESTION_WORDS), in canonical spelling. */
+export const QUESTION_WORDS = ["kya", "kitna", "kitni", "kitne", "kab", "kahan", "kyun", "kaun", "kaise", "kaunsi"];
+
 /** Words with no meaning of their own in an opener (see en.js FILLER), in their canonical spelling. */
 export const FILLER = [
   "ji", "jee", "janab", "hello", "hi", "salam", "assalam", "asalam", "alaikum", "alaikum", "walaikum", "aoa",

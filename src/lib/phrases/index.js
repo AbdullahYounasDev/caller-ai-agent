@@ -28,7 +28,11 @@ import * as romanUr from "./roman-ur";
 export const OPENER_KINDS = /** @type {OpenerKind[]} */ (["identity", "about", "offerings", "help", "aiCheck"]);
 /** The groups about the BUSINESS, which the business-name search and the profile answer. */
 export const OVERVIEW_KINDS = new Set(["identity", "about", "offerings", "help"]);
-const LEFTOVER_ALLOWED = { identity: 0, about: 1, offerings: 1, help: 0, aiCheck: 0 };
+/** The groups of ./en.js PAUSES: what a caller says about the call itself (voice/session.js). */
+export const PAUSE_KINDS = ["holdOn", "stillHere"];
+const LEFTOVER_ALLOWED = { identity: 0, about: 1, offerings: 1, help: 0, aiCheck: 0, holdOn: 2, stillHere: 0 };
+/** A pause phrase is a short thing to say; a long message that contains "wait" is about something else. */
+const MAX_PAUSE_WORDS = 10;
 const MAX_WORDS = 24;
 const MAX_GAP = 3;
 
@@ -124,11 +128,16 @@ const LANGUAGES = [
   { id: "ur", tokens: tokensOf, canonicalise: identity, data: ur },
   { id: "roman-ur", tokens: romanTokens, canonicalise: (w) => ROMAN_VARIANT.get(w) ?? w, data: romanUr },
 ];
-for (const language of LANGUAGES) {
-  language.groups = OPENER_KINDS.map((kind) => ({
+const compileGroups = (language, set, kinds) =>
+  kinds.map((kind) => ({
     kind,
-    phrases: (language.data.OPENERS[kind] ?? []).map((phrase) => compile(phrase, language.canonicalise)),
+    source: language.data[set][kind] ?? [],
+    phrases: (language.data[set][kind] ?? []).map((phrase) => compile(phrase, language.canonicalise)),
   }));
+for (const language of LANGUAGES) {
+  language.groups = compileGroups(language, "OPENERS", OPENER_KINDS);
+  language.pauseGroups = compileGroups(language, "PAUSES", PAUSE_KINDS);
+  language.questionWords = new Set((language.data.QUESTION_WORDS ?? []).map((w) => language.canonicalise(normalizeText(w))));
   language.filler = new Set(language.data.FILLER.map((w) => language.canonicalise(normalizeText(w))));
 }
 
@@ -188,11 +197,33 @@ function matchAt(steps, tokens, start, nameTokens) {
  * @returns {{kind: OpenerKind, language: "en"|"ur"|"roman-ur", phrase: string} | null}
  */
 export function detectOpener(message, { businessName = "" } = {}) {
+  return findPhrase(message, { businessName, groupsOf: (language) => language.groups, maxWords: MAX_WORDS });
+}
+
+/**
+ * What the caller said about the CALL rather than the business: "hold on" (holdOn) or, in answer
+ * to "are you still there?", "yes, I'm here" (stillHere) — ./en.js PAUSES.
+ * @param {string} message
+ * @param {{kinds?: Array<"holdOn"|"stillHere">}} [options] which groups to look for (default: both)
+ * @returns {"holdOn"|"stillHere"|null}
+ */
+export function detectPause(message, { kinds = PAUSE_KINDS } = {}) {
+  // A question is never a request to hold, whatever else it says ("wait, how much is it?").
+  const asks = /[?؟]/.test(String(message ?? "")) || LANGUAGES.some((language) => language.tokens(message).some((w) => language.questionWords.has(w)));
+  if (asks) kinds = kinds.filter((k) => k !== "holdOn");
+  const found = findPhrase(message, {
+    groupsOf: (language) => language.pauseGroups.filter((g) => kinds.includes(g.kind)),
+    maxWords: MAX_PAUSE_WORDS,
+  });
+  return found?.kind ?? null;
+}
+
+function findPhrase(message, { businessName = "", groupsOf, maxWords }) {
   const text = String(message ?? "");
   if (!text.trim()) return null;
   for (const language of LANGUAGES) {
     const tokens = language.tokens(text);
-    if (!tokens.length || tokens.length > MAX_WORDS) continue;
+    if (!tokens.length || tokens.length > maxWords) continue;
     const nameTokens = language.tokens(businessName);
     // Words that are the business's name ("Pizza Roma", or just "Pizza") are never leftovers. Only
     // the name as it is said counts, not its words one by one: "your clinic software" is not
@@ -202,7 +233,7 @@ export function detectOpener(message, { businessName = "" } = {}) {
       const n = nameAt(tokens, i, nameTokens);
       for (let k = 0; k < n; k++) nameIdx.add(i + k);
     }
-    for (const group of language.groups) {
+    for (const group of groupsOf(language)) {
       for (let p = 0; p < group.phrases.length; p++) {
         const steps = group.phrases[p];
         for (let start = 0; start < tokens.length; start++) {
@@ -211,7 +242,7 @@ export function detectOpener(message, { businessName = "" } = {}) {
           const taken = new Set(used);
           const leftover = tokens.filter((w, i) => !taken.has(i) && !language.filler.has(w) && !nameIdx.has(i) && !/^\d+$/.test(w) && w.length > 1);
           if (leftover.length <= LEFTOVER_ALLOWED[group.kind]) {
-            return { kind: group.kind, language: language.id, phrase: language.data.OPENERS[group.kind][p] };
+            return { kind: group.kind, language: language.id, phrase: group.source[p] };
           }
         }
       }

@@ -196,7 +196,15 @@ export function useVoiceCall({ tenantId, agentId = null, dialNumber = null, uiLo
           call.player.clear();
           break;
         case SERVER.TRANSCRIPT:
-          setTranscript((t) => [...t, { role: "caller", turn: message.turn, text: message.text, sttMs: message.sttMs }]);
+          // `replaces`: the caller carried on after a pause and the two halves became one message
+          // (session.js) — the half already shown under this turn is replaced, not repeated.
+          setTranscript((t) => {
+            const entry = { role: "caller", turn: message.turn, text: message.text, sttMs: message.sttMs };
+            if (message.replaces && t.some((x) => x.role === "caller" && x.turn === message.turn)) {
+              return t.map((x) => (x.role === "caller" && x.turn === message.turn ? entry : x));
+            }
+            return [...t, entry];
+          });
           break;
         case SERVER.AGENT_TEXT:
           setTranscript((t) => appendAgentText(t, message.turn, message.text));

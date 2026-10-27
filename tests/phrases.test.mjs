@@ -1,7 +1,7 @@
 import "./helpers/no-db.mjs";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { detectOpener, isOverviewQuestion, mentionsNotice, normalizeText, OPENER_KINDS } from "@/lib/phrases";
+import { detectOpener, detectPause, isOverviewQuestion, mentionsNotice, normalizeText, OPENER_KINDS, PAUSE_KINDS } from "@/lib/phrases";
 import * as en from "@/lib/phrases/en";
 import * as ur from "@/lib/phrases/ur";
 import * as romanUr from "@/lib/phrases/roman-ur";
@@ -20,6 +20,8 @@ describe("the word files", () => {
   test("every language file has every group, a filler list and the two notice lists", () => {
     for (const file of [en, ur, romanUr]) {
       for (const k of OPENER_KINDS) assert.ok(file.OPENERS[k]?.length > 0, k);
+      for (const k of PAUSE_KINDS) assert.ok(file.PAUSES[k]?.length > 0, k);
+      assert.ok(file.QUESTION_WORDS.length > 3);
       assert.ok(file.FILLER.length > 10);
       assert.ok(file.NOTICE_WORDS.ai.length > 0 && file.NOTICE_WORDS.recording.length > 0);
     }
@@ -27,7 +29,7 @@ describe("the word files", () => {
 
   test("no alternative holds a space — a space separates WORDS of a phrase, so 'real person' inside a/b/c would silently break it", () => {
     for (const file of [en, ur, romanUr]) {
-      for (const phrases of Object.values(file.OPENERS)) {
+      for (const phrases of [...Object.values(file.OPENERS), ...Object.values(file.PAUSES)]) {
         for (const phrase of phrases) {
           for (const word of phrase.split(/\s+/)) assert.ok(!word.startsWith("/") && !word.endsWith("/"), `"${phrase}"`);
         }
@@ -206,5 +208,29 @@ describe("what the brain does with an opener", () => {
       assert.equal(isProfileQuestion(message), true, message);
     }
     assert.equal(isProfileQuestion("do you sell bicycles"), false);
+  });
+});
+
+describe("pauses: what a caller says about the call itself", () => {
+  test("asking the agent to wait — English, Urdu, Roman Urdu", () => {
+    for (const said of ["Hold on.", "hang on, let me find my card", "one sec", "can you hold on a moment please", "just a minute", "ایک منٹ", "ذرا رکیں", "ایک منٹ رکیں", "ek minute", "aik minute ruko", "zara ruko"]) {
+      assert.equal(detectPause(said), "holdOn", said);
+    }
+  });
+
+  test("a question is never a request to wait, even with 'wait' or 'one minute' in it", () => {
+    for (const said of ["wait, what's the price for kids?", "wait how much is it", "one minute, kya aap Sunday ko khule hain?", "oh wait, one more thing", "What are your hours?", "Wait."]) {
+      assert.notEqual(detectPause(said), "holdOn", said);
+    }
+  });
+
+  test("answering 'are you still there?' — only looked for when the agent has asked it", () => {
+    for (const said of ["yes", "Yes, I'm here.", "I'm still here", "hello?", "جی", "جی ہاں", "ji haan", "haan ji main hoon"]) {
+      assert.equal(detectPause(said, { kinds: ["stillHere"] }), "stillHere", said);
+      assert.equal(detectPause(said, { kinds: ["holdOn"] }), null, `${said} is not a hold`);
+    }
+    for (const said of ["yes I want to book", "yes, how much is the Pro plan"]) {
+      assert.equal(detectPause(said, { kinds: ["stillHere"] }), null, said);
+    }
   });
 });

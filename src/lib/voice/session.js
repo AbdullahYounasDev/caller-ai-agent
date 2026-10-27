@@ -1,13 +1,14 @@
 import { createSerialQueue } from "./serial";
-import { SentenceChunker } from "./sentences";
+import { SentenceChunker, chunkEnding } from "./sentences";
 import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, INTENTS, OUTCOMES } from "./intent";
 import { median } from "./recorder";
-import { BARGE_IN, CLOSING, CONTINUATION, FILLER, LIMITS, SILENCE, UNHEARD, VAD } from "./config";
+import { BARGE_IN, CLOSING, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
+import { detectPause } from "@/lib/phrases";
 import { buildVoiceGreeting, voiceLine } from "@/lib/agent/prompt";
 
 /** Allowance for the client's audio buffering and network jitter when estimating when
@@ -104,6 +105,23 @@ export class CallSession {
     this.silenceStage = 0;
     // Speech the recogniser could not read, in a row (voice/config.js UNHEARD).
     this.unheardRun = 0;
+    // The turn being worked on right now (from its transcription until its reply is sent), so a
+    // caller who carries on talking before hearing anything can withdraw it (onUtterance).
+    this.inflight = null;
+    // What a withdrawn turn had heard: the next turn answers it together with what follows.
+    this.carryOver = null;
+    // When the caller last started speaking — how soon after the previous utterance they carried on.
+    this.lastSpeechStartedAt = null;
+    // The agent asked "are you still there?" and the caller has not said anything real since: a
+    // plain "yes, I'm here" now answers THAT, not the conversation.
+    this.checkInAsked = false;
+    // "normal", or "hold" after the caller asked the agent to wait: the silence check-in waits longer.
+    this.patience = "normal";
+    // How much slower than real time this machine is making speech on this call (synthesis time ÷
+    // audio time, a running average). Past TTS.slowRatio gaps cannot be avoided by chunking — the
+    // call logs it once (`tts.slow`) so a slow machine is visible, not guessed at.
+    this.ttsRatio = null;
+    this.reportedSlow = false;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -267,6 +285,7 @@ export class CallSession {
     for (const event of events) {
       if (event.type === "start") {
         this.bargedThisSpeech = false;
+        this.lastSpeechStartedAt = this.now();
         this.armIdleTimer();
         this.log("speech.started");
         // Someone is talking: a call that was winding down is not over, and a silence check-in is answered.
@@ -309,14 +328,53 @@ export class CallSession {
     this.armIdleTimer();
     // The previous half of a sentence is waiting for more: this IS the rest of it.
     if (this.holding) return this.holding.deliver({ samples, durationMs, speechEndedAt });
+    // The caller carried on soon after a pause and has not heard a word of the answer yet: the
+    // turn in flight is withdrawn and both halves are answered as ONE message (answerUtterance).
+    // Once the agent has spoken it is an ordinary interruption instead (bargeIn).
+    const inflight = this.inflight;
+    if (
+      inflight &&
+      !inflight.superseded &&
+      !inflight.audioSent &&
+      this.lastSpeechStartedAt != null &&
+      this.lastSpeechStartedAt - inflight.speechEndedAt <= CONTINUATION.lateMergeWithinMs
+    ) {
+      inflight.superseded = true;
+      inflight.controller.abort();
+      if (inflight.turn) {
+        inflight.turn.cancelled = true;
+        // If the brain finishes anyway, its reply is removed from the history (nothing was heard).
+        inflight.turn.interrupted = true;
+      }
+      this.log("turn.withdrawn", { turn: inflight.turn?.index ?? null, afterMs: Math.round(this.lastSpeechStartedAt - inflight.speechEndedAt) });
+    }
     // Turns run strictly one after another: the brain persists each user/assistant pair
     // in order, and a reply must never be spoken over the next question's reply.
     this.turnQueue(() => this.runTurn({ samples, durationMs, speechEndedAt }));
   }
 
-  async runTurn({ samples, durationMs, speechEndedAt }) {
+  async runTurn(utterance) {
+    const inflight = { controller: new AbortController(), superseded: false, audioSent: false, speechEndedAt: utterance.speechEndedAt, turn: null };
+    this.inflight = inflight;
+    try {
+      await this.answerUtterance(utterance, inflight);
+    } finally {
+      if (this.inflight === inflight) this.inflight = null;
+    }
+  }
+
+  /** What a turn withdrawn before it was heard had understood; taken once. */
+  takeCarryOver() {
+    const carry = this.carryOver;
+    this.carryOver = null;
+    return carry;
+  }
+
+  async answerUtterance({ samples, durationMs, speechEndedAt }, inflight) {
     if (this.ended) return;
     this.setState(CALL_STATES.THINKING);
+    // The first half of this sentence, from a turn the caller carried on past (onUtterance).
+    const carry = this.takeCarryOver();
 
     let transcript;
     try {
@@ -324,16 +382,28 @@ export class CallSession {
     } catch (err) {
       console.error("[voice] STT failed:", err);
       this.log("stt.failed", { message: String(err?.message ?? err).slice(0, 200) });
-      this.settleState();
-      return;
+      if (!carry) {
+        this.settleState();
+        return;
+      }
+      transcript = { text: "", ms: 0 };
     }
     if (!this.isSpeech(transcript.text)) {
-      this.log("stt.empty", { ms: transcript.ms, durationMs });
-      // A short blip is noise (a cough, a click): not a turn, nothing answered. But a caller who
-      // really spoke and was not understood must not be met with silence.
-      if (durationMs >= UNHEARD.minSpeechMs && !this.ended) await this.onUnheard(durationMs);
-      else this.settleState();
-      return;
+      if (!carry) {
+        this.log("stt.empty", { ms: transcript.ms, durationMs });
+        // A short blip is noise (a cough, a click): not a turn, nothing answered. But a caller who
+        // really spoke and was not understood must not be met with silence.
+        if (durationMs >= UNHEARD.minSpeechMs && !this.ended) await this.onUnheard(durationMs);
+        else this.settleState();
+        return;
+      }
+      // The rest was noise: the first half is still a question waiting for its answer.
+      transcript = { ...transcript, text: "" };
+    }
+    if (carry) {
+      this.log("utterance.merged", { first: carry.text.slice(0, 80), second: transcript.text.slice(0, 80), late: true });
+      transcript = { ...carry.transcript, text: `${carry.text} ${transcript.text}`.trim(), ms: carry.transcript.ms + transcript.ms };
+      durationMs += carry.durationMs;
     }
     this.unheardRun = 0;
     if (this.ended) return;
@@ -365,8 +435,29 @@ export class CallSession {
     if (cleaned.collapsed) this.log("stt.deduped", { before: transcript.text.slice(0, 120), after: cleaned.text.slice(0, 120) });
     const text = cleaned.text;
 
-    const index = ++this.turnIndex;
+    // Withdrawn while it was being transcribed: hand what it heard to the next turn.
+    if (inflight.superseded) {
+      this.carryOver = { text, transcript, durationMs, index: carry?.index ?? null };
+      return;
+    }
+
+    // Something said about the CALL, not the business: "hold on, let me find my card", or "yes, I'm
+    // here" right after "are you still there?". Answered with a fixed line and never sent to the
+    // brain — so it never enters the conversation, and the next real question follows straight on
+    // from the exchange before the pause (the model's memory of it is not interrupted).
+    const pause = carry ? null : detectPause(text, { kinds: this.checkInAsked ? ["holdOn", "stillHere"] : ["holdOn"] });
+    if (pause) {
+      await this.onPause(pause, { text, transcript, durationMs, speechEndedAt });
+      return;
+    }
+    this.checkInAsked = false;
+    this.patience = "normal";
+
+    // A merged sentence keeps the turn number its first half was shown under, so the live
+    // transcript REPLACES that half instead of showing it twice.
+    const index = carry?.index ?? ++this.turnIndex;
     const turn = this.newTurn(index);
+    inflight.turn = turn;
     turn.speechEndedAt = speechEndedAt;
     this.currentTurn = turn;
     this.log("stt.completed", {
@@ -381,7 +472,7 @@ export class CallSession {
       // Names the recogniser misheard and vocabulary.js put right ("Nairan→Nyron").
       corrected: transcript.corrections,
     });
-    this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms });
+    this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms, ...(carry?.index != null ? { replaces: true } : {}) });
 
     const filler = this.scheduleFiller(turn);
     const chunker = new SentenceChunker();
@@ -399,6 +490,7 @@ export class CallSession {
         conversationId: this.recorder.conversationId,
         channel: "voice",
         userMessage: text,
+        signal: inflight.controller.signal,
         onChunk: (delta) => chunker.push(delta).forEach(say),
         onStage: (stage, data) => {
           if (stage === "retrieved") {
@@ -421,6 +513,16 @@ export class CallSession {
       });
       chunker.flush().forEach(say);
     } catch (err) {
+      // Withdrawn (the caller carried on — onUtterance): the brain has put back everything the turn
+      // wrote, and the next turn answers this text together with what the caller added. Nothing was
+      // heard, nothing is recorded.
+      if (err?.name === "TurnSupersededError") {
+        this.clearTimer(filler);
+        turn.cancelled = true;
+        this.carryOver = { text, transcript, durationMs, index };
+        if (this.currentTurn === turn) this.currentTurn = null;
+        return;
+      }
       error = String(err?.message ?? err).slice(0, 500);
       console.error(`[voice] turn ${index} failed:`, err);
       this.log("turn.failed", { turn: index, message: error.slice(0, 200) });
@@ -463,6 +565,9 @@ export class CallSession {
       llmMs: result?.timings?.generationMs ?? null,
       ttsFirstAudioMs: turn.firstAudioSynthMs,
       responseMs,
+      // Silences heard between pieces of the reply: how many, and the longest (§6.24).
+      gapCount: turn.gaps.length,
+      maxGapMs: turn.gaps.length ? Math.max(...turn.gaps) : 0,
     };
     const summary = {
       index,
@@ -514,6 +619,40 @@ export class CallSession {
     if (!error && classification.intent === INTENTS.GOODBYE && this.isShortGoodbye(text) && !this.requestOpen(result)) {
       this.scheduleClosing();
     }
+  }
+
+  /**
+   * The caller asked the agent to wait ("hold on", "ek minute") or answered the silence check-in
+   * ("yes, I'm here"). A fixed line, logged as its own turn, and nothing for the brain: the
+   * conversation history stays exactly as it was before the pause. After "hold on" the silence
+   * check-in waits longer (SILENCE.hold) — someone fetching a card or a diary is not gone.
+   *
+   * @param {"holdOn"|"stillHere"} kind
+   */
+  async onPause(kind, { text, transcript, durationMs, speechEndedAt }) {
+    const index = ++this.turnIndex;
+    const language = this.lastLanguage ?? (this.config.replyLanguage === "ur" ? "ur" : "en");
+    const line = voiceLine(kind === "holdOn" ? "take_your_time" : "listening", language, index);
+    this.checkInAsked = false;
+    if (kind === "holdOn") this.patience = "hold";
+    this.log(kind === "holdOn" ? "caller.hold" : "silence.answered", { turn: index });
+    this.transport.notify(SERVER.TRANSCRIPT, { turn: index, text, sttMs: transcript.ms });
+    await this.speakFixed(line, language);
+    const responseMs = Math.round(this.now() - speechEndedAt);
+    const intent = kind === "holdOn" ? INTENTS.HOLD : INTENTS.PRESENCE;
+    this.recorder.turn({
+      index,
+      callerText: text,
+      agentText: line,
+      language,
+      intent,
+      outcome: OUTCOMES.CONVERSATIONAL,
+      sources: [],
+      responseMs,
+      timings: { speechMs: durationMs, sttMs: transcript.ms, responseMs },
+    });
+    this.transport.notify(SERVER.TURN, { turn: index, intent, outcome: OUTCOMES.CONVERSATIONAL, topic: null, sources: [], timings: { responseMs }, interrupted: false, failed: false });
+    this.settleState();
   }
 
   /** @returns {boolean} a short message (not a long sentence that merely contains "that's all") */
@@ -672,7 +811,25 @@ export class CallSession {
       speechEndedAt: null,
       firstAudioAt: null,
       firstAudioSynthMs: null,
+      // Silences the caller heard between pieces of this reply (ms), see speak().
+      gaps: [],
     };
+  }
+
+  /**
+   * Keep a running measure of how fast speech is being made on this call. Past TTS.slowRatio the
+   * pieces of a reply cannot all be ready in time, whatever the chunking (sentences.js says what
+   * was tried): logged once per call (`tts.slow`), so the call's timeline says WHY it had gaps.
+   * Cached lines say nothing about the machine's speed and are ignored.
+   */
+  noteSynthesisSpeed(audio) {
+    if (audio.cached || !audio.speechMs || audio.ms == null) return;
+    const ratio = audio.ms / audio.speechMs;
+    this.ttsRatio = this.ttsRatio == null ? ratio : 0.6 * this.ttsRatio + 0.4 * ratio;
+    if (!this.reportedSlow && this.ttsRatio > TTS.slowRatio) {
+      this.reportedSlow = true;
+      this.log("tts.slow", { ratio: Math.round(this.ttsRatio * 100) / 100 });
+    }
   }
 
   /**
@@ -687,9 +844,14 @@ export class CallSession {
       previous: turn.language ?? this.lastLanguage,
     });
 
+    // The pause after this piece is the one its JOIN needs: none between two pieces of one
+    // sentence, a short one at a comma, a breath after a sentence (TTS in config.js).
+    const ending = chunkEnding(sentence);
+    const pauseMs = ending === "joined" ? TTS.joinPauseMs : ending === "comma" ? TTS.commaPauseMs : TTS.sentencePauseMs;
+
     let audio;
     try {
-      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache });
+      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache, pauseMs });
     } catch (err) {
       console.error("[voice] TTS failed:", err);
       this.log("tts.failed", { turn: turn.index, message: String(err?.message ?? err).slice(0, 200) });
@@ -697,6 +859,19 @@ export class CallSession {
     }
     // Interrupted while this sentence was being synthesised: it is never sent.
     if (turn.cancelled || this.ended) return;
+    this.noteSynthesisSpeed(audio);
+
+    // A GAP the caller hears: the previous piece of this reply finished playing before this one
+    // was ready. Logged with where it fell — inside a sentence is the one that sounds like the
+    // agent has finished talking.
+    if (turn.spoken.length > 0 && this.audioPlaysUntil != null) {
+      const gapMs = Math.round(this.now() - this.audioPlaysUntil);
+      if (gapMs >= TTS.gapLogMs) {
+        const after = chunkEnding(turn.spoken[turn.spoken.length - 1]);
+        turn.gaps.push(gapMs);
+        this.log("tts.gap", { turn: turn.index, ms: gapMs, piece: turn.spoken.length + 1, inSentence: after !== "sentence" });
+      }
+    }
 
     if (turn.firstAudioAt == null) {
       turn.firstAudioAt = this.now();
@@ -711,6 +886,7 @@ export class CallSession {
     }
     turn.language ??= lang;
     this.lastLanguage = lang;
+    if (this.inflight?.turn === turn) this.inflight.audioSent = true;
     turn.spoken.push(sentence);
     this.sendAudio(audio);
     if (turn.index > 0) this.transport.notify(SERVER.AGENT_TEXT, { turn: turn.index, text: sentence });
@@ -822,7 +998,8 @@ export class CallSession {
     if (this.ended) return;
     this.clearTimer(this.timers.idle);
     this.silenceStage = 0;
-    this.timers.idle = this.setTimer(() => this.onSilence(), SILENCE.checkInAfterMs);
+    const wait = this.patience === "hold" ? SILENCE.hold.checkInAfterMs : SILENCE.checkInAfterMs;
+    this.timers.idle = this.setTimer(() => this.onSilence(), wait);
   }
 
   async onSilence() {
@@ -833,11 +1010,13 @@ export class CallSession {
 
     if (this.silenceStage === 0) {
       this.silenceStage = 1;
+      this.checkInAsked = true;
       this.log("silence.check_in");
       await this.speakFixed(voiceLine("still_there", language), language);
       if (this.ended) return;
       // The window to answer starts when the question has been heard.
-      const window = Math.max(0, (this.audioPlaysUntil ?? 0) - this.now()) + SILENCE.endAfterCheckInMs;
+      const answerWithin = this.patience === "hold" ? SILENCE.hold.endAfterCheckInMs : SILENCE.endAfterCheckInMs;
+      const window = Math.max(0, (this.audioPlaysUntil ?? 0) - this.now()) + answerWithin;
       this.timers.idle = this.setTimer(() => this.onSilence(), window);
       return;
     }

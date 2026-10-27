@@ -455,7 +455,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 594, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 619, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -474,6 +474,9 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
   the owner's text leaves them out.
 - Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are
   recognised by word lists per language (`src/lib/phrases/`) and searched with the business's name.
+- Voice pauses: a sentence cut by a pause is answered as one message; "hold on" / "ek minute" gets a longer wait;
+  pause talk ("are you still there?" / "yes") never enters the conversation; no long silences inside the agent's
+  own sentences (measured with `npm run voice:gaps`).
 
 **To do on my side:**
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
@@ -481,7 +484,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 3. Usage events (B8) once the shape is agreed.
 4. Twilio webhook + transport (B11) on top of the built lookup, recording calls when `recordCalls` is on (the greeting's
    disclosure wording is done).
-5. Fix: an utterance cut by a pause arrives as two turns; agent memory after a long pause.
+5. Listen to real calls on a real laptop after the pause and speech-gap fixes (measured here with real voices,
+   not yet heard on a live call).
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.
 7. Later: speech models on a server and a paid LLM key (infrastructure, not code).
 

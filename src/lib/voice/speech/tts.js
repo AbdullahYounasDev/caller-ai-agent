@@ -2,6 +2,7 @@ import { createSerialQueue } from "../serial";
 import { TTS } from "../config";
 import { getVoice, voiceFor } from "./voices";
 import { engineKeyFor } from "./engine";
+import { trimSilence, withTrailingSilence } from "../audio";
 
 /**
  * ███ THE TEXT-TO-SPEECH SEAM ███
@@ -12,15 +13,21 @@ import { engineKeyFor } from "./engine";
  * VOICE_TTS_PROVIDER: "local" (default — Kokoro and Piper via sherpa-onnx, on this
  * machine; voices.js lists every voice and which engine speaks it).
  *
- * One sentence per call: the session already cuts the streamed reply into sentences
- * (sentences.js) and pipelines them — sentence N+1 is synthesised while sentence N
- * plays — so a per-sentence API is all the streaming this needs. Each sentence ends
- * with TTS.sentencePauseMs of silence: sentences synthesised separately and played
- * back to back otherwise run into each other, which is a large part of what makes a
- * TTS voice sound rushed and mechanical.
+ * One piece per call: the session already cuts the streamed reply into pieces
+ * (sentences.js) and pipelines them — piece N+1 is synthesised while piece N plays — so a
+ * per-piece API is all the streaming this needs.
+ *
+ * THE SILENCE AT EACH JOIN IS DECIDED HERE, not left to the engine. Every engine starts and
+ * ends what it speaks with its own quiet (measured: Kokoro 50–100 ms before and 70–90 ms after
+ * every piece, Piper up to 190 ms after), and every piece used to get 160 ms more on top — so a
+ * sentence cut in two had ~300 ms of dead air in the middle before any synthesis delay, heard as
+ * the agent stopping mid-thought. Now the engine's quiet is trimmed (audio.js trimSilence, a
+ * little kept so soft sounds are not clipped) and the caller passes the pause the JOIN needs
+ * (`pauseMs`, from sentences.js chunkEnding): a full one after a sentence, a short one at a
+ * comma, none between two pieces of one sentence.
  *
  * @typedef {{
- *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"ur"}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string}>,
+ *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"ur", cache?: boolean, pauseMs?: number}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string, speechMs: number}>,
  *   prepare(voiceIds: string[]): Promise<void>,
  * }} TextToSpeech
  */
@@ -62,17 +69,22 @@ function localTextToSpeech(engine) {
   // Bounded LRU: a few dozen businesses × a handful of lines each.
   const cache = new Map();
 
-  async function synthesizeNow(voice, text) {
+  async function synthesizeNow(voice, text, pauseMs) {
     const key = engineKeyFor(voice);
     const tts = await engine.ttsEngine(key);
     return queueFor(key)(async () => {
       const started = performance.now();
       const audio = await tts.generateAsync({ text, sid: voice.speaker, speed: TTS.speed });
+      const ms = Math.round(performance.now() - started);
+      const spoken = TTS.trim ? trimSilence(audio.samples, audio.sampleRate, TTS.trim).samples : audio.samples;
       return {
-        samples: withTrailingSilence(audio.samples, audio.sampleRate, TTS.sentencePauseMs),
+        samples: withTrailingSilence(spoken, audio.sampleRate, pauseMs),
         sampleRate: audio.sampleRate,
-        ms: Math.round(performance.now() - started),
+        ms,
         voiceId: voice.id,
+        // How long the engine's own audio was: synthesis time ÷ this is how much slower than real
+        // time this machine is speaking right now (session.js watches it).
+        speechMs: Math.round((audio.samples.length / audio.sampleRate) * 1000),
       };
     });
   }
@@ -82,16 +94,19 @@ function localTextToSpeech(engine) {
       await Promise.all(voiceIds.map((id) => engine.ttsEngine(engineKeyFor(resolve(id)))));
     },
 
-    /** @param {{text: string, voiceId?: string, language?: string, cache?: boolean}} args */
-    async synthesize({ text, voiceId, language, cache: cacheable = false }) {
+    /**
+     * @param {{text: string, voiceId?: string, language?: string, cache?: boolean, pauseMs?: number}} args
+     *   pauseMs: silence after the piece — the pause its JOIN needs (default: a sentence's)
+     */
+    async synthesize({ text, voiceId, language, cache: cacheable = false, pauseMs = TTS.sentencePauseMs }) {
       const voice = resolve(voiceId, language);
-      if (!cacheable) return synthesizeNow(voice, text);
+      if (!cacheable) return synthesizeNow(voice, text, pauseMs);
 
-      const key = `${voice.id}\u0000${text}`;
+      const key = `${voice.id}\u0000${pauseMs}\u0000${text}`;
       const started = performance.now();
       const created = !cache.has(key);
       if (created) {
-        const pending = synthesizeNow(voice, text);
+        const pending = synthesizeNow(voice, text, pauseMs);
         cache.set(key, pending);
         pending.catch(() => cache.delete(key));
         if (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value);
@@ -110,11 +125,3 @@ function localTextToSpeech(engine) {
 }
 
 const CACHE_ENTRIES = 256;
-
-function withTrailingSilence(samples, sampleRate, ms) {
-  const pad = Math.round((sampleRate * ms) / 1000);
-  if (!pad) return samples;
-  const out = new Float32Array(samples.length + pad);
-  out.set(samples);
-  return out;
-}

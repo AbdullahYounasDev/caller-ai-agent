@@ -9,6 +9,7 @@
     "voice": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-gateway.mjs",
     "voice:models": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-models.mjs",
     "voice:smoke": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-smoke.mjs",
+    "voice:gaps": "node --no-warnings --import ./scripts/alias-register.mjs scripts/voice-gaps.mjs",
     "lint": "eslint",
     "db:up": "docker compose up -d",
     "db:down": "docker compose down",

@@ -325,6 +325,55 @@ r = await say(A, hc10, "doctor sahib se milwa dein");
 ok(!/\[\[/.test(r.streamed) && (await draftOf(hc10))?.type === "appointment", "a real code mid-reply still starts the request, and is still never shown");
 stub.state.reply = (n) => `Reply ${n}.`;
 
+// ── a turn withdrawn before it is heard puts everything back (voice: the caller carried on) ──
+{
+  const { TurnSupersededError } = await import("@/lib/agent/respond");
+  const withdraw = async (conversationId, userMessage, when) => {
+    const controller = new AbortController();
+    if (when === "before") controller.abort();
+    try {
+      await respond({
+        tenantId: A,
+        conversationId,
+        channel: "voice",
+        userMessage,
+        signal: controller.signal,
+        // "mid-stream": withdrawn as soon as the model has started speaking.
+        onChunk: () => when === "mid-stream" && controller.abort(),
+      });
+      return null;
+    } catch (err) {
+      return err;
+    }
+  };
+  for (const when of ["before", "mid-stream"]) {
+    const cw = await newConversation(A, "voice");
+    stub.state.reply = "Of course. May I have your name?";
+    const err = await withdraw(cw, "I'd like to book an appointment", when);
+    ok(err instanceof TurnSupersededError, `withdrawn ${when}: the turn ends with TurnSupersededError`);
+    ok((await prisma.message.count({ where: { conversationId: cw } })) === 0, `withdrawn ${when}: the caller's message is removed — it is about to be sent again, whole`);
+    ok((await draftOf(cw)) === null, `withdrawn ${when}: the request it started is put back (no draft)`);
+    // The whole sentence, sent again as one message, is an ordinary turn.
+    const again = await say(A, cw, "I'd like to book an appointment for a root canal", { channel: "voice" });
+    const stored = await prisma.message.findMany({ where: { conversationId: cw }, orderBy: { createdAt: "asc" }, select: { role: true, content: true } });
+    ok(stored.length === 2 && stored[0].content === "I'd like to book an appointment for a root canal", `withdrawn ${when}: the merged sentence is stored once, as ONE message`);
+    ok(again.result.collection?.state === "ask" && (await draftOf(cw))?.type === "appointment", `withdrawn ${when}: and it starts the request as usual`);
+  }
+  // A draft that existed BEFORE the withdrawn turn is restored exactly, not wiped.
+  const cd = await newConversation(A, "voice");
+  stub.state.reply = (n) => `Reply ${n}.`;
+  await say(A, cd, "I'd like to book an appointment", { channel: "voice" });
+  const before = await draftOf(cd);
+  await withdraw(cd, "my name is Sara", "mid-stream");
+  ok(JSON.stringify(await draftOf(cd)) === JSON.stringify(before), "a withdrawn answer leaves the open request exactly as it was");
+  ok((await prisma.message.count({ where: { conversationId: cd } })) === 2, "…and only the earlier exchange in the history");
+  // Not withdrawn: an unused signal changes nothing.
+  const cn = await newConversation(A, "voice");
+  const plain = await respond({ tenantId: A, conversationId: cn, channel: "voice", userMessage: "What are your hours?", signal: new AbortController().signal });
+  ok(typeof plain.reply === "string" && (await prisma.message.count({ where: { conversationId: cn } })) === 2, "a signal that is never used changes nothing");
+}
+stub.state.reply = (n) => `Reply ${n}.`;
+
 await wipe();
 await prisma.agentConfig.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
 await prisma.message.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
