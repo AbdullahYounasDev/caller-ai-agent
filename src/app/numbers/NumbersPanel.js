@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 /**
  * PHONE NUMBERS — the console's "Numbers" tab (CLAUDE.md §6.29).
@@ -9,6 +9,9 @@ import { useState } from "react";
  * it to another agent, rename it or release it. Buying numbers is the backend's (handoff B11):
  * this screen stands in for its dashboard, over the stand-in store (/api/numbers), so the routing
  * can be tried end to end today — "Try the lookup" runs exactly what a real call will.
+ *
+ * A small box at the top says whether the PHONE side is set up in this deployment (Twilio, CLAUDE.md
+ * §6.30) and shows the address a Twilio number's "A call comes in" webhook must point at.
  *
  * Every word comes from the translations; the server re-checks every rule and its refusals are
  * shown as they come back.
@@ -26,6 +29,19 @@ export function NumbersPanel({ tenantId, uiLocale, numbers, agents, onChanged, t
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState(null);
   const [lookup, setLookup] = useState({ to: "", result: null });
+  const [phone, setPhone] = useState(null);
+
+  // Names of what is missing, never a secret's value (GET /api/telephony/twilio/setup).
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/telephony/twilio/setup")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => !cancelled && setPhone(data))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const base = `tenantId=${encodeURIComponent(tenantId)}&locale=${uiLocale}`;
   // Only agents that can answer may be linked; an unsaved default (no id) cannot be either.
@@ -75,6 +91,21 @@ export function NumbersPanel({ tenantId, uiLocale, numbers, agents, onChanged, t
         <h2 className="font-medium">{t("dashboard:numbers.title")}</h2>
         <p className={helpClass}>{t("dashboard:numbers.help")}</p>
       </div>
+
+      {phone && (
+        <div className={`rounded border px-3 py-2 text-xs ${phone.ready ? "border-green-200 bg-green-50 text-green-900" : "border-amber-200 bg-amber-50 text-amber-900"}`} data-testid="phone-setup">
+          <p className="font-medium">{t(phone.ready ? "dashboard:numbers.phone.ready" : "dashboard:numbers.phone.notReady")}</p>
+          {phone.ready ? (
+            <>
+              <p>{t("dashboard:numbers.phone.webhook")}</p>
+              <code className="block break-all rounded bg-white px-2 py-1" dir="ltr">{phone.voiceWebhookUrl}</code>
+              {!phone.transfers && <p className="mt-1">{t("dashboard:numbers.phone.noTransfers")}</p>}
+            </>
+          ) : (
+            <p>{t("dashboard:numbers.phone.missing", { vars: { names: phone.missing.join(", ") } })}</p>
+          )}
+        </div>
+      )}
 
       {numbers.length === 0 ? (
         <p className="text-sm text-gray-400">{t("dashboard:numbers.empty")}</p>

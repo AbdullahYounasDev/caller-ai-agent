@@ -558,3 +558,67 @@ test("on a call the model is told its customer's words are a transcript; chat is
   assert.doesNotMatch(buildSystemInstruction({ config, channel: "chat" }), /HEARING:/);
   assert.match(buildSystemInstruction({ config: { ...config, businessName: "this business" }, channel: "voice" }), /business's name or like/);
 });
+
+// ── the phone edge (CLAUDE.md §6.24, §6.30): G.711 μ-law and 8 kHz ⇄ 16 kHz ─────────────────────────
+import { mulawToFloat32, float32ToMulaw, resample, createUpsampler2 } from "@/lib/voice/audio";
+
+describe("phone audio: μ-law", () => {
+  const tone = (hz, rate, seconds = 1, amplitude = 0.5) => Float32Array.from({ length: Math.round(rate * seconds) }, (_, i) => amplitude * Math.sin((2 * Math.PI * hz * i) / rate));
+  const peak = (samples, skip = 0) => samples.slice(skip, samples.length - skip).reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+
+  test("encodes silence as 0xFF and the loudest samples as 0x80 / 0x00 (the G.711 table)", () => {
+    assert.deepEqual([...float32ToMulaw(new Float32Array(3))], [0xff, 0xff, 0xff]);
+    assert.deepEqual([...float32ToMulaw(Float32Array.of(1, -1))], [0x80, 0x00]);
+  });
+
+  test("a round trip stays within μ-law's own precision, and louder than full scale is clipped, not wrapped", () => {
+    const original = tone(440, 8000, 1, 0.6);
+    const back = mulawToFloat32(float32ToMulaw(original));
+    let worst = 0;
+    for (let i = 0; i < original.length; i++) worst = Math.max(worst, Math.abs(original[i] - back[i]));
+    assert.ok(worst < 0.02, `worst error ${worst}`);
+    assert.ok(mulawToFloat32(float32ToMulaw(Float32Array.of(5, -5))).every((v, i) => (i === 0 ? v > 0.9 : v < -0.9)));
+  });
+
+  test("every one of the 256 bytes decodes, and re-encodes to itself (except the two zero codes)", () => {
+    const all = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    const again = float32ToMulaw(mulawToFloat32(all));
+    for (let i = 0; i < 256; i++) if (i !== 0x7f) assert.equal(again[i], i, `byte ${i}`);
+  });
+});
+
+describe("phone audio: resampling", () => {
+  const tone = (hz, rate, seconds = 1) => Float32Array.from({ length: Math.round(rate * seconds) }, (_, i) => 0.5 * Math.sin((2 * Math.PI * hz * i) / rate));
+  const peak = (samples, skip = 300) => samples.slice(skip, samples.length - skip).reduce((m, v) => Math.max(m, Math.abs(v)), 0);
+
+  test("the length follows the rates; the same rate is returned untouched", () => {
+    assert.equal(resample(new Float32Array(24000), 24000, 8000).length, 8000);
+    assert.equal(resample(new Float32Array(22050), 22050, 8000).length, 8000);
+    const same = new Float32Array(10);
+    assert.equal(resample(same, 8000, 8000), same);
+  });
+
+  test("a voice-range tone keeps its level going down to 8 kHz", () => {
+    assert.ok(Math.abs(peak(resample(tone(1000, 24000), 24000, 8000)) - 0.5) < 0.02);
+  });
+
+  test("a tone above the phone's band is removed, not folded back into the voice", () => {
+    // 6 kHz does not exist at 8 kHz sampling (Nyquist 4 kHz): plain decimation would alias it to 2 kHz.
+    assert.ok(peak(resample(tone(6000, 24000), 24000, 8000)) < 0.01);
+  });
+
+  test("the streaming up-sampler gives the same wave as the ideal one, whatever the frame size", () => {
+    const input = tone(1000, 8000);
+    for (const frame of [160, 37, 1]) {
+      const up = createUpsampler2();
+      const parts = [];
+      for (let i = 0; i < input.length; i += frame) parts.push(up.push(input.subarray(i, i + frame)));
+      const out = new Float32Array(parts.reduce((n, p) => n + p.length, 0));
+      let at = 0;
+      for (const p of parts) (out.set(p, at), (at += p.length));
+      let worst = 0;
+      for (let i = 100; i < out.length - 100; i++) worst = Math.max(worst, Math.abs(out[i] - 0.5 * Math.sin((2 * Math.PI * 1000 * i) / 16000)));
+      assert.ok(worst < 0.01, `frame ${frame}: worst ${worst}`);
+    }
+  });
+});

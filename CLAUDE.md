@@ -26,7 +26,7 @@ The product is a **calling system**. Everything else exists to serve that.
 
 | | |
 | --- | --- |
-| **The channel we are building** | Voice, over real phone numbers (Twilio — §9) |
+| **The channel we are building** | Voice, over real phone numbers (Twilio — §6.30, §9.2) |
 | **What exists today** | The RAG engine underneath it; **voice calls from the browser** (local STT/TTS, a separate voice gateway, full call logging — §6.24); a test chat to exercise the same brain |
 | **What was removed** | An embeddable website chat widget. Deliberately, permanently. See §2. |
 
@@ -227,7 +227,8 @@ src/lib/
     speech/                    # models.js (manifest) · voices.js (THE voice catalog, pure) · engine.js (loads once)
                                #   · vad.js · stt.js ★ SEAM (Parakeet / Groq Whisper, routed per call) · tts.js ★ SEAM (Kokoro / Piper, cache)
     gateway-url.js             # where the browser reaches the gateway — shared by the session and gateway routes
-    transports/browser.js      # the console's WebSocket protocol; Twilio will be a sibling
+    transports/browser.js      # the console's WebSocket protocol
+    transports/twilio.js       # a PHONE call over Twilio Media Streams: μ-law frames, barge-in clear, ordered transfer (§6.30)
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
     closing.js                 # when a call ends by itself (goodbye, "no thanks" after "anything else?", the agent's farewell) + the per-agent switch and delay — pure (§6.26)
@@ -244,6 +245,7 @@ src/lib/
   phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
+                               #   · twilio-signature / twilio-request (is it really Twilio?) · twilio-webhook (answer a call, the transfer chain) · twilio-config · twilio-rest · twiml · signed-token (§6.30)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
   tenant/ config.js, registry.js   # ★ the seams (§4); registry.js: requireServiceableTenant() (§6.18), the plan's agent limit hook, resolveDialledNumber() (§6.29)
   tenant/agent-request.js      # which agent a request is for: ?agentId= → requireAgent(), agentScope() (§6.27)
@@ -1659,8 +1661,8 @@ shows this flag):
 **What exists:** the test console has a Call button. Press it, allow the microphone, and the
 agent greets you and answers out loud from the tenant's knowledge. Each call is stored as a
 `call_logs` row, a `call_turns` row per exchange (transcript, intent, outcome, sources, per-stage
-timings) and a `call_events` timeline. Twilio is **not** built; the design keeps it a transport
-swap (below).
+timings) and a `call_events` timeline. A phone call is the same session over a second transport (§6.30); the design
+kept it a transport swap (below).
 
 ```
 browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ──────────────────────────────┐
@@ -1920,10 +1922,9 @@ Real calls with the natural voice on the free Gemini tier: STT 0.2–0.4 s, retr
 LLM (Groq), Kokoro at 8 threads (now the default), the fast voice tier for latency-critical lines,
 the 0.5 s VAD window.
 
-**Not built:** Twilio transport (μ-law 8 kHz ⇄ PCM 16 kHz at the edge, Media Streams `mark` events
-for playback, webhook signature → dialled number → tenant in `registry.js`, and a REAL
-`transport.transfer`, §6.26); call recording itself (`recording_url` stays null; the per-agent
-`recordCalls` switch and the greeting's notice exist); a local Urdu recogniser.
+**Not built:** call recording itself (`recording_url` stays null; the per-agent `recordCalls` switch and the greeting's
+notice exist); Twilio `mark` events for exact playback (§6.30); a local Urdu recogniser. (The Twilio transport and webhook
+are built — §6.30.)
 
 ### 6.25 Taking a request — appointments, call-backs and orders (the collect domain)
 
@@ -2041,7 +2042,7 @@ hours only); modifying or cancelling an existing booking or order; prices, total
 *Call forwarding* on (Agent tab → `HandoffPanel`), lists people in the order they should be tried
 (role, name, phone) and sets how patient the agent is. When the agent cannot help, or the caller
 asks for a person, it **tells the caller first**, then the call is passed on. Everything is the
-engine's, behind three seams, so Twilio is a transport swap:
+engine's, behind three seams (a phone call is a transport swap — §6.30):
 
 - **Settings** (`handoff/config.js`) live in the existing `agent_configs.escalation` JSON (no new
   column; the backend later stores one more document next to the others):
@@ -2075,7 +2076,8 @@ engine's, behind three seams, so Twilio is a transport swap:
   understand." + the announcement. The console (Agent tab → Call forwarding) previews the line for every person with
   the same functions. Tests: tests/handoff-announce, voice-session, test:collect.
 - **The transport places the transfer** — the seam Twilio fills: `transport.transfer(contact, { summary, reason,
-  callId }) → Promise<{ connected: boolean, reason?: "busy"|"no_answer"|"failed" }>`. `CallSession.performHandoff`
+  callId }) → Promise<{ connected: boolean, reason?: "busy"|"no_answer"|"failed" }>`, or, for a phone line that hands the
+  whole ordered list to the network at once, `transport.transferInOrder(contacts, …)` (§6.30). `CallSession.performHandoff`
   waits for the announcement to finish playing, tries the contacts in order, and on `connected` ends the call as
   `transferred` (`END_REASONS.TRANSFERRED`); if nobody answers, or the transport has no `transfer`, it says a fixed
   line (`voiceLine("handoff_failed")`), clears the state and **the call carries on** so a call-back can be taken. The
@@ -2118,7 +2120,7 @@ placeholder. An unknown code starts nothing (`respond()` checks it against the r
 
 **Verified:** `npm test` (539), `npm run test:collect` (handoff end to end on the real DB: asked, rephrase→handoff, topics,
 reset in a row, unheard, closed hours, failed reply restores state, the mid-reply marker). **Not verified:** a real phone
-transfer (Twilio does not exist yet); the real model's wording of the handoff announcement in Urdu; how often the
+transfer through a real Twilio account (§6.30 is verified against a fake one); the real model's wording of the handoff announcement in Urdu; how often the
 "nothing in the documents" signal fires on real BUSINESS documents (a business with thin knowledge will hand off more —
 `afterMisses` is the owner's dial).
 
@@ -2183,7 +2185,7 @@ document shared or limited to some agents (§6.28).
 call record and every turn, the default resolved at pick-up, an archived agent does not answer), `npm run test:agents`
 (the rules above against the real DB, with the real `respond()` and a faked model), `test:collect` unchanged, the HTTP
 routes by hand on a dev server, and the console driven in a browser (create → copy → edit → switch) in English and Urdu.
-**Not built:** phone numbers (backend, B11) and the Twilio transport (§9.2); per-agent analytics
+**Not built:** buying phone numbers (backend, B11); per-agent analytics
 screens.
 
 ### 6.28 Knowledge per agent — one library, each document shared or limited
@@ -2255,14 +2257,14 @@ follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:a
 **The model (decided with the owner):** a business has one or more phone numbers; **each number rings exactly ONE
 agent, and an agent may have many numbers**. An inbound call identifies its business AND its agent by the number that
 was dialled — never by anything the caller supplies (§9.2). Buying, porting, releasing and billing numbers is the
-BACKEND's (§4, handoff B11); the engine owns the lookup and everything on the call. Twilio itself is not built yet:
-this is the part that has to be right before it is.
+BACKEND's (§4, handoff B11); the engine owns the lookup and everything on the call, including the Twilio webhook that
+uses it (§6.30). This is the part that has to be right for that to be safe.
 
 **The seam:** `tenant/registry.js resolveDialledNumber(dialled)` → `{ ok, tenantId, agentId, numberId, e164 }` or
 `{ ok: false, reason }`. Today it reads the stand-in store (`standins/numbers.js findNumberForRouting`, table
 `phone_numbers`); when the backend's `GET /internal/numbers/{e164}` exists, the read inside this ONE function changes
 and nothing else does. Its callers: the console's "call as if dialling" (`POST /api/voice/session?to=`),
-`GET /api/numbers/lookup?to=`, and — later — the Twilio webhook.
+`GET /api/numbers/lookup?to=`, and the Twilio webhook (`/api/telephony/twilio/voice`, §6.30).
 
 **Rules that must not drift:**
 
@@ -2300,8 +2302,83 @@ refusal is a 200 answer). Errors `validation:numbers.*` and `numbers.route.*` (e
 call recording its number), `npm run test:numbers` (32 against the real DB: storage format, every refusal, re-link
 effective for the next caller despite the cache, one business per active number, release and re-adding elsewhere,
 isolation, the archive guard, a suspended business, a call's number and per-number counts), the HTTP routes by hand, and
-the Numbers and Call tabs driven in a browser. **Not built:** the Twilio webhook (signature check → this lookup → TwiML
-`<Connect><Stream>` to the gateway → `transports/twilio.js`), buying numbers (backend), forwarding-number setup help.
+the Numbers and Call tabs driven in a browser. The Twilio webhook that uses this lookup is §6.30. **Not built:** buying
+numbers (backend), forwarding-number setup help.
+
+### 6.30 Phone calls — the Twilio webhook and the phone transport (the engine's half of telephony)
+
+**What exists:** a call to a business's Twilio number reaches its agent. Twilio asks our **webhook** "a call came in on
+number X, what now?"; we verify it is really Twilio, find the business and agent from the dialled number (§6.29), and
+answer with TwiML that opens a **Media Stream** to the voice gateway; the gateway's **phone transport** carries the call's
+audio (8 kHz μ-law ⇄ the 16 kHz the speech models use) into the same `CallSession` the browser console uses (§6.24). The brain,
+the greeting, barge-in, request-taking, call ending and everything else are unchanged — a transport swap, as designed.
+
+```
+caller ─ phone network ─► TWILIO ─POST /api/telephony/twilio/voice (signed)─► APP: verify → resolveDialledNumber → ticket
+                            │  ◄──────────── TwiML <Connect><Stream url="wss://gateway/twilio"> + ticket ───────────┘
+                            └─ Media Stream (wss) ─► GATEWAY /twilio: start {ticket} → CallSession(transport twilio)
+                                                      μ-law 8 kHz ⇄ VAD → STT → respond() → TTS ⇄ frames of 160 bytes
+```
+
+**Who owns what (agreed split, §4):** the Twilio ACCOUNT, buying/porting/releasing numbers, billing and where recordings are stored
+are the BACKEND's (Haseeb, handoff B11). The ENGINE owns everything on the live call: this webhook, the stream, the transport,
+the lookup and the call record. Why the webhook is the engine's and not the backend's: it must answer in milliseconds and its
+only inputs are the dialled number (→ the lookup seam, which reads the backend's data when it exists) and the ticket secret that
+the gateway shares with it. The deployment needs `TWILIO_AUTH_TOKEN` (verifies signatures), `TWILIO_WEBHOOK_BASE_URL` (the public
+https origin; falls back to `PUBLIC_APP_URL`), `VOICE_GATEWAY_PUBLIC_URL` (where Twilio opens the stream) and, for transfers,
+`TWILIO_ACCOUNT_SID` — all in `.env.example`; `GET /api/telephony/twilio/setup` and the Numbers tab say what is missing (names
+only) and show the address to paste into the number's "A call comes in" setting (HTTP POST). One Twilio account per deployment
+is assumed; per-business subaccounts would make these per-tenant values the backend hands over.
+
+**Rules that must not drift:**
+- **A webhook that is not verified decides nothing.** `readVerifiedTwilioRequest` checks `X-Twilio-Signature` (HMAC-SHA1 of the
+  URL + sorted POST parameters, keyed with the Auth Token — `twilio-signature.js`, pinned to the example in Twilio's docs)
+  against a URL built from OUR configuration plus the request's path and query, never from its Host header. No signature / wrong
+  signature → 403, not configured → 503 (unsigned requests are never accepted just because nothing is set), body > 64 KB → 413.
+  These routes are NOT behind INTERNAL_API_KEY — Twilio cannot send it; the signature is their guard. The routes are
+  `/api/telephony/twilio/{voice,transfer,whisper}` (+ `setup`, internal-key guarded).
+- **The tenant, the agent and the number come only from the dialled number** (`resolveDialledNumber`, §6.29): a refused number
+  (unknown / released / unlinked / archived agent / suspended business) hears `voiceLine("not_in_service")` — English, in Twilio's
+  own voice, because there is no agent to speak for — and is hung up on; the reason goes to the log, never the numbers. Every
+  answer once verified is a 200 with TwiML (a non-2xx makes Twilio say its own "application error").
+- **The stream's trust is the ticket** (`voice/ticket.js`, the same signed single-use one-minute hand-off as the browser's): it
+  names the tenant, agent, the number dialled and now who is calling (`f`, only a real E.164 number — "anonymous"/SIP ids are
+  not recorded). The gateway re-checks `assertTenantServiceable` and the call limits. A refusal can only be a close: the call then
+  moves on to the TwiML's next verb, a hang-up.
+- **A per-business limit on call starts** (120/min, `INBOUND_LIMIT`): the signature proves a request is real, not that it is new.
+- **The gateway has two sockets on one port** — `/call` (browser) and `/twilio` (phone) — via `noServer` and a hand-written
+  upgrade (ws's `path` option would make each server destroy the other's connections). Phone sockets get no heartbeat: Twilio
+  ends the stream itself (`stop`), and `maxCallMs` and the silence check-in end anything else.
+- **Audio at the edge** (`audio.js`, pure, tests/voice-units): G.711 μ-law (silence 0xFF, clipped not wrapped); inbound 20 ms
+  frames are up-sampled with a STREAMING 2× windowed-sinc filter that keeps the previous frame (a click at every frame edge
+  otherwise); outbound, a spoken piece is resampled from the voice's 22–24 kHz with a windowed-sinc low-pass — measured: a 6 kHz
+  tone is removed, not folded into the voice — encoded and sent as 160-byte frames. Twilio queues what it is sent and plays it in
+  real time, so the session's own estimate of when audio ends (`audioPlaysUntil`) is "the agent is talking", as on every
+  transport; `clear` on barge-in. Only the caller's track is read.
+- **A transfer is "replace this live call's instructions with a `<Dial>`"** (`twilio-rest.js` → Twilio REST; the auth token never
+  logged). The session hands the WHOLE ordered list to a phone transport once (`transport.transferInOrder`, preferred over the
+  per-person `transfer` of the browser) after the announcement has played; Twilio rings the first person for 20 s, reading them
+  a summary first (`<Number url=…whisper>`); when they do not pick up it asks `/transfer`, which rings the next — the state (the
+  list, the position, the summary) travels in a SIGNED token in the URLs (`signed-token.js`, kind-tagged, 10 min), so no server
+  memory is involved and a forged token rings nobody. `connected: true` means the call has LEFT the agent. If Twilio refuses or is
+  unreachable the call stays with the agent, which says nobody is available (§6.26). **Known limit:** once a transfer is placed the
+  call cannot come back to the agent: when nobody answers, the caller hears a fixed English line ("nobody is available… please call
+  again later") and the call ends, so no call-back can be taken in that case. Twilio's voice has no Urdu, so the summary and that
+  line are English.
+- **Not built / not decided:** recording (the per-agent switch and the greeting's notice exist; where audio lives is the backend's);
+  DTMF; marks for exact playback (the estimate is used); VAD and barge-in thresholds tuned on REAL phone audio; capacity refusals
+  are silent (a full gateway closes the socket).
+
+**Verified:** `npm test` (the signature against Twilio's published example, tokens, TwiML escaping, every refusal, the transfer chain,
+the REST call, the verified-request reader, the transport's wire format and transfer, the session's ordered transfer), and
+`npm run twilio:smoke` — a fake Twilio against the REAL app and gateway and the real speech models: a wrong or missing signature
+is refused, an unknown number is told "not in service", a signed call to a real number is answered with a stream, the greeting
+arrives as 20 ms μ-law frames, a spoken question sent as 8 kHz μ-law is understood by the recogniser and answered out loud, and
+the call is recorded as transport `twilio` with the numbers and the Twilio call id. **Not verified:** any of it through Twilio's
+real network (no account in the build sandbox) — number configuration, the stream's real timing, carrier audio quality, a real
+transfer. The first real calls are where the VAD/barge-in thresholds get tuned: a speech onset that starts at the very first
+sample was clipped by the VAD in the smoke test (a natural lead-in is fine).
+
 
 ---
 
@@ -2365,7 +2442,7 @@ right language, with history persisted per tenant.
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
-| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Twilio not built |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Phone calls through Twilio are built (§6.30), verified against a fake Twilio only |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -2379,7 +2456,7 @@ right language, with history persisted per tenant.
 | Replace / edit / rename / delete | ✅ enforced server-side; replace now confirmed client-side first and rolls back cleanly on failure (§6.10) |
 | Conflict surfacing | ✅ agent names the discrepancy rather than guessing |
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
-| **Phone numbers** | ✅ the lookup "dialled number → business → agent" (`registry.js resolveDialledNumber`): E.164, one number = one agent, refuses unknown / released / unlinked / archived / suspended, cached and dropped on change; calls record their number; the console can call "as if dialling" a number (§6.29). ⚠️ the numbers themselves are a stand-in (buying them is the backend's) and the Twilio webhook is not built |
+| **Phone numbers** | ✅ the lookup "dialled number → business → agent" (`registry.js resolveDialledNumber`): E.164, one number = one agent, refuses unknown / released / unlinked / archived / suspended, cached and dropped on change; calls record their number; the console can call "as if dialling" a number (§6.29). ⚠️ the numbers themselves are a stand-in (buying them is the backend's). The Twilio webhook and phone transport are built (§6.30) and verified against a simulated Twilio, not yet a real one |
 | **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge: one library, each document shared or limited to some agents, retrieval scoped to the agent and failing closed (§6.28) |
 | **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back/order with a reference; orders take only dishes on the owner's menu, pickup or delivery (address only for delivery); works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
@@ -2389,10 +2466,10 @@ right language, with history persisted per tenant.
 
 ### Limitations — be honest about these
 
-1. **No telephony yet.** Voice calls work from the browser (§6.24), but no phone number
-   reaches the agent. What is ready for it: the gateway is transport-agnostic, the transfer seam
-   exists (§6.26), and the number lookup is built (§6.29) — what remains is the Twilio webhook and
-   transport (§9.2). **Voice latency is ~3–4 s to first word on a good free-tier
+1. **Telephony is built but untried on a real line.** Voice calls work from the browser (§6.24) and through
+   Twilio (§6.30: webhook, signature check, phone transport, ordered transfer), proven against a simulated Twilio with the
+   real app, gateway and speech models — never through Twilio's network (no account in the build sandbox). VAD, barge-in and
+   latency on real phone audio are untuned; a transfer nobody answers cannot return to the agent. **Voice latency is ~3–4 s to first word on a good free-tier
    call and up to ~10 s on a bad one**, because Gemini's free tier takes 3.5–10 s to its first
    token (§6.24). The ~800 ms target needs a fast LLM (Groq — built, needs a key) and probably
    the fast voice tier.
@@ -2433,7 +2510,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 685 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 732 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2541,25 +2618,26 @@ right language, with history persisted per tenant.
 7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
    (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
    included. Record a handful of real calls before promising it.
-8. **Telephony** — §9.2. The lookup is built (§6.29); next is the Twilio webhook + transport.
+8. **Telephony** — §6.30. The lookup (§6.29), the webhook and the phone transport are built; next is the FIRST REAL CALL:
+   set the four variables, point a number at the webhook, call it, and tune the VAD / barge-in / latency on real audio.
 
-### 9.2 Twilio — the destination, not yet started
+### 9.2 Twilio — built (§6.30), waiting for its first real call
 
 **The product vision:** a business buys a phone number **from our platform** and
 puts an AI agent on it. Twilio handles number provisioning, telephony and
 billing underneath; the business never deals with Twilio directly.
 
-Not being built yet — RAG and file handling come first — but **every decision
-made now should be compatible with it.**
+The engine's half is built and described in §6.30; what follows is the original plan, kept for the parts that are
+still the backend's (provisioning, billing, compliance).
 
-What it will need:
+What it needs:
 
 - **Number provisioning** through Twilio's API, surfaced as our own purchase
   flow. The partner handles payment; we handle the Twilio side and the mapping.
 - **`phone_number → tenant + agent` routing — BUILT (§6.29).** An inbound call identifies its
   business and agent by **the number that was dialled**: `registry.js resolveDialledNumber()`.
-  The webhook still has to VERIFY Twilio's signature before calling it — never take the tenant from
-  anything the caller supplies — and answer a refusal with `voiceLine("not_in_service")`.
+  The webhook verifies Twilio's signature before calling it — never taking the tenant from anything the
+  caller supplies — and answers a refusal with `voiceLine("not_in_service")` (BUILT, §6.30).
 - **Realtime voice — DECIDED (§6.24): an STT → `respond()` → TTS pipeline**, not
   speech-to-speech. A speech-to-speech model (e.g. Gemini Live) brings its own prompt and
   session and turns retrieval into a tool call — a second brain beside `respond()`, which §1
@@ -2567,7 +2645,7 @@ What it will need:
   each, locally); the LLM's first token is. **Budget under ~800 ms to first audio** still stands.
 - **Barge-in and turn detection — BUILT** (§6.24): Silero VAD end-of-turn, 350 ms barge-in,
   playback cleared, interrupted turns logged.
-- **What Twilio adds on top of the gateway:** a `transports/twilio.js` beside
+- **What Twilio adds on top of the gateway — BUILT (§6.30):** a `transports/twilio.js` beside
   `transports/browser.js` (Media Streams JSON, μ-law 8 kHz ⇄ PCM 16 kHz at the edge — the speech
   benchmark already showed no accuracy loss on simulated 8 kHz audio; `clear` for barge-in;
   `mark` events for playback), a webhook route that verifies the signature and maps the dialled
@@ -2602,7 +2680,7 @@ npm run db:up            # Postgres 16 + pgvector (docker compose up -d)
 npm run prisma:migrate   # apply migrations (read any generated one — §6.1)
 npm run dev              # http://localhost:3000 → the test console
 npm run voice:models     # once: download the local speech models (~1.3 GB, resumable) — §6.24
-npm run voice            # the voice gateway, :3001 — needed for the console's Call button (a SECOND terminal)
+npm run voice            # the voice gateway, :3001 — needed for the console's Call button AND phone calls (a SECOND terminal)
 npm run build            # runs i18n:check first
 npm run start            # serve the production build
 npm run lint
@@ -2611,10 +2689,11 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 685 unit tests: the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 732 unit tests: the Twilio phone path (signature, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)
 npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
 npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent (greeting and recording switch included), against the real DB, faked models — spends no quota (§6.27, §6.28)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
@@ -2674,6 +2753,9 @@ stale.
   are non-empty, so a placeholder value counts as configured. Uploads work without
   them; `storage.js` just skips storing the original file (§6.13) and logs a warning
   instead of failing the import.
+- Phone calls (§6.30, optional): `TWILIO_AUTH_TOKEN` (verifies every webhook, places transfers), `TWILIO_ACCOUNT_SID`
+  (transfers), `TWILIO_WEBHOOK_BASE_URL` (the public https origin of this app; falls back to `PUBLIC_APP_URL`) and
+  `VOICE_GATEWAY_PUBLIC_URL` (required for phone calls: Twilio opens the stream at `wss://…/twilio`).
 - Voice (§6.24, all optional): `VOICE_GATEWAY_PORT` (3001), `VOICE_GATEWAY_PUBLIC_URL` (when the
   browser reaches the gateway somewhere other than this host on that port), `VOICE_SESSION_SECRET`
   (signs session tickets — both processes must share it; falls back to `INTERNAL_API_KEY`),

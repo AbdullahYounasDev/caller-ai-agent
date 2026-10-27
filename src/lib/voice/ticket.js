@@ -21,8 +21,9 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
  *
  * NOT the removed widget's conversation tokens (§2): those were long-lived public
  * credentials for an embeddable channel. This is a one-minute internal hand-off between
- * two of our own processes. When telephony lands, a phone call never sees a ticket —
- * its trust comes from a verified Twilio signature on the webhook (§9.2).
+ * two of our own processes. A phone call uses the same hand-off, but its trust comes from
+ * a verified Twilio signature on the webhook (telephony/twilio-signature.js): the webhook
+ * issues the ticket and Twilio hands it, as a stream parameter, to the gateway (§6.24).
  */
 
 const DEV_SECRET = "dev-only-voice-ticket-secret-never-used-in-production";
@@ -54,8 +55,8 @@ const sign = (payload, secret) => createHmac("sha256", secret).update(payload).d
  * @param {object} args
  * @param {string} args.tenantId
  * @param {string|null} [args.agentId]  null = the tenant's default agent
- * @param {{numberId: string, toNumber: string}|null} [args.line] the number the call is "dialled" on
- *   (§6.29) — signed too, so the call log's number cannot be forged from the browser
+ * @param {{numberId: string, toNumber: string, fromNumber?: string|null}|null} [args.line] the number the call is
+ *   "dialled" on (§6.29) and, on a phone call, who is calling — signed too, so neither can be forged
  * @param {number} args.ttlMs
  * @param {string} args.secret
  * @param {number} [args.now]
@@ -64,7 +65,7 @@ const sign = (payload, secret) => createHmac("sha256", secret).update(payload).d
 export function issueTicket({ tenantId, agentId = null, line = null, ttlMs, secret, now = Date.now() }) {
   const expiresAt = now + ttlMs;
   const claims = { t: tenantId, a: agentId, e: expiresAt, n: randomBytes(12).toString("base64url") };
-  if (line) Object.assign(claims, { l: line.numberId, d: line.toNumber });
+  if (line) Object.assign(claims, { l: line.numberId, d: line.toNumber, ...(line.fromNumber ? { f: line.fromNumber } : {}) });
   const payload = b64url(JSON.stringify(claims));
   return { ticket: `${payload}.${sign(payload, secret)}`, expiresAt };
 }
@@ -83,7 +84,7 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
   return {
     /**
      * @param {string} ticket
-     * @returns {{ok: true, tenantId: string, agentId: string|null, line: {numberId: string, toNumber: string}|null} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
+     * @returns {{ok: true, tenantId: string, agentId: string|null, line: {numberId: string, toNumber: string, fromNumber: string|null}|null} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
      */
     verify(ticket) {
       const at = now();
@@ -107,7 +108,8 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
       if (
         typeof claims?.t !== "string" || typeof claims?.e !== "number" || typeof claims?.n !== "string" ||
         (claims.a != null && typeof claims.a !== "string") ||
-        (claims.l != null && (typeof claims.l !== "string" || typeof claims.d !== "string"))
+        (claims.l != null && (typeof claims.l !== "string" || typeof claims.d !== "string")) ||
+        (claims.f != null && typeof claims.f !== "string")
       ) {
         return { ok: false, reason: "malformed" };
       }
@@ -115,7 +117,7 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
       if (used.has(claims.n)) return { ok: false, reason: "replayed" };
 
       used.set(claims.n, claims.e);
-      return { ok: true, tenantId: claims.t, agentId: claims.a ?? null, line: claims.l ? { numberId: claims.l, toNumber: claims.d } : null };
+      return { ok: true, tenantId: claims.t, agentId: claims.a ?? null, line: claims.l ? { numberId: claims.l, toNumber: claims.d, fromNumber: claims.f ?? null } : null };
     },
   };
 }

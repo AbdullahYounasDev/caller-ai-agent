@@ -80,7 +80,17 @@ describe("the voice ticket carries the line", () => {
     const verifier = createTicketVerifier({ secret });
     const line = { numberId: "n1", toNumber: "+442071234567" };
     const { ticket } = issueTicket({ tenantId: "chain", agentId: "dublin", line, ttlMs: 60_000, secret });
-    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "chain", agentId: "dublin", line });
+    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "chain", agentId: "dublin", line: { ...line, fromNumber: null } });
+  });
+
+  test("a phone call also keeps who is calling, signed", () => {
+    const verifier = createTicketVerifier({ secret });
+    const line = { numberId: "n1", toNumber: "+442071234567", fromNumber: "+923001234567" };
+    const { ticket } = issueTicket({ tenantId: "chain", agentId: "dublin", line, ttlMs: 60_000, secret });
+    assert.deepEqual(verifier.verify(ticket).line, line);
+    const [payload, sig] = ticket.split(".");
+    const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, "base64url")), f: "+10000000000" })).toString("base64url");
+    assert.equal(createTicketVerifier({ secret }).verify(`${forged}.${sig}`).reason, "signature");
   });
 
   test("the number cannot be changed in the browser", () => {
