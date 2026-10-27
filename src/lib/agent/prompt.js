@@ -688,11 +688,17 @@ const PROBLEM_GUIDANCE = {
   too_far: "that is too far ahead (more than a year)",
   closed: "the business is closed then ({day}) — say so, mention the opening hours from ABOUT THIS BUSINESS, and ask for another time",
   empty: "nothing usable was said",
+  not_on_menu: "{items} is not on the menu — say we do not have it, and offer to name a few dishes that are",
+  ambiguous_item: '"{said}" could be more than one dish on the menu ({options}) — ask which one',
+  empty_order: "no dish from the menu was named",
+  too_many_items: "an order can have at most {max} different dishes",
 };
 
 function problemSentence(problem) {
   const template = PROBLEM_GUIDANCE[problem.reason] ?? "it could not be used";
   const text = template.replace(/\{(\w+)\}/g, (_, key) => problem.vars?.[key] ?? "");
+  // Part of an order was fine and is kept: only the one dish needs a word.
+  if (problem.partial) return `Part of the customer's last answer for "${problem.field.label}" could not be taken: ${text}. Say so kindly in one short sentence; the rest of it IS noted.`;
   return `The customer's last answer for "${problem.field.label}" could not be used: ${text}. Say so kindly in one short sentence and ask for it again.`;
 }
 
@@ -752,7 +758,13 @@ export function buildCollectionInstruction(plan, { channel }) {
     );
   }
 
-  const header = `TAKING A REQUEST — ${plan.typeLabel}. ${never} This is what you do THIS turn, and nothing else about the request:`;
+  // An order is the same promise with its own words: callers expect "your order is placed" and
+  // a total, and neither is true until a person confirms it (§6.25).
+  const orderRule =
+    plan.type === "order"
+      ? " Never say the order is placed, confirmed, being prepared or on its way — say it is noted and the team will confirm it. Never state a price or a total unless it is in the reference material; the team confirms the total."
+      : "";
+  const header = `TAKING A REQUEST — ${plan.typeLabel}. ${never}${orderRule} This is what you do THIS turn, and nothing else about the request:`;
   const lineCtx = { channel, language };
 
   switch (plan.state) {
@@ -769,6 +781,7 @@ export function buildCollectionInstruction(plan, { channel }) {
       if (ask.have?.date) task += ` The customer already gave the day (${ask.have.date}): ask only for the time.`;
       if (ask.have?.time) task += ` The customer already gave the time (${ask.have.time}): ask only for the day.`;
       if (ask.options?.length) task += ` The choices are: ${ask.options.join(", ")}. Say them if the customer seems unsure.`;
+      if (ask.menu?.length) task += ` Only dishes on the menu can be ordered; if the customer asks what there is, name a few of them, never all: ${ask.menu.join(", ")}.`;
       out.push(task);
       out.push("Ask exactly ONE question. If the customer also asked something else, answer that first in one sentence from the reference material, then ask your question.");
       return out.join("\n");
@@ -839,6 +852,14 @@ export function buildExtractionInstruction({ fields, config, nowMs, timezone, ho
         ? `answer with ONE of these ids: ${list.map((o) => `${o.id} (${[o.label?.en, o.label?.ur].filter(Boolean).join(" / ")})`).join("; ")}`
         : "free text";
       return `- ${f.id} — ${label} — ${options}`;
+    }
+    if (f.type === "items") {
+      const menu = (f.source ? config?.[f.source] ?? [] : []).map((o) => [o.label?.en, o.label?.ur].filter(Boolean).join(" / ")).join("; ");
+      return (
+        `- ${f.id} — ${label} — the dishes and how many of each that the customer ordered or changed in the LATEST message only, ` +
+        `written as "2 x <dish>; 1 x <dish>", using the menu's own names where the dish is on the menu: ${menu}. ` +
+        'Write a dish the customer asked for that is NOT on the menu exactly as they said it. For a dish they want removed write "0 x <dish>".'
+      );
     }
     const how = {
       phone: "the digits as the customer said them",

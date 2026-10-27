@@ -2,7 +2,7 @@
 
 An AI phone agent for small businesses — first markets: restaurants and call centres in the UK and Ireland, and
 businesses in Pakistan. A business gives its agent its own material (price list, menu, opening hours, policies) and
-the agent answers its customers in English or Urdu, takes requests (appointments, call-backs) and passes a caller to
+the agent answers its customers in English or Urdu, takes requests (appointments, call-backs, food orders) and passes a caller to
 a person when it should.
 
 **This repo is the AI ENGINE.** The multi-tenant platform (accounts, billing, the business dashboard, buying phone
@@ -22,7 +22,9 @@ failures behind each rule, what works and what does not, and the measured number
 - **Voice calls from the browser** through a separate voice gateway: local speech recognition and synthesis (Groq
   Whisper for Urdu), barge-in, full call logging. A sentence cut by a pause is answered as one message, "hold on"
   gets a longer wait, and the agent's own sentences have no long silences in the middle.
-- **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
+- **Taking requests** (appointments, call-backs, and restaurant orders from the owner's own menu — pickup or delivery,
+  the address only for delivery) with a deterministic checklist engine — the AI never books, never says an order is
+  placed, and never quotes a price it was not given.
 - **Passing a caller to a person** (call forwarding) — the agent always says who it is connecting the caller to, in a
   fixed line the owner can reword.
 - **Ending a call by itself** once the conversation is over (a goodbye, "no thanks" after "anything else?", or the

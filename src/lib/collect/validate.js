@@ -1,5 +1,6 @@
 import { choiceOptions } from "./config";
 import { pick } from "./catalog";
+import { ORDER_LIMITS, orderDisplay } from "./order";
 
 /**
  * CHECKING WHAT A CUSTOMER SAID BEFORE IT IS STORED — pure, no I/O.
@@ -183,10 +184,12 @@ const comparable = (text) =>
 export function matchOption(raw, options) {
   const wanted = comparable(raw);
   if (!wanted) return null;
-  const exact = options.find((o) => o.id === raw || comparable(o.label?.en) === wanted || comparable(o.label?.ur) === wanted);
+  // `also`: the other ways callers say a fixed option ("takeaway" for Pickup — catalog.js).
+  const names = (o) => [o.label?.en, o.label?.ur, ...(o.also ?? [])].map(comparable);
+  const exact = options.find((o) => o.id === raw || names(o).includes(wanted));
   if (exact) return exact;
 
-  const labels = (o) => [o.label?.en, o.label?.ur].map(comparable).filter((c) => c.length >= 3);
+  const labels = (o) => names(o).filter((c) => c.length >= 3);
   // The answer CONTAINS a label ("I need scaling and polishing please"): if several are
   // contained, the longest wins ("hair colour long" beats "hair colour") — unless two tie.
   const inside = options
@@ -325,9 +328,22 @@ export function formatDate(value, language) {
  * @returns {{ok: true, value: string, display: string}|{ok: false, reason: string, vars?: object}}
  */
 export function validateValue(def, raw, ctx) {
+  const language = ctx.language === "ur" ? "ur" : "en";
+  // An order arrives already read against the menu and merged (engine.js applyOrder): what is
+  // left to judge is that it has something in it, and sane quantities.
+  if (def.type === "items") {
+    const lines = Array.isArray(raw) ? raw : [];
+    if (!lines.length) return { ok: false, reason: "empty_order" };
+    const max = def.max ?? ORDER_LIMITS.linesMax;
+    if (lines.length > max) return { ok: false, reason: "too_many_items", vars: { max } };
+    if (lines.some((l) => !Number.isInteger(l.qty) || l.qty < ORDER_LIMITS.qtyMin || l.qty > ORDER_LIMITS.qtyMax)) {
+      return { ok: false, reason: "out_of_range", vars: { min: ORDER_LIMITS.qtyMin, max: ORDER_LIMITS.qtyMax } };
+    }
+    const value = lines.map((l) => ({ id: l.id, name: l.name, qty: l.qty }));
+    return { ok: true, value, display: orderDisplay(value, choiceOptions(ctx.config, def), language) };
+  }
   const text = String(raw ?? "").trim();
   if (!text) return { ok: false, reason: "empty" };
-  const language = ctx.language === "ur" ? "ur" : "en";
 
   switch (def.type) {
     case "phone": {
@@ -410,6 +426,8 @@ export function displayValue(def, value, ctx) {
     }
     case "yesno":
       return value === "yes" ? (language === "ur" ? "ہاں" : "Yes") : language === "ur" ? "نہیں" : "No";
+    case "items":
+      return orderDisplay(value, choiceOptions(ctx?.config, def), language);
     default:
       return String(value);
   }

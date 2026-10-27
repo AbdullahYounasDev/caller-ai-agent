@@ -23,10 +23,13 @@ import {
  *     industry: "dental",                         the preset it started from (informational)
  *     services: [{ id, label: {en, ur} }],        the list the `service` field chooses from
  *     staff:    [{ id, label: {en, ur} }],        the list the `staff` field chooses from
+ *     menu:     [{ id, label: {en, ur} }],        the dishes an order (`order_items`) may contain
  *     customFields: [{ id: "c_parking", type, label, question, options?, sensitive? }],
  *     recordTypes: {
- *       appointment: { enabled, label?: {en, ur}, fields: [{ id, required, question?: {en, ur} }] },
- *       callback:    { ... }
+ *       appointment: { enabled, label?: {en, ur}, fields: [{ id, required, question?: {en, ur}, when?: {field, equals} }] },
+ *       callback:    { ... },
+ *       order:       { ... }                       `when`: asked only when an earlier answer is that
+ *                                                  (the address, only when order_type is "delivery")
  *     }
  *   }
  *
@@ -77,8 +80,8 @@ function slugOf(text) {
   return slug || null;
 }
 
-/** An owner-defined list (services, staff): unique ids, at least one label each. */
-function parseList(value, problems, code) {
+/** An owner-defined list (services, staff, menu): unique ids, at least one label each. */
+function parseList(value, problems, code, max = LIMITS.listMax) {
   if (value == null) return [];
   if (!Array.isArray(value)) {
     problems?.push({ code: "listInvalid", vars: { list: code } });
@@ -93,8 +96,8 @@ function parseList(value, problems, code) {
     for (let n = 2; seen.has(id); n++) id = `${id.replace(/_\d+$/, "")}_${n}`;
     seen.add(id);
     out.push({ id, label });
-    if (out.length >= LIMITS.listMax) {
-      if (value.length > LIMITS.listMax) problems?.push({ code: "listTooLong", vars: { list: code, max: LIMITS.listMax } });
+    if (out.length >= max) {
+      if (value.length > max) problems?.push({ code: "listTooLong", vars: { list: code, max } });
       break;
     }
   }
@@ -157,7 +160,12 @@ function presetEntry(industry, typeId) {
   return {
     enabled: entry.enabled,
     ...(entry.label ? { label: { ...entry.label } } : {}),
-    fields: entry.fields.map((x) => ({ id: x.id, required: x.required })),
+    fields: entry.fields.map((x) => ({
+      id: x.id,
+      required: x.required,
+      ...(x.question ? { question: { ...x.question } } : {}),
+      ...(x.when ? { when: { ...x.when } } : {}),
+    })),
   };
 }
 
@@ -175,6 +183,7 @@ export function presetConfig(industryId) {
     industry: industry.id,
     services: [],
     staff: [],
+    menu: [],
     customFields: [],
     recordTypes: Object.fromEntries(RECORD_TYPES.map((t) => [t.id, presetEntry(industry, t.id)])),
   };
@@ -185,7 +194,25 @@ export function emptyCollectConfig() {
   return { ...presetConfig("general"), industry: null };
 }
 
-function parseRecordTypes(value, customIds, problems) {
+/**
+ * "Ask this only when an earlier answer is X" — the delivery address, only for delivery. On a
+ * save a broken condition is refused; on a read it is DROPPED, so the question is always asked:
+ * one extra question is better than a required detail silently never asked.
+ */
+function parseWhen(raw, earlier, lists, problems, typeId, fieldId) {
+  if (raw == null) return null;
+  const field = typeof raw?.field === "string" ? earlier.find((d) => d.id === raw.field) : null;
+  const equals = typeof raw?.equals === "string" ? raw.equals : null;
+  const options = field?.type === "yesno" ? ["yes", "no"] : field?.type === "choice" ? choiceOptions(lists, field).map((o) => o.id) : [];
+  if (!field || !equals || !options.includes(equals)) {
+    problems?.push({ code: "conditionInvalid", vars: { type: typeId, id: fieldId } });
+    return null;
+  }
+  return { field: field.id, equals };
+}
+
+function parseRecordTypes(value, customFields, problems, lists) {
+  const customIds = new Set(customFields.map((x) => x.id));
   const out = {};
   const given = value && typeof value === "object" && !Array.isArray(value) ? value : {};
   for (const id of Object.keys(given)) {
@@ -200,6 +227,7 @@ function parseRecordTypes(value, customIds, problems) {
     }
     const fields = [];
     const seen = new Set();
+    const earlier = [];
     for (const item of Array.isArray(raw.fields) ? raw.fields : []) {
       const id = typeof item === "string" ? item : item?.id;
       if (!getField(id) && !customIds.has(id)) {
@@ -212,12 +240,15 @@ function parseRecordTypes(value, customIds, problems) {
       }
       seen.add(id);
       const question = typeof item === "string" ? {} : pair(item?.question, LIMITS.questionMax, problems, "questionTooLong");
+      const when = typeof item === "string" ? null : parseWhen(item?.when, earlier, lists, problems, type.id, id);
       fields.push({
         id,
         // A bare id means "ask it"; an object must say so — a missing flag is optional.
         required: typeof item === "string" ? true : item?.required === true,
         ...(hasText(question) ? { question } : {}),
+        ...(when ? { when } : {}),
       });
+      earlier.push(fieldDef({ customFields }, id));
     }
     if (fields.length > LIMITS.fieldsMax) {
       problems?.push({ code: "tooManyFields", vars: { type: type.id, max: LIMITS.fieldsMax } });
@@ -255,14 +286,17 @@ function parse(raw, { collect = false } = {}) {
   }
 
   const customFields = parseCustomFields(input.customFields, problems);
-  const customIds = new Set(customFields.map((x) => x.id));
+  const lists = {
+    services: parseList(input.services, problems, "services"),
+    staff: parseList(input.staff, problems, "staff"),
+    menu: parseList(input.menu, problems, "menu", LIMITS.menuMax),
+  };
   const config = {
     enabled: input.enabled === true,
     industry,
-    services: parseList(input.services, problems, "services"),
-    staff: parseList(input.staff, problems, "staff"),
+    ...lists,
     customFields,
-    recordTypes: parseRecordTypes(input.recordTypes, customIds, problems),
+    recordTypes: parseRecordTypes(input.recordTypes, customFields, problems, lists),
   };
 
   // Switching the feature on with nothing to collect would make every request empty.
@@ -344,9 +378,19 @@ export function typeFields(config, typeId) {
         def.question?.[language] ||
         (language === "ur" ? `براہِ کرم بتائیں: ${pick(def.label, "ur")}` : `Please tell me: ${pick(def.label, "en")}`);
     }
-    out.push({ ...def, required: item.required, question });
+    out.push({ ...def, required: item.required, question, ...(item.when ? { when: item.when } : {}) });
   }
   return out;
+}
+
+/**
+ * Is this field asked, given the answers so far? A field with `when` only once the earlier
+ * answer is the one named (the delivery address, only for delivery).
+ * @param {{when?: {field: string, equals: string}}} field
+ * @param {Record<string, unknown>} values
+ */
+export function fieldApplies(field, values) {
+  return !field?.when || values?.[field.when.field] === field.when.equals;
 }
 
 /** What the business calls a record type in one language ("Table reservation"). */
@@ -359,7 +403,20 @@ export function recordTypeLabel(config, typeId, language) {
 /** The ids of the record types this tenant has switched on, catalogue order. */
 export function enabledRecordTypes(config) {
   if (!config?.enabled) return [];
-  return RECORD_TYPES.filter((t) => config.recordTypes?.[t.id]?.enabled && config.recordTypes[t.id].fields.length).map((t) => t.id);
+  return RECORD_TYPES.filter(
+    (t) => config.recordTypes?.[t.id]?.enabled && config.recordTypes[t.id].fields.length && (!t.needsList || (config[t.needsList] ?? []).length)
+  ).map((t) => t.id);
+}
+
+/**
+ * Record types switched on that cannot be taken yet because the business has not filled in the
+ * list they need — orders with no menu. Not refused on save (the rest of the settings are fine,
+ * and the restaurant preset starts this way); the agent simply does not take them, and the
+ * console says why.
+ * @returns {Array<{type: string, list: string}>}
+ */
+export function missingLists(config) {
+  return RECORD_TYPES.filter((t) => t.needsList && config?.recordTypes?.[t.id]?.enabled && !(config[t.needsList] ?? []).length).map((t) => ({ type: t.id, list: t.needsList }));
 }
 
 /** How many fields a type asks — the console warns when this gets long for a phone call. */

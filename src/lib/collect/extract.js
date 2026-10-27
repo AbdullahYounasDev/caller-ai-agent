@@ -2,6 +2,14 @@ import { buildExtractionInstruction, buildExtractionInput } from "@/lib/agent/pr
 import { choiceOptions } from "./config";
 import { findPhoneInText, normalizeDigits, normalizeEmail, parseNumber, parseYesNo, matchOption } from "./validate";
 import { looksLikeQuestion } from "./phrases";
+import { mentionsOrderChange, parseOrderText } from "./order";
+
+/** The rules' reading of an order, or null when the message names nothing on the menu. */
+function orderFrom(def, text, ctx) {
+  if (looksLikeQuestion(text)) return null;
+  const read = parseOrderText(text, choiceOptions(ctx?.config, def));
+  return read.lines.length || read.removed.length || read.ambiguous.length ? read : null;
+}
 
 /**
  * UNDERSTANDING WHAT THE CUSTOMER JUST GAVE US — two layers, cheapest first.
@@ -73,6 +81,10 @@ export function heuristicAnswer(def, message, ctx) {
     }
     case "datetime":
       return null; // "kal shaam" needs the clock and the opening hours: the extractor's job
+    case "items":
+      // Dishes the menu names, with what was said about them (order.js). A dish NOT on the menu
+      // is not found here; the extractor names it and validation refuses it.
+      return orderFrom(def, text, ctx);
     default: {
       // A free-text answer to the question we just asked — unless the customer asked a question back.
       if (looksLikeQuestion(text)) return null;
@@ -87,18 +99,33 @@ export function heuristicAnswer(def, message, ctx) {
 
 /**
  * A value the customer volunteered for a field we were NOT asking about, found by rules.
- * Only the two shapes that cannot be mistaken for anything else.
+ * Only the shapes that cannot be mistaken for anything else: a phone number, an email, and
+ * dishes from the business's own menu ("I'd like to order two chicken biryanis"). An order
+ * already taken is only changed by a message that SAYS it changes it ("add a coke", "no raita")
+ * — "House 5, Biryani Street" must never add a biryani.
  *
  * @param {object} def
  * @param {string} message
- * @returns {string|null}
+ * @param {{config?: object}} [ctx]
+ * @param {{filled?: boolean}} [options] the field already has a value
+ * @returns {unknown|null}
  */
-export function volunteeredValue(def, message) {
+export function volunteeredValue(def, message, ctx, { filled = false } = {}) {
   const text = String(message ?? "");
   if (def.type === "phone") return findPhoneInText(text);
   if (def.type === "email") return /[^\s@]+@[^\s@]+\.[^\s@]{2,}/.exec(text)?.[0] ?? null;
+  if (def.type === "items") return !filled || mentionsOrderChange(text) ? orderFrom(def, text, ctx) : null;
+  // A FIXED short list (pickup / delivery) is distinctive enough to notice unasked — "Ahmed, and
+  // it's for delivery". Never from a question ("how long does delivery take?"), and an answer
+  // already given changes only when the caller says so ("actually I'll pick it up instead").
+  if (def.type === "choice" && def.options?.length && !def.source) {
+    if (looksLikeQuestion(text) || (filled && !SWITCHING.test(text))) return null;
+    return matchOption(text, def.options)?.id ?? null;
+  }
   return null;
 }
+
+const SWITCHING = /(?<![\p{L}\p{M}])(?:instead|actually|change|switch|rather|make it|ki jagah|ke bajaye|balke|کی جگہ|کے بجائے|بلکہ)(?![\p{L}\p{M}])/iu;
 
 /**
  * Parse the extractor's reply into `{values, date, time}` — tolerant of the things models

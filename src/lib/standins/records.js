@@ -24,7 +24,7 @@ const TRANSITIONS = {
   cancelled: ["requested"],
 };
 
-export const REFERENCE_PREFIX = { appointment: "AP", callback: "CB" };
+export const REFERENCE_PREFIX = { appointment: "AP", callback: "CB", order: "OR" };
 // No 0/O/1/I/L: a reference is read aloud and written on a slip of paper.
 const ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 

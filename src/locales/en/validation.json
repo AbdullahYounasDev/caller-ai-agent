@@ -67,6 +67,7 @@
   "collect.customLabelRequired": "The detail “{id}” needs a name.",
   "collect.customOptionsRequired": "The detail “{id}” needs at least two choices.",
   "collect.customTooMany": "You can add at most {max} details of your own.",
+  "collect.conditionInvalid": "In {type}, “{id}” is asked only after another answer — keep it below that question, and keep that question in the list.",
   "records.notFound": "That request could not be found.",
   "records.invalidStatus": "That is not a status a request can have.",
   "records.invalidTransition": "A request cannot be moved to that status from where it is.",

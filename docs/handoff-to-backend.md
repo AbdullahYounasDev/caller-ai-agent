@@ -159,8 +159,9 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
 ### B3 — "What the agent collects" settings
 
 - **What:** which details the agent asks for (name, phone, service, date-time, party size, reason…), per request
-  type (`appointment`, `callback`), the business's own **services** and **staff** lists, custom fields, order,
-  required/optional, optional custom wording (en + ur).
+  type (`appointment`, `callback`, `order`), the business's own **services**, **staff** and **menu** lists, custom
+  fields, order of questions, required/optional, optional custom wording (en + ur), and conditions (`when`: a question
+  asked only after a particular answer — the delivery address only for delivery).
 - **Why backend:** it is part of the versioned config the dashboard edits.
 - **Engine owns:** the **catalogue** (all possible fields, request types, industry presets, limits, and the
   validation of a saved document) in `src/lib/collect/catalog.js` / `config.js`. The backend must **not**
@@ -174,12 +175,17 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
     "industry": "dental",                  // starting preset, informational
     "services": [{ "id": "root_canal", "label": { "en": "Root canal", "ur": "روٹ کینال" } }],
     "staff":    [{ "id": "dr_ali", "label": { "en": "Dr Ali", "ur": "ڈاکٹر علی" } }],
+    "menu":     [{ "id": "chicken_biryani", "label": { "en": "Chicken Biryani", "ur": "چکن بریانی" } }],   // what an order may contain
     "customFields": [{ "id": "c_parking", "type": "yesno", "label": {…}, "question": {…}, "sensitive": false }],
     "recordTypes": {
       "appointment": { "enabled": true, "fields": [ { "id":"name","required":true }, { "id":"phone","required":true }, { "id":"service","required":true }, { "id":"datetime","required":true }, { "id":"notes","required":false } ] },
-      "callback":    { "enabled": true, "fields": [ … ] } } }
+      "callback":    { "enabled": true, "fields": [ … ] },
+      "order":       { "enabled": true, "fields": [ { "id":"name","required":true }, { "id":"phone","required":true }, { "id":"order_items","required":true },
+                       { "id":"order_type","required":true }, { "id":"address","required":true, "when": { "field":"order_type", "equals":"delivery" } }, { "id":"notes","required":false } ] } } }
   ```
-  Limits: ≤12 fields per type, ≤10 custom fields, ≤60 service/staff entries, ≤30 options per custom choice.
+  Limits: ≤12 fields per type, ≤10 custom fields, ≤60 service/staff entries, ≤150 menu dishes, ≤30 options per custom
+  choice. An `order` type with an empty `menu` saves, but the agent does not take orders until the menu has dishes
+  (the dashboard should say so — `missingLists()` in `src/lib/collect/config.js`).
 - **Backend provides:** persistence + dashboard UI (checklist). Engine reads it with the config in B2.
 - **Engine change:** `saveCollectConfig()` becomes a pass-through; validation stays in the engine.
 
@@ -193,12 +199,15 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   console routes `GET /api/records`, `GET|PATCH /api/records/:id` and the "Collected" tab.
 - **A request (what the backend stores / receives):**
   ```jsonc
-  { "id": "…", "tenantId": "…", "reference": "AP-4K7Q2",      // AP- appointment, CB- call-back; read to the customer
-    "type": "appointment",                                       // appointment | callback
+  { "id": "…", "tenantId": "…", "reference": "AP-4K7Q2",      // AP- appointment, CB- call-back, OR- order; read to the customer
+    "type": "appointment",                                       // appointment | callback | order
     "status": "requested",                                       // requested | confirmed | done | cancelled
     "channel": "voice",                                          // chat | voice (whatsapp later)
     "language": "ur",                                            // language the customer was served in
     "data": { "name": "…", "phone": "+923001234567", "service": "root_canal", "datetime": "2026-10-22T17:00" },
+    // an ORDER's data: { "name", "phone", "order_items": [{ "id": "chicken_biryani", "name": "Chicken Biryani", "qty": 2 }],
+    //   "order_type": "pickup" | "delivery", "address" (delivery only), "notes" } — dishes only from the menu; prices and
+    //   the total are NOT in it: your team confirms them with the customer
     "summary": "Ahmed · Root canal · Thursday, 22 October 2026 at 5:00 pm",
     "scheduledLocal": "2026-10-22T17:00",   // business wall-clock STRING on purpose; turning it into an instant is the backend's call
     "timezone": "Asia/Karachi", "configVersion": 7, "conversationId": "…", "submissionKey": "…", "createdAt": "…" }
@@ -457,7 +466,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 651, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 677, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -474,6 +483,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 - Call greeting per agent (`greeting`, `recordCalls` in the settings above): the owner's words or a built-in greeting
   with the AI notice (and the recording notice only while recording is on), with warnings — never refusals — when
   the owner's text leaves them out.
+- Restaurant orders (`order` request type, B3/B4 above): only dishes on the owner's menu, pickup or delivery with
+  the address only for delivery, saved as a request your team confirms (with the total) — never "order placed".
 - Ending a call by itself (`autoEndCalls`, `endCallDelaySeconds` above): after a goodbye, a "no thanks" to
   "anything else?", or the agent's own goodbye — never mid-request, after "hold on" or while the caller talks.
 - Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are

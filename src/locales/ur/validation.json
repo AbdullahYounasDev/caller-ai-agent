@@ -67,6 +67,7 @@
   "collect.customLabelRequired": "تفصیل “{id}” کا نام ہونا ضروری ہے۔",
   "collect.customOptionsRequired": "تفصیل “{id}” میں کم از کم دو انتخاب ہونے چاہئیں۔",
   "collect.customTooMany": "آپ زیادہ سے زیادہ {max} اپنی تفصیلات شامل کر سکتے ہیں۔",
+  "collect.conditionInvalid": "{type} میں “{id}” صرف کسی دوسرے جواب کے بعد پوچھا جاتا ہے — اسے اس سوال کے نیچے رکھیں، اور وہ سوال فہرست میں رہنے دیں۔",
   "records.notFound": "یہ درخواست نہیں ملی۔",
   "records.invalidStatus": "یہ ایسی حالت نہیں جو درخواست کی ہو سکے۔",
   "records.invalidTransition": "درخواست اپنی موجودہ حالت سے اس حالت میں نہیں جا سکتی۔",

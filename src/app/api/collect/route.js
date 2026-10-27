@@ -92,5 +92,6 @@ function describeProblem(problem, tr, locale) {
   if (vars.id && getField(vars.id)) vars.id = pick(getField(vars.id).label, locale);
   if (vars.list === "services") vars.list = tr("dashboard:collect.services.title");
   if (vars.list === "staff") vars.list = tr("dashboard:collect.staff.title");
+  if (vars.list === "menu") vars.list = tr("dashboard:collect.menu.title");
   return tr(`validation:collect.${problem.code}`, { vars });
 }

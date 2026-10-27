@@ -234,6 +234,7 @@ src/lib/
     config.js                  # per-tenant collect config: normalise/validate, preset, describeCatalog
     engine.js                  # ★ advanceCollection — the deterministic state machine that owns a request
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
+    order.js                   # an order read against the MENU: dishes + quantities, merging changes, display — pure
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
   phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
@@ -1892,7 +1893,7 @@ for playback, webhook signature → dialled number → tenant in `registry.js`, 
 `transport.transfer`, §6.26); call recording itself (`recording_url` stays null; the per-agent
 `recordCalls` switch and the greeting's notice exist); a local Urdu recogniser.
 
-### 6.25 Taking a request — appointments and call-backs (the collect domain)
+### 6.25 Taking a request — appointments, call-backs and orders (the collect domain)
 
 **What exists:** the owner ticks, in the console's "What your agent collects" tab, which details
 the agent must ask for (name, phone, service, date and time, party size, reason…), per kind of
@@ -1954,6 +1955,36 @@ taken. Backend responsibilities that are stood in for are in
   is token-based ("جی نہیں" is NO — "ji" is a filler); regexes use Unicode word edges, never `\b`.
 - **Stand-ins, not a second backend.** `lib/standins/*` (customers, records, events) sit behind
   fixed interfaces; nothing else touches those tables. The AI never reads them back (§6.11).
+- **Orders (restaurants) — the third request type, `order`** (reference `OR-…`). Fields: name, phone, `order_items`,
+  `order_type` (pickup | delivery), `address` (asked ONLY for delivery), `notes` ("when you'd like it, the spice level,
+  or an allergy" — one open question; `order_time` exists for an owner who wants the time on its own). On in the
+  restaurant preset, off elsewhere (switchable in every business). Rules that must not drift:
+  - **Only dishes on the business's MENU** (`collect.menu`, the owner's own list like services, ≤150). `order_items`
+    (field type `items`, `collect/order.js`, pure) is read by the RULES — the menu's own dish names in the message
+    (English, Urdu script, Roman Urdu; "two", "do", "دو", "2 plates of", "x 3"; a plural or a one-letter slip in a
+    long word) — and, when the rules leave words over ("…and a PIZZA"), by the extractor too, which writes
+    "2 x Chicken Biryani; 1 x Pizza". The two are COMBINED: the rules' dishes plus what only the model heard. A dish
+    not on the menu is never written into the order; the caller is told (`not_on_menu`), and the rest of the order
+    is KEPT (`partial` — the caller does not repeat the other dishes). A word that fits several dishes ("biryani" with
+    chicken and beef biryani) is asked about (`ambiguous_item`), never guessed. A generic word ("chicken") alone is
+    never a dish. Stored as `[{id, name, qty}]` — `name` keeps an old order readable after the menu changes.
+  - **An order already taken changes only when the caller SAYS so** (`mentionsOrderChange`: add / also / another /
+    remove / make it / no X / "hata dein" / "aur bhi" / "ہٹا دیں"): "make it three biryanis" sets the number,
+    "another coke" adds one, "no raita" removes it — and "House 5, Biryani Street" never adds a biryani. After the
+    save a change updates the SAME request, like any correction.
+  - **Pickup or delivery** is a fixed `choice` with the ways callers say it (`options[].also`: "takeaway", "khud le
+    jayenge", "ghar pe bhej dein", "ڈیلیوری"). It may be noticed unasked ("Ahmed, it's for delivery"), never from a
+    question, and an answer already given changes only on "instead / actually / ki jagah".
+  - **Conditional fields — `when: {field, equals}`** on a record type's field (catalog data, kept by the console):
+    asked only when an earlier answer is that value. A field that does not apply is not asked, not required, not in
+    the read-back and not sent to the team (switching to pickup drops the address from the saved request). A broken
+    condition is refused on save (`conditionInvalid`) and DROPPED on read (asked always: one extra question beats a
+    required detail never asked); removing the source question in the console clears conditions on it.
+  - **No menu, no orders** (`needsList: "menu"`): the type stays switched on and the settings save, but
+    `enabledRecordTypes` leaves it out — the agent never offers orders — and the console warns
+    (`missingLists`, "your menu is empty").
+  - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
+    noted and the team confirms it and the total; prices and totals only from the reference material.
 
 **Verified:** `npm test` (539 unit tests, incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
@@ -1962,8 +1993,14 @@ English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn 
 every provider; real Pakistani callers through the voice path; the extraction call's latency
 against a real provider (it runs in parallel with retrieval, but nobody has timed it).
 
+**Orders verified:** tests/collect-order (26: the reader in three languages, menu checks, merging, pickup/delivery,
+conditions, the full conversation for pickup and delivery, a dish not on the menu, an ambiguous dish, a change after
+the save, the prompt), `test:collect` (an order through `respond()` on the real database: no menu → no order; with a
+menu → OR- reference, dishes stored, address for delivery, "add a coke" updates the same row). **Not verified:** the
+real extractor's "2 x dish" output on a real provider, and real callers ordering in Urdu.
+
 **Not built:** WhatsApp/SMS confirmation to the customer's phone; slot availability (opening
-hours only); modifying or cancelling an existing booking; tool execution of any other kind
+hours only); modifying or cancelling an existing booking or order; prices, totals and stock (the team confirms them); tool execution of any other kind
 (`TOOL_EXECUTION_AVAILABLE` stays false — collecting is not executing).
 
 ### 6.26 Passing a caller to a person, ending calls well, and the marker that leaked
@@ -2312,7 +2349,7 @@ right language, with history persisted per tenant.
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
 | **Phone numbers** | ✅ the lookup "dialled number → business → agent" (`registry.js resolveDialledNumber`): E.164, one number = one agent, refuses unknown / released / unlinked / archived / suspended, cached and dropped on change; calls record their number; the console can call "as if dialling" a number (§6.29). ⚠️ the numbers themselves are a stand-in (buying them is the backend's) and the Twilio webhook is not built |
 | **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge: one library, each document shared or limited to some agents, retrieval scoped to the agent and failing closed (§6.28) |
-| **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
+| **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back/order with a reference; orders take only dishes on the owner's menu, pickup or delivery (address only for delivery); works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
 | Console UI | ✅ upload/write/crawl as three top-level actions; write/edit share one modal + CodeMirror editor; multi-select bulk delete; every action button disables while its own request is in flight |
@@ -2364,7 +2401,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 651 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 677 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2542,7 +2579,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 651 unit tests: ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 677 unit tests: restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding

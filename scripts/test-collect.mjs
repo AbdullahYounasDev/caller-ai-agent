@@ -388,6 +388,53 @@ stub.state.reply = (n) => `Reply ${n}.`;
 }
 stub.state.reply = (n) => `Reply ${n}.`;
 
+// ── a restaurant order, end to end (§6.25) ─────────────────────────────────
+{
+  const R = "__collect_test_c__";
+  await prisma.record.deleteMany({ where: { tenantId: R } });
+  await prisma.customer.deleteMany({ where: { tenantId: R } });
+  await saveAgentConfig(R, { businessName: "Karachi Kitchen", timezone: "Asia/Karachi", hours: null, replyLanguage: "en" });
+  const menuless = { ...presetConfig("restaurant"), enabled: true };
+  const savedMenuless = await saveCollectConfig(R, validateCollectConfig(menuless).config);
+  ok(savedMenuless.collect.recordTypes.order.enabled === true, "the restaurant preset saves with orders on even before the menu is in…");
+  const co = await newConversation(R);
+  stub.state.extraction = () => ({ values: {}, date: null, time: null });
+  await say(R, co, "I'd like to order two chicken biryanis");
+  ok((await draftOf(co)) === null, "…but with no menu no order is taken");
+  const withMenu = {
+    ...menuless,
+    menu: [
+      { label: { en: "Chicken Biryani", ur: "چکن بریانی" } },
+      { label: { en: "Raita", ur: "رائتہ" } },
+      { label: { en: "Coke", ur: "کوک" } },
+    ],
+  };
+  await saveCollectConfig(R, validateCollectConfig(withMenu).config);
+  const order = await newConversation(R);
+  let o = await say(R, order, "I'd like to order two chicken biryanis and a raita");
+  ok(o.result.collection?.state === "ask" && (await draftOf(order))?.type === "order", "an order is started, the dishes said with it already noted");
+  ok(/Never say the order is placed/.test(o.instruction) && /Never state a price or a total/.test(o.instruction), "the model is told never to say 'placed' or invent a price");
+  await say(R, order, "Ahmed");
+  await say(R, order, "0300 1234567");
+  o = await say(R, order, "delivery please");
+  ok(o.result.collection?.field === "address", "delivery: the address is asked");
+  stub.state.extraction = () => ({ values: { order_items: "1 x Pizza" }, date: null, time: null });
+  o = await say(R, order, "House 5, Street 3, Clifton");
+  stub.state.extraction = () => ({ values: {}, date: null, time: null });
+  const rec = (await listRecords(R, {})).items?.[0] ?? (await prisma.record.findFirst({ where: { tenantId: R } }));
+  ok(rec?.type === "order" && /^OR-/.test(rec.reference), "saved at the last required detail, as an order request with an OR- reference");
+  // (JSONB reorders keys, so compare the meaning, not the text.)
+  const storedOrder = (rec?.data?.order_items ?? []).map((l) => `${l.qty} × ${l.id} (${l.name})`).join(", ");
+  ok(storedOrder === "2 × chicken_biryani (Chicken Biryani), 1 × raita (Raita)", `the dishes and quantities are stored, checked against the menu (${storedOrder})`);
+  ok(rec?.data?.address === "House 5, Street 3, Clifton" && rec?.data?.order_type === "delivery", "…with the delivery address");
+  o = await say(R, order, "Oh, and add a coke as well");
+  const after = await prisma.record.findFirst({ where: { tenantId: R } });
+  ok(after.data.order_items.length === 3 && after.data.order_items[2].id === "coke" && (await prisma.record.count({ where: { tenantId: R } })) === 1, "'add a coke' updates the same request");
+  await prisma.record.deleteMany({ where: { tenantId: R } });
+  await prisma.customer.deleteMany({ where: { tenantId: R } });
+}
+stub.state.extraction = () => ({ values: {}, date: null, time: null });
+
 await wipe();
 await prisma.agentConfig.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });
 await prisma.message.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });

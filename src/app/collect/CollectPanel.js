@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FIELDS, FIELD_GROUPS, INDUSTRIES, LIMITS, RECORD_TYPES, CUSTOM_FIELD_TYPES, getField, getIndustry, pick } from "@/lib/collect/catalog";
-import { fieldDef, presetConfig, typeFields, recordTypeLabel } from "@/lib/collect/config";
+import { choiceOptions, fieldDef, missingLists, presetConfig, typeFields, recordTypeLabel } from "@/lib/collect/config";
 import { displayValue } from "@/lib/collect/validate";
 
 /**
@@ -57,6 +57,7 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
   const [industry, setIndustry] = useState("");
   const [servicesText, setServicesText] = useState("");
   const [staffText, setStaffText] = useState("");
+  const [menuText, setMenuText] = useState("");
   const [custom, setCustom] = useState({ labelEn: "", labelUr: "", type: "text", options: "", sensitive: false });
   const [openWording, setOpenWording] = useState(null);
   const [addPick, setAddPick] = useState({});
@@ -72,6 +73,7 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
     setIndustry(data.collect.industry ?? "");
     setServicesText(linesOf(data.collect.services));
     setStaffText(linesOf(data.collect.staff));
+    setMenuText(linesOf(data.collect.menu));
     setDirty(false);
     setProblems([]);
     setStatus(null);
@@ -134,6 +136,7 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
       setVersion(data.version);
       setServicesText(linesOf(data.collect.services));
       setStaffText(linesOf(data.collect.staff));
+      setMenuText(linesOf(data.collect.menu));
       setDirty(false);
       setStatus(t("dashboard:collect.saved"));
     } catch (err) {
@@ -199,6 +202,15 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
   }
 
   const groupLabel = (g) => t(`dashboard:collect.group.${g}`);
+  // Types switched on that cannot be taken yet (orders with no menu): said, not refused.
+  const missing = new Set(missingLists(config).map((m) => m.type));
+  /** "only when “Pickup or delivery” is Delivery" for a field asked after a particular answer. */
+  const conditionText = (when) => {
+    const source = fieldDef(config, when?.field);
+    if (!source) return null;
+    const option = source.type === "yesno" ? { label: { en: when.equals === "yes" ? "Yes" : "No", ur: when.equals === "yes" ? "ہاں" : "نہیں" } } : choiceOptions(config, source).find((o) => o.id === when.equals);
+    return t("dashboard:collect.fields.when", { vars: { field: pick(source.label, uiLocale), value: option ? pick(option.label, uiLocale) : when.equals } });
+  };
 
   return (
     <div className="flex flex-col gap-6">
@@ -262,6 +274,12 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
                 </span>
               </label>
 
+              {entry.enabled && missing.has(type.id) && (
+                <p className="mt-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-xs text-amber-800" data-testid={`collect-missing-${type.id}`}>
+                  {t("dashboard:collect.menu.missing")}
+                </p>
+              )}
+
               {entry.enabled && (
                 <div className="mt-3 flex flex-col gap-3">
                   <div>
@@ -283,6 +301,7 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
                                     ⚠ {t("dashboard:collect.fields.sensitive")}
                                   </span>
                                 )}
+                                {item.when && conditionText(item.when) && <span className="ms-2 text-xs text-gray-500">({conditionText(item.when)})</span>}
                               </span>
                               <select
                                 aria-label={t("dashboard:collect.fields.required")}
@@ -298,7 +317,13 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
                               <button type="button" onClick={() => setOpenWording(wording ? null : `${type.id}:${item.id}`)} className="rounded border border-gray-300 px-2 py-1 text-xs">
                                 {t("dashboard:collect.fields.wording")}
                               </button>
-                              <button type="button" aria-label={t("dashboard:collect.fields.remove")} title={t("dashboard:collect.fields.remove")} onClick={() => update((x) => x.fields.splice(index, 1))} className="rounded border border-red-200 px-2 py-1 text-sm text-red-600">✕</button>
+                              <button type="button" aria-label={t("dashboard:collect.fields.remove")} title={t("dashboard:collect.fields.remove")} onClick={() =>
+                                  update((x) => {
+                                    const [removed] = x.fields.splice(index, 1);
+                                    // A question asked only after this answer is now always asked.
+                                    for (const other of x.fields) if (other.when?.field === removed.id) delete other.when;
+                                  })
+                                } className="rounded border border-red-200 px-2 py-1 text-sm text-red-600">✕</button>
                             </div>
                             {wording && (
                               <div className="mt-2 grid gap-2 sm:grid-cols-2">
@@ -381,6 +406,7 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
                           <li key={q.id}>
                             {q.question[language]}
                             {!q.required && <span className="ms-1 text-xs text-gray-400">({t("dashboard:collect.preview.optional")})</span>}
+                            {q.when && conditionText(q.when) && <span className="ms-1 text-xs text-gray-400">({conditionText(q.when)})</span>}
                           </li>
                         ))}
                       </ol>
@@ -411,6 +437,23 @@ export function CollectPanel({ tenantId, agentId, uiLocale, replyLanguage, t, ca
                 {t("dashboard:collect.services.suggest")}
               </button>
             )}
+          </div>
+        )}
+
+        {(usesField("order_items") || config.menu.length > 0) && (
+          <div>
+            <label className={labelClass} htmlFor="menu">{t("dashboard:collect.menu.title")}</label>
+            <textarea
+              id="menu"
+              className={`${inputClass} min-h-28`}
+              placeholder={t("dashboard:collect.menu.placeholder")}
+              value={menuText}
+              onChange={(e) => {
+                setMenuText(e.target.value);
+                edit((c) => ({ ...c, menu: withIds(parseLines(e.target.value), c.menu) }));
+              }}
+            />
+            <p className={helpClass}>{t("dashboard:collect.menu.help")}</p>
           </div>
         )}
 
