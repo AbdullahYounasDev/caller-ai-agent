@@ -12,6 +12,7 @@ import { VoiceActivity } from "./speech/vad";
 import { CallSession } from "./session";
 import { CallRecorder } from "./recorder";
 import { createBrowserTransport, decodeClientFrame } from "./transports/browser";
+import { createTwilioTransport, decodeTwilioMessage } from "./transports/twilio";
 import { createTicketVerifier, ticketSecret } from "./ticket";
 import { LIMITS, gatewayPort } from "./config";
 import { CLOSE_REFUSED, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
@@ -35,13 +36,15 @@ const PREVIEW_LIMIT = { limit: 30, windowMs: 60_000 };
  *
  *   GET  /health                 readiness, engines, installed voices, live call count
  *   GET  /voices/preview?voice=  a WAV of that voice saying a fixed sample line (the console's ▶)
- *   WS   /call                   one call per socket: { type: "hello", ticket } first, then audio
+ *   WS   /call                   one BROWSER call per socket: { type: "hello", ticket } first, then audio
+ *   WS   /twilio                 one PHONE call per socket (Twilio Media Streams, transports/twilio.js): the
+ *                                stream's start message carries the ticket the webhook issued (§6.30)
  *
  * Trust: a socket gets nothing until its first message carries a valid, unexpired,
- * unused ticket from POST /api/voice/session (ticket.js) — that route is where the
- * internal-auth guard and the tenant check (§4, §6.18) run. The tenant check is
- * repeated here because this process SERVES the tenant: if the tenant was suspended
- * after the ticket was issued, the call is still refused.
+ * unused ticket (ticket.js) — from POST /api/voice/session, where the internal-auth guard and the
+ * tenant check (§4, §6.18) run, or, for a phone call, from the Twilio webhook, where the
+ * request's signature is verified (§6.30). The tenant check is repeated here because this process
+ * SERVES the tenant: if the tenant was suspended after the ticket was issued, the call is still refused.
  */
 export async function startVoiceGateway({ env = process.env } = {}) {
   const port = gatewayPort(env);
@@ -113,7 +116,60 @@ export async function startVoiceGateway({ env = process.env } = {}) {
     return json(res, 404, { error: "not found" });
   });
 
-  const wss = new WebSocketServer({ server, path: "/call", maxPayload: 256 * 1024 });
+  // Two kinds of socket on one port. `noServer` + a hand-written upgrade: ws's `path` option would
+  // make the first server destroy the other's connections.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+  const wssPhone = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 });
+  server.on("upgrade", (req, socket, head) => {
+    const { pathname } = new URL(req.url ?? "/", "http://gateway");
+    const target = pathname === "/call" ? wss : pathname === "/twilio" ? wssPhone : null;
+    if (!target) {
+      socket.destroy();
+      return;
+    }
+    target.handleUpgrade(req, socket, head, (ws) => target.emit("connection", ws, req));
+  });
+
+  /**
+   * Check a verified ticket against what this gateway can serve right now. Shared by both kinds of
+   * call. Returns the reason it must be refused, or null.
+   */
+  async function refusalFor(verdict) {
+    if (!speech) return { code: ERROR_CODES.NOT_READY, message: "voice models are still loading" };
+    if (!verdict.ok) return { code: ERROR_CODES.BAD_TICKET, message: verdict.reason };
+    const serviceable = await assertTenantServiceable(verdict.tenantId);
+    if (!serviceable.ok) return { code: ERROR_CODES.BAD_TICKET, message: "tenant cannot be served" };
+    if (sessions.size >= LIMITS.maxConcurrentCalls) return { code: ERROR_CODES.BUSY, message: "gateway at capacity" };
+    const tenantCalls = [...sessions].filter((s) => s.tenantId === verdict.tenantId).length;
+    if (tenantCalls >= LIMITS.maxConcurrentCallsPerTenant) return { code: ERROR_CODES.TENANT_BUSY, message: "too many calls for this tenant" };
+    return null;
+  }
+
+  /** Build a call session on a transport and answer. */
+  function newSession({ verdict, transportName, transport }) {
+    return new CallSession({
+      tenantId: verdict.tenantId,
+      agentId: verdict.agentId,
+      line: verdict.line,
+      transportName,
+      transport,
+      stt: speech.stt,
+      tts: speech.tts,
+      createVad: () => new VoiceActivity({ sherpa: speech.engine.sherpa, config: speech.engine.vadConfig }),
+      engineInfo: speech.engineInfo,
+      brain: { respond, trimLastReply, noteUnheard, handoffFailed, getAgentConfig, invalidateAgentConfig },
+      openRecorder: (args) => CallRecorder.open(args),
+    });
+  }
+
+  /** The common end of a call: close its record, forget the session. */
+  function onSocketClosed(session) {
+    if (!session) return;
+    session.end(END_REASONS.DISCONNECTED).finally(() => {
+      sessions.delete(session);
+      console.log(`[voice] call ${session.recorder?.callId ?? "?"} closed — ${JSON.stringify(session.describe())}`);
+    });
+  }
 
   wss.on("connection", (ws) => {
     ws.isAlive = true;
@@ -146,53 +202,71 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       clearTimeout(helloTimeout);
 
       if (!speech) return refuse(ERROR_CODES.NOT_READY, "voice models are still loading");
-
       const verdict = tickets.verify(frame.ticket);
-      if (!verdict.ok) return refuse(ERROR_CODES.BAD_TICKET, verdict.reason);
-      const tenantId = verdict.tenantId;
-      const agentId = verdict.agentId;
-      const line = verdict.line;
-
-      const serviceable = await assertTenantServiceable(tenantId);
-      if (!serviceable.ok) return refuse(ERROR_CODES.BAD_TICKET, "tenant cannot be served");
-
-      if (sessions.size >= LIMITS.maxConcurrentCalls) return refuse(ERROR_CODES.BUSY, "gateway at capacity");
-      const tenantCalls = [...sessions].filter((s) => s.tenantId === tenantId).length;
-      if (tenantCalls >= LIMITS.maxConcurrentCallsPerTenant) {
-        return refuse(ERROR_CODES.TENANT_BUSY, "too many calls for this tenant");
-      }
+      const refusal = await refusalFor(verdict);
+      if (refusal) return refuse(refusal.code, refusal.message);
       if (ws.readyState !== ws.OPEN) return;
 
-      session = new CallSession({
-        tenantId,
-        agentId,
-        line,
-        transportName: "browser",
-        transport,
-        stt: speech.stt,
-        tts: speech.tts,
-        createVad: () => new VoiceActivity({ sherpa: speech.engine.sherpa, config: speech.engine.vadConfig }),
-        engineInfo: speech.engineInfo,
-        brain: { respond, trimLastReply, noteUnheard, handoffFailed, getAgentConfig, invalidateAgentConfig },
-        openRecorder: (args) => CallRecorder.open(args),
-      });
+      session = newSession({ verdict, transportName: "browser", transport });
       sessions.add(session);
       const started = await session.start();
-      if (started) console.log(`[voice] call ${session.recorder.callId} answered for tenant ${tenantId}, agent ${session.agentId ?? "default"}`);
+      if (started) console.log(`[voice] call ${session.recorder.callId} answered for tenant ${verdict.tenantId}, agent ${session.agentId ?? "default"}`);
       else sessions.delete(session);
     });
 
     ws.on("close", () => {
       clearTimeout(helloTimeout);
-      if (!session) return;
-      const s = session;
-      s.end(END_REASONS.DISCONNECTED).finally(() => {
-        sessions.delete(s);
-        console.log(`[voice] call ${s.recorder?.callId ?? "?"} closed — ${JSON.stringify(s.describe())}`);
-      });
+      onSocketClosed(session);
     });
 
     ws.on("error", (err) => console.error("[voice] socket error:", err.message));
+  });
+
+  // A PHONE call: Twilio opens this socket when the webhook's TwiML says <Connect><Stream>. There is
+  // no way to tell Twilio "refused" except to close — the call then moves on to the TwiML's next verb
+  // (a hangup). No heartbeat either: Twilio ends the stream itself (a `stop` message, then close), and
+  // the call's own limits (maxCallMs, the silence check-in) end anything else.
+  wssPhone.on("connection", (ws) => {
+    const transport = createTwilioTransport(ws, { env });
+    /** @type {CallSession|null} */
+    let session = null;
+    let starting = false;
+    const startTimeout = setTimeout(() => ws.close(CLOSE_REFUSED, "no start"), 10_000);
+
+    ws.on("message", async (data) => {
+      const message = decodeTwilioMessage(data);
+
+      if (session) {
+        if (message.kind === "media") session.onAudio(transport.decode(message.payload));
+        else if (message.kind === "stop") session.hangup();
+        return;
+      }
+      if (message.kind !== "start" || starting) return;
+      starting = true;
+      clearTimeout(startTimeout);
+
+      const verdict = message.ticket ? tickets.verify(message.ticket) : { ok: false, reason: "malformed" };
+      const refusal = await refusalFor(verdict);
+      if (refusal) {
+        console.warn(`[voice] phone call refused: ${refusal.code} (${refusal.message})`);
+        return ws.close(CLOSE_REFUSED, refusal.code);
+      }
+      if (ws.readyState !== ws.OPEN) return;
+
+      transport.bind({ streamSid: message.streamSid, callSid: message.callSid });
+      session = newSession({ verdict, transportName: "twilio", transport });
+      sessions.add(session);
+      const started = await session.start();
+      if (!started) return void sessions.delete(session);
+      session.log("twilio.stream", { callSid: message.callSid, streamSid: message.streamSid });
+      console.log(`[voice] phone call ${session.recorder.callId} answered for tenant ${verdict.tenantId}, agent ${session.agentId ?? "default"}`);
+    });
+
+    ws.on("close", () => {
+      clearTimeout(startTimeout);
+      onSocketClosed(session);
+    });
+    ws.on("error", (err) => console.error("[voice] phone socket error:", err.message));
   });
 
   // A socket whose peer vanished (laptop lid closed, network dropped) never sends a
@@ -210,7 +284,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
   }, 20_000);
 
   await new Promise((resolve) => server.listen(port, resolve));
-  console.log(`[voice] gateway listening on :${port} (ws /call, GET /health) — loading speech models…`);
+  console.log(`[voice] gateway listening on :${port} (ws /call, ws /twilio, GET /health) — loading speech models…`);
 
   // Models load AFTER the port is open, so /health can say "loading" instead of the
   // console seeing a refused connection.
@@ -238,6 +312,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
     clearInterval(heartbeat);
     await Promise.allSettled([...sessions].map((s) => s.end(END_REASONS.SERVER_SHUTDOWN)));
     wss.close();
+    wssPhone.close();
     server.close();
     await prisma.$disconnect().catch(() => {});
   }

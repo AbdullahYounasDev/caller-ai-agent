@@ -778,7 +778,26 @@ export class CallSession {
     this.log("handoff.started", { turn, reason: handoff.reason, contacts: contacts.map((c) => ({ id: c.id, role: c.role, name: c.name })) });
 
     let failure = "unsupported";
-    if (typeof this.transport.transfer === "function") {
+    if (typeof this.transport.transferInOrder === "function") {
+      // A phone line hands the WHOLE ordered list to the network (Twilio rings the next person itself
+      // when one does not answer), so the call cannot come back to the agent between attempts.
+      this.log("handoff.attempt", { turn, contactIds: contacts.map((c) => c.id) });
+      let outcome;
+      try {
+        outcome = await this.transport.transferInOrder(contacts, { summary: handoff.summary ?? "", reason: handoff.reason ?? null, callId: this.recorder?.callId ?? null });
+      } catch (err) {
+        console.error("[voice] transfer failed:", err);
+        outcome = { connected: false, reason: "failed" };
+      }
+      if (this.ended) return;
+      if (outcome?.connected) {
+        this.log("handoff.completed", { turn, contactId: contacts[0]?.id ?? null, ordered: true });
+        await this.end(END_REASONS.TRANSFERRED, { insideTurn: true });
+        return;
+      }
+      failure = outcome?.reason ?? "failed";
+      this.log("handoff.failed", { turn, reason: failure });
+    } else if (typeof this.transport.transfer === "function") {
       for (const [index, contact] of contacts.entries()) {
         // The caller was told who they were being put through to (the reply ended with it). When that
         // person does not answer, they are told so and who is tried next — never silence on the line.

@@ -306,7 +306,10 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   | `INTERNAL_API_KEY` | authenticates calls between the backend and the engine | **yes** |
   | `VOICE_SESSION_SECRET` | signs the one-minute voice-call tickets (falls back to `INTERNAL_API_KEY`) | recommended |
   | event-signing secret (B7) | HMAC on engine → backend events | when B7 is built |
-  | Twilio webhook signature secret | verifying incoming phone-call webhooks | when B11 is built |
+  | `TWILIO_AUTH_TOKEN` | the engine verifies every Twilio webhook's signature with it, and places transfers | **yes**, for phone calls (B11) |
+  | `TWILIO_ACCOUNT_SID` | only for passing a caller to a person (transfers go through Twilio's REST API) | for transfers |
+  | `TWILIO_WEBHOOK_BASE_URL` | the public https origin of the engine as Twilio reaches it (falls back to `PUBLIC_APP_URL`) | **yes**, for phone calls |
+  | `VOICE_GATEWAY_PUBLIC_URL` | where Twilio opens the call's audio stream (`wss://…/twilio`) | **yes**, for phone calls |
 
   Provider and model choices (`LLM_PROVIDER`, `GEMINI_CHAT_MODEL`, …) are plain environment settings, listed in
   `CLAUDE.md` §10.
@@ -399,11 +402,22 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   a number without a country code, an agent of another tenant, an archived agent.
 - **Engine change when it lands:** `findNumberForRouting()` calls your endpoint instead of the stand-in table;
   `resolveDialledNumber`, its callers and its tests stay. `/api/numbers` and the console's Numbers tab are removed.
-- **Engine builds next:** the Twilio webhook (verify Twilio's signature FIRST → this lookup → TwiML
-  `<Connect><Stream>` to the voice gateway, or `<Say>` the not-in-service line and hang up) and
-  `transports/twilio.js` (μ-law 8 kHz ⇄ 16 kHz PCM, barge-in, the real `transfer`, B11b).
-- **Open:** who owns the Twilio account and the purchase API calls (proposal: the backend, since it bills); whether the
-  engine also needs `GET /internal/tenants/{id}/numbers` for reports.
+- **Engine side of the phone call is BUILT** (CLAUDE.md §6.30): `POST /api/telephony/twilio/voice` verifies Twilio's
+  signature FIRST, runs this lookup, and answers TwiML — a media stream to the voice gateway with a signed one-minute
+  ticket, or the polite "not in service" line and a hang-up; `transports/twilio.js` carries the audio (8 kHz μ-law ⇄ the
+  speech models' 16 kHz), barge-in and the transfer (B11b). Verified against a simulated Twilio with the real app, gateway
+  and speech models; **not yet through Twilio's real network.**
+- **What you set up, per number, in Twilio:** open the number → "A call comes in" → Webhook, HTTP POST →
+  `<engine's public https address>/api/telephony/twilio/voice`. The console's Numbers tab (and
+  `GET /api/telephony/twilio/setup`) shows the exact address and which environment settings are still missing. Buying a
+  number and pointing it there is the whole provisioning step on the engine's side — the engine finds the business and agent
+  from the number you stored (above), never from anything the caller supplies.
+- **One Twilio account per engine deployment is assumed** (one Auth Token verifies all webhooks). If you want a Twilio
+  SUBACCOUNT per business, the token and sid become per-tenant values you hand over — tell me and the lookup answer grows
+  two fields.
+- **Open:** who owns the Twilio account and the purchase API calls (proposal: the backend, since it bills); where call
+  recordings are stored (the per-agent `recordCalls` switch exists, nothing is recorded); whether the engine also needs
+  `GET /internal/tenants/{id}/numbers` for reports.
 
 ### B11b — Passing a call to a person (the transfer seam)
 
@@ -411,8 +425,11 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   caller; **placing the transfer** is the phone transport's job.
 - **Engine today:** the decision, the announcement, the order of contacts, the fallback when nobody answers, and the
   summary for the person who picks up are all built and tested. The browser console only *simulates* the transfer.
-- **What the real phone transport (Twilio, engine side) must implement:**
-  `transport.transfer(contact, { summary, reason, callId }) → { connected: boolean, reason?: "busy"|"no_answer"|"failed" }`.
+- **The real phone transport (BUILT, §6.30)** hands the WHOLE ordered list to Twilio once
+  (`transport.transferInOrder(contacts, { summary })`): Twilio rings the first person for 20 s, reading them the summary
+  first, and asks the engine's `/api/telephony/twilio/transfer` for the next when they do not pick up. The browser
+  console keeps the per-person `transfer(contact, …)` simulation. **Known limit:** once placed, the call cannot return to
+  the agent — if nobody answers, the caller hears a fixed English line and the call ends (no call-back can be taken).
 - **What the backend provides:** storing the `escalation` document (B2), and — if it owns Twilio numbers (B11) — the
   caller-id / number to dial out from. The engine never logs or returns the contacts' numbers except to the transport.
 - **Events:** `handoff.requested`, `handoff.unavailable` (B7).
@@ -454,6 +471,8 @@ without it, the tenant's default agent (settings, chat, calls) or every agent (l
 | `GET /api/voice/calls[?agentId=][&numberId=]`, `/api/voice/calls/:id` | call history (turns, timeline), per agent or per number | list / detail |
 | `GET/POST /api/numbers[?agentId=]`, `PATCH /api/numbers/:id` | phone numbers and the agent each rings (B11) — stand-in | `{numbers}` / `{number}` |
 | `GET /api/numbers/lookup?to=` | the phone-number lookup (B11), no tenantId | `{ok,tenantId,agentId,numberId,e164}` or `{ok:false,reason}` |
+| `POST /api/telephony/twilio/voice`, `…/transfer?t=`, `…/whisper?t=` | **Twilio's webhooks** (B11) — NOT behind `INTERNAL_API_KEY`; guarded by Twilio's request signature | TwiML |
+| `GET /api/telephony/twilio/setup` | is the phone path configured? names of missing settings, the webhook address | `{ready,missing,transfers,voiceWebhookUrl,streamUrl}` |
 | `GET /api/locales` | UI strings (public) | catalog |
 
 Voice gateway (separate process, `npm run voice`, port 3001): `GET /health`, `GET /voices/preview`,
@@ -468,7 +487,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 685, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 732, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -489,6 +508,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
   and the agent always knows it — general facts only, never a price; flagged when a source document changes.
 - Restaurant orders (`order` request type, B3/B4 above): only dishes on the owner's menu, pickup or delivery with
   the address only for delivery, saved as a request your team confirms (with the total) — never "order placed".
+- Phone calls through Twilio (B11, CLAUDE.md §6.30): the signed webhook, the media-stream phone transport and the
+  ordered transfer — proven against a simulated Twilio (`npm run twilio:smoke`), not yet through Twilio's real network.
 - Ending a call by itself (`autoEndCalls`, `endCallDelaySeconds` above): after a goodbye, a "no thanks" to
   "anything else?", or the agent's own goodbye — never mid-request, after "hold on" or while the caller talks.
 - Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are
@@ -501,8 +522,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 1. Build the `/internal/*` contract routes you choose, and replace the stand-ins as each backend piece lands.
 2. Real outbox + signed event sender (B7).
 3. Usage events (B8) once the shape is agreed.
-4. Twilio webhook + transport (B11) on top of the built lookup, recording calls when `recordCalls` is on (the greeting's
-   disclosure wording is done).
+4. The first REAL phone call (the webhook and transport are built, B11): tune the VAD / barge-in / latency on real
+   audio; recording calls when `recordCalls` is on (the greeting's disclosure wording is done; where audio is stored is yours).
 5. Listen to real calls on a real laptop after the pause and speech-gap fixes (measured here with real voices,
    not yet heard on a live call).
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.

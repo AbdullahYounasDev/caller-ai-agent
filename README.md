@@ -37,7 +37,10 @@ failures behind each rule, what works and what does not, and the measured number
 - **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,
   Urdu and Roman Urdu — the word lists are plain files in `src/lib/phrases/`, one per language.
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.
-- **Not built yet:** the Twilio webhook and phone transport (real phone calls), and the backend's half (stood in here).
+- **Phone calls through Twilio:** the webhook (it checks the request really came from Twilio), the phone transport and passing
+  a caller to a person are built and proven against a simulated Twilio (`npm run twilio:smoke`). Not yet tried through
+  Twilio's real network. See `CLAUDE.md` §6.30 and `.env.example`.
+- **Not built yet:** call recording, and the backend's half (stood in here).
 
 ## Stack
 

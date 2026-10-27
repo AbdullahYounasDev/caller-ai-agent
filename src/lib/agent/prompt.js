@@ -445,7 +445,7 @@ export function buildVoiceGreeting(config) {
  * start of every slow turn is exactly what makes an agent sound like a machine. Every
  * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
  *
- * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"} kind
+ * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"|"transfer_unanswered"} kind
  * @param {"en"|"ur"} language
  * @param {number} [variant]  any integer; picks one of the phrasings
  * @returns {string}
@@ -504,6 +504,13 @@ export function voiceLine(kind, language, variant = 0) {
     closing: {
       en: ["Thank you for calling. Goodbye."],
       ur: ["کال کرنے کا شکریہ۔ خدا حافظ۔"],
+    },
+    // A phone transfer nobody picked up: the call has already left the agent (Twilio is ringing the
+    // people), so this is said by the phone company's own voice, in English, before it hangs up
+    // (telephony/twilio-webhook.js). The agent cannot take a call-back any more at that point.
+    transfer_unanswered: {
+      en: ["I'm sorry, nobody is available to take your call right now. Please call again a little later. Goodbye."],
+      ur: ["معذرت، اس وقت کوئی آپ کی کال لینے کے لیے دستیاب نہیں ہے۔ براہِ کرم تھوڑی دیر بعد دوبارہ کال کریں۔ خدا حافظ۔"],
     },
   };
   const options = lines[kind][language === "ur" ? "ur" : "en"];

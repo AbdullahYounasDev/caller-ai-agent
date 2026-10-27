@@ -14,7 +14,7 @@ const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, noteUnheard, agentId, line, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -29,8 +29,16 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, noteUn
     },
   };
 
-  const sent = { audio: [], notify: [], clears: 0, closed: null, transfers: [] };
+  const sent = { audio: [], notify: [], clears: 0, closed: null, transfers: [], ordered: [] };
   const transport = {
+    ...(transferInOrder
+      ? {
+          transferInOrder: async (contacts, context) => {
+            sent.ordered.push({ contacts, context });
+            return transferInOrder(contacts, context);
+          },
+        }
+      : {}),
     ...(transfer
       ? {
           transfer: async (contact, context) => {
@@ -674,6 +682,48 @@ describe("CallSession", () => {
     assert.deepEqual(h.handoffFailures, [{ tenantId: "t1", conversationId: "conv-1" }]);
     assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry, nobody is available")), "the caller hears why");
     assert.ok(h.recorded.events.some((e) => e.type === "handoff.unavailable"));
+  });
+
+  test("a phone line hands the WHOLE ordered list over once, after the announcement; the call then ends as 'transferred'", async () => {
+    const h = harness({ transcripts: ["I want to speak to a person."], replies: [handingOff()], transferInOrder: async () => ({ connected: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(300);
+    assert.equal(h.sent.ordered.length, 0, "not before the announcement has played");
+    await h.pump(5000);
+    await h.settle();
+    assert.equal(h.sent.ordered.length, 1, "one hand-over, not one per person");
+    assert.deepEqual(h.sent.ordered[0].contacts.map((c) => c.id), ["c1", "c2"]);
+    assert.equal(h.sent.ordered[0].contacts[0].phone, "+923001234567", "the transport gets the numbers");
+    assert.equal(h.sent.ordered[0].context.summary, "The caller asked to speak to a person.");
+    assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.completed" && e.data.ordered === true));
+  });
+
+  test("a phone line that could not place the transfer leaves the call with the agent, which says nobody is available", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], transferInOrder: async () => ({ connected: false, reason: "failed" }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed" && e.data.reason === "failed"));
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.unavailable"));
+    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry, nobody is available")));
+    assert.equal(h.handoffFailures.length, 1, "the conversation's handoff state is reset");
+  });
+
+  test("a phone transfer that throws is a failed attempt, never a crashed call", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], transferInOrder: async () => { throw new Error("twilio down"); } });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed"));
   });
 
   test("a transport that cannot transfer (no phone line) is the same as nobody answering", async () => {
