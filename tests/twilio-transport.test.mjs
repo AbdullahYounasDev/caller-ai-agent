@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { createTwilioTransport, decodeTwilioMessage } from "@/lib/voice/transports/twilio";
 import { float32ToMulaw } from "@/lib/voice/audio";
 import { twilioConfig } from "@/lib/telephony/twilio-config";
+import { verifyToken } from "@/lib/telephony/signed-token";
 
 // The Twilio Media Streams adapter (CLAUDE.md §6.30): Twilio's JSON in, the session's audio out, and a
 // transfer that hands the call to the network. A fake socket stands in for Twilio.
@@ -118,6 +119,17 @@ describe("the agent's voice out to the phone", () => {
 
 describe("passing the call to people", () => {
   const contacts = [{ id: "c1", phone: "+923001234567", role: "Representative", name: "Bilal" }, { id: "c2", phone: "+923215551234", role: "Doctor", name: "Ayesha" }];
+
+  test("the way back to the agent travels in the signed state of the transfer (signed, so it cannot be altered; Twilio and we are the only readers)", async () => {
+    let seen;
+    const transport = transportOn(fakeSocket(), { sleep: async () => {}, fetchImpl: async (url, init) => ((seen = init), { ok: true }) });
+    const resume = { tenantId: "t1", agentId: "a1", line: { numberId: "n1", toNumber: "+442071234567", fromNumber: null }, conversationId: "conv-1", callId: "call-1", language: "ur", count: 0 };
+    await transport.transferInOrder(contacts, { summary: "s", resume });
+    const twiml = new URLSearchParams(seen.body).get("Twiml");
+    const state = verifyToken("xfer", /transfer\?t=([A-Za-z0-9_.-]+)/.exec(twiml)[1], { secret: ENV.VOICE_SESSION_SECRET });
+    assert.deepEqual(state.r, { t: "t1", a: "a1", l: "n1", d: "+442071234567", c: "conv-1", k: "call-1", g: "ur", n: 0 });
+    assert.ok(!twiml.includes("conv-1"), "not spelled out in the TwiML itself — only inside the signed token");
+  });
 
   test("the live call's instructions are replaced with a <Dial> to the first person, after the last words have played", async () => {
     const order = [];

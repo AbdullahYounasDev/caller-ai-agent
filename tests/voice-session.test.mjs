@@ -14,7 +14,7 @@ const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, resume, transportName = "browser", saveRecording, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -126,7 +126,9 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, transf
     tenantId: "t1",
     agentId,
     line,
-    transportName: "browser",
+    resume,
+    transportName,
+    saveRecording,
     transport,
     stt,
     tts,
@@ -699,6 +701,118 @@ describe("CallSession", () => {
     assert.equal(h.sent.ordered[0].context.summary, "The caller asked to speak to a person.");
     assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
     assert.ok(h.recorded.events.some((e) => e.type === "handoff.completed" && e.data.ordered === true));
+  });
+
+  test("the transfer is told where the call comes back to: this conversation, call, line and language", async () => {
+    const h = harness({ transcripts: ["connect me to a person"], replies: [handingOff()], agentId: "agent-1", config: { agentId: "agent-1" }, line: { numberId: "n1", toNumber: "+442071234567", fromNumber: null }, transferInOrder: async () => ({ connected: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.deepEqual(h.sent.ordered[0].context.resume, {
+      tenantId: "t1", agentId: "agent-1", line: { numberId: "n1", toNumber: "+442071234567", fromNumber: null },
+      conversationId: "conv-1", callId: "call-1", language: "en", count: 0,
+    });
+  });
+
+  describe("recording the call's audio (§6.30)", () => {
+    const saved = [];
+    const keeper = (result = "file:t1/call-1.wav") => async (args) => (saved.push(args), result);
+    const phone = (extra = {}) => harness({ transportName: "twilio", config: { recordCalls: true }, saveRecording: keeper(), ...extra });
+
+    test("a phone call whose agent has recording on is kept: both sides, one file, its reference on the call", async () => {
+      saved.length = 0;
+      const h = phone();
+      await h.session.start();
+      h.session.onAudio(new Float32Array(1600).fill(0.3));
+      h.advance(500);
+      await h.session.hangup();
+      assert.equal(saved.length, 1);
+      assert.deepEqual([saved[0].tenantId, saved[0].callId], ["t1", "call-1"]);
+      assert.equal(saved[0].wav.toString("ascii", 0, 4), "RIFF");
+      assert.equal(saved[0].wav.readUInt16LE(22), 2, "stereo: caller and agent apart");
+      assert.equal(await h.recorded.closed.recordingUrl, "file:t1/call-1.wav");
+      const types = h.recorded.events.map((e) => e.type);
+      assert.ok(types.includes("recording.started") && types.includes("recording.finished"));
+    });
+
+    test("recording off, or a browser call, or no storage: nothing is kept and nothing is logged", async () => {
+      for (const make of [
+        () => phone({ config: { recordCalls: false } }),
+        () => phone({ transportName: "browser" }),
+        () => phone({ saveRecording: undefined }),
+      ]) {
+        saved.length = 0;
+        const h = make();
+        await h.session.start();
+        h.session.onAudio(new Float32Array(1600).fill(0.3));
+        await h.session.hangup();
+        assert.equal(saved.length, 0);
+        assert.equal(await h.recorded.closed.recordingUrl, null);
+        assert.ok(!h.recorded.events.some((e) => e.type.startsWith("recording.")));
+      }
+    });
+
+    test("a storage that fails never breaks the hang-up — the call is simply left without a recording", async () => {
+      const h = phone({ saveRecording: async () => { throw new Error("disk full"); } });
+      await h.session.start();
+      h.session.onAudio(new Float32Array(1600).fill(0.3));
+      await h.session.hangup();
+      assert.equal(await h.recorded.closed.recordingUrl, null);
+      assert.equal(h.recorded.closed.status, "completed");
+    });
+
+    test("a barge-in cuts the recorded agent audio to what was heard", async () => {
+      const h = phone();
+      await h.session.start();
+      const before = h.session.audio.agentEnd;
+      assert.ok(before > 0, "the greeting is in the recording");
+      h.session.bargeIn(400);
+      assert.ok(h.session.audio.agentEnd <= before);
+    });
+  });
+
+  describe("a call that comes back from a transfer nobody answered", () => {
+    const resume = { conversationId: "conv-1", callId: "call-0", language: "en", count: 1 };
+
+    test("continues the SAME conversation, does not greet again, says nobody is available and clears the handoff state", async () => {
+      const h = harness({ resume, agentId: "agent-1" });
+      assert.equal(await h.session.start(), true);
+      await h.settle();
+      assert.equal(h.recorderOpens[0].conversationId, "conv-1");
+      assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry, nobody is available")), "the caller hears why they are back");
+      assert.ok(!h.spoken.some((x) => /thanks for calling/i.test(x.text)), "no second greeting");
+      assert.ok(h.recorded.greeting.startsWith("I'm sorry, nobody is available"), "the line is in the transcript the model reads next");
+      assert.equal(h.handoffFailures.length, 1);
+      const resumed = h.recorded.events.find((e) => e.type === "call.resumed");
+      assert.deepEqual(resumed.data, { conversationId: "conv-1", previousCallId: "call-0", resumes: 1 });
+      assert.ok(h.recorded.events.some((e) => e.type === "resume.spoken") && !h.recorded.events.some((e) => e.type === "greeting.spoken"));
+      assert.equal(h.recorded.events.find((e) => e.type === "call.started").data.resumedFromCallId, "call-0");
+    });
+
+    test("speaks in the language the call was last in", async () => {
+      const h = harness({ resume: { ...resume, language: "ur" } });
+      await h.session.start();
+      await h.settle();
+      assert.ok(h.spoken.some((x) => x.language === "ur" && x.text.startsWith("معذرت، اس وقت کوئی دستیاب نہیں")));
+    });
+
+    test("an ordinary call does not open an old conversation", async () => {
+      const h = harness();
+      await h.session.start();
+      assert.equal(h.recorderOpens[0].conversationId, null);
+    });
+
+    test("a second transfer from a resumed call counts the comebacks so far", async () => {
+      const h = harness({ resume: { ...resume, count: 2 }, transcripts: ["connect me to a person"], replies: [handingOff()], transferInOrder: async () => ({ connected: true }) });
+      await h.session.start();
+      h.advance(5000);
+      h.hear({ type: "start" }, utterance);
+      await h.pump(8000);
+      await h.settle();
+      assert.equal(h.sent.ordered[0].context.resume.count, 2);
+    });
   });
 
   test("a phone line that could not place the transfer leaves the call with the agent, which says nobody is available", async () => {

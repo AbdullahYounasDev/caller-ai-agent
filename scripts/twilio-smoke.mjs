@@ -15,6 +15,12 @@
  *   4. reports what came back (the agent's voice as μ-law frames), and reads the call's record from
  *      the database: transport, numbers, what the agent HEARD, what it answered
  *
+ * It also proves the limitation fixes of §6.30: the caller speaks from the very first sample (the VAD's
+ * pre-roll keeps the first words), the call is RECORDED when the agent's switch is on (set RECORDINGS_DIR for
+ * the gateway and the app to the same folder) and the recording is read back and deleted through the
+ * API, a business at its call limit is told "all lines are busy" out loud, and a transfer nobody answers
+ * brings the call BACK to the agent (the same conversation, no second greeting).
+ *
  * What it does NOT prove: Twilio's own network, the carrier audio quality, or the transfer's REST call
  * (that needs a real Twilio account). It spends one chat request and one embedding only when a model
  * key is configured; without one the turn fails and the agent says its apology — the transport is
@@ -43,6 +49,10 @@ const { float32ToMulaw, mulawToFloat32, resample } = await import("@/lib/voice/a
 const { loadLocalSpeech } = await import("@/lib/voice/speech/engine");
 const { createTextToSpeech } = await import("@/lib/voice/speech/tts");
 const { WebSocket } = await import("ws");
+const { buildTransferTwiml } = await import("@/lib/telephony/twilio-webhook");
+const { twilioConfig } = await import("@/lib/telephony/twilio-config");
+const { ticketSecret } = await import("@/lib/voice/ticket");
+const internalHeaders = process.env.INTERNAL_API_KEY ? { "x-internal-key": process.env.INTERNAL_API_KEY } : {};
 
 const TENANT = "__twilio_smoke__";
 const NUMBER = "+442079460000";
@@ -59,6 +69,8 @@ const check = (ok, message) => {
 };
 
 async function cleanup() {
+  await prisma.callEvent.deleteMany({ where: { tenantId: TENANT } });
+  await prisma.callTurn.deleteMany({ where: { tenantId: TENANT } });
   await prisma.callLog.deleteMany({ where: { tenantId: TENANT } });
   await prisma.message.deleteMany({ where: { tenantId: TENANT } });
   await prisma.conversation.deleteMany({ where: { tenantId: TENANT } });
@@ -79,7 +91,7 @@ async function postWebhook(path, params, { signature } = {}) {
 
 try {
   await cleanup();
-  await saveAgentConfig(TENANT, { businessName: "Phone Smoke Clinic", purpose: "A clinic used to test the phone path.", timezone: "Asia/Karachi", replyLanguage: "en" });
+  await saveAgentConfig(TENANT, { businessName: "Phone Smoke Clinic", purpose: "A clinic used to test the phone path.", timezone: "Asia/Karachi", replyLanguage: "en", recordCalls: true });
   const agentId = (await prisma.agentConfig.findFirst({ where: { tenantId: TENANT } })).id;
   await addNumber(TENANT, { e164: NUMBER, agentId, label: "smoke" });
   log(`business ready; ${NUMBER} rings its agent`);
@@ -135,10 +147,10 @@ try {
   await sleep((greetingBytes / 8000) * 1000 + 300); // the greeting "plays"; the gateway uses its own estimate
 
   // speak, 20 ms per frame in real time, then a second of silence to end the turn
-  // A person breathes in before they speak: 400 ms of line noise first. (Speech starting at the very
-  // first sample is not what a phone call sounds like, and the VAD then misses the first word.)
+  // NO lead-in: the caller starts at the very first sample (it used to cost the first words; the VAD's
+  // pre-roll gives them back — voice/speech/vad.js).
   const silence = Buffer.alloc(8000, 0xff);
-  const speech = Buffer.concat([Buffer.alloc(3200, 0xff), phoneQuestion, silence]);
+  const speech = Buffer.concat([phoneQuestion, silence]);
   const before = outbound.length;
   for (let i = 0, next = performance.now(); i < speech.length; i += 160) {
     ws.send(JSON.stringify({ event: "media", media: { track: "inbound", chunk: String(i / 160 + 1), timestamp: String(i / 8), payload: speech.subarray(i, i + 160).toString("base64") } }));
@@ -169,6 +181,77 @@ try {
   console.log(`the agent ANSWERED: "${(turn?.agentText ?? "").slice(0, 200)}"`);
   console.log(`outcome: ${turn?.outcome ?? "-"} · intent: ${turn?.intent ?? "-"}${turn?.error ? ` · error: ${String(turn.error).slice(0, 120)}` : ""}`);
   check(Boolean(turn?.callerText), "the caller's 8 kHz phone audio was understood as words");
+  const firstWord = say.trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, "");
+  check((turn?.callerText ?? "").toLowerCase().includes(firstWord), `…including its FIRST word ("${firstWord}") although the caller spoke from the first sample`);
+
+  // ── the recording ────────────────────────────────────────────────────────
+  check(Boolean(call?.recordingUrl), "the call was recorded (the agent's recording switch is on): its reference is on the call");
+  const audio = await fetch(`${appUrl}/api/voice/calls/${call.id}/recording?tenantId=${TENANT}`, { headers: internalHeaders });
+  const wav = Buffer.from(await audio.arrayBuffer());
+  check(audio.status === 200 && audio.headers.get("content-type") === "audio/wav" && wav.toString("ascii", 0, 4) === "RIFF", "…and it can be fetched from the API as a WAV");
+  if (wav.length > 44) {
+    const frames = (wav.length - 44) / 4;
+    let left = 0, right = 0;
+    for (let i = 0; i < frames; i++) {
+      left += Math.abs(wav.readInt16LE(44 + i * 4));
+      right += Math.abs(wav.readInt16LE(44 + i * 4 + 2));
+    }
+    check(wav.readUInt16LE(22) === 2 && wav.readUInt32LE(24) === 8000, `…stereo, 8 kHz, ${(frames / 8000).toFixed(1)} s`);
+    check(left / frames > 20 && right / frames > 20, `…with sound on both sides (caller avg ${(left / frames).toFixed(0)}, agent avg ${(right / frames).toFixed(0)})`);
+  }
+  const otherTenant = await fetch(`${appUrl}/api/voice/calls/${call.id}/recording?tenantId=someone-else`, { headers: internalHeaders });
+  check(otherTenant.status === 404, "another business cannot fetch it (404)");
+  const removed = await fetch(`${appUrl}/api/voice/calls/${call.id}/recording?tenantId=${TENANT}`, { method: "DELETE", headers: internalHeaders });
+  const gone = await fetch(`${appUrl}/api/voice/calls/${call.id}/recording?tenantId=${TENANT}`, { headers: internalHeaders });
+  check(removed.status === 200 && gone.status === 404, "deleting it removes the audio and the pointer to it");
+
+  // ── a transfer nobody answers comes BACK to the agent ────────────────────
+  const config = twilioConfig(process.env);
+  const transferToken = /transfer\?t=([A-Za-z0-9_.-]+)/.exec(
+    buildTransferTwiml({
+      contacts: [{ phone: "+923009999999" }], index: 0, summary: "smoke", config, secret: ticketSecret(process.env),
+      resume: { tenantId: TENANT, agentId, line: { numberId: call.phoneNumberId, toNumber: NUMBER, fromNumber: FROM }, conversationId: call.conversationId, callId: call.id, language: "en", count: 0 },
+    })
+  )[1];
+  const back = await (await postWebhook(`/api/telephony/twilio/transfer?t=${transferToken}`, { CallSid: CALL_SID, DialCallStatus: "no-answer" })).text();
+  check(/<Connect><Stream url="/.test(back) && !/<Say/.test(back), "nobody answered the transfer → the webhook sends the call back to the agent (a new stream, no recorded voice)");
+  const backTicket = /name="ticket" value="([^"]+)"/.exec(back)?.[1];
+  if (backTicket) {
+    const ws2 = new WebSocket(url);
+    const frames2 = [];
+    ws2.on("message", (data) => {
+      const m = JSON.parse(String(data));
+      if (m.event === "media") frames2.push(1);
+    });
+    await new Promise((resolve, reject) => (ws2.on("open", resolve), ws2.on("error", reject)));
+    ws2.send(JSON.stringify({ event: "start", start: { streamSid: "MZresume", callSid: CALL_SID, customParameters: { ticket: backTicket }, mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } } }));
+    const w = performance.now();
+    while (!frames2.length && performance.now() - w < 20_000) await sleep(100);
+    check(frames2.length > 0, "…and the agent speaks to the caller again (it says nobody is available and offers a call-back)");
+    ws2.send(JSON.stringify({ event: "stop", streamSid: "MZresume" }));
+    await sleep(2_500);
+    const calls = await prisma.callLog.findMany({ where: { tenantId: TENANT }, orderBy: { createdAt: "asc" }, include: { events: true } });
+    const resumed = calls.at(-1);
+    check(calls.length === 2 && resumed.conversationId === call.conversationId, "…in the SAME conversation (a second call record on the first one's conversation)");
+    check(resumed.events.some((e) => e.type === "call.resumed") && !resumed.events.some((e) => e.type === "greeting.spoken"), "…without a second greeting (the timeline says call.resumed)");
+  }
+
+  // ── a business at its call limit is told so, out loud ────────────────────
+  const held = [];
+  for (let i = 0; i < 3; i++) {
+    const answeredAgain = await (await postWebhook(path, { ...params, CallSid: `CA${String(i).repeat(32)}` })).text();
+    const t = /name="ticket" value="([^"]+)"/.exec(answeredAgain)?.[1];
+    if (!t) break;
+    const sock = new WebSocket(url);
+    await new Promise((resolve, reject) => (sock.on("open", resolve), sock.on("error", reject)));
+    sock.send(JSON.stringify({ event: "start", start: { streamSid: `MZheld${i}`, callSid: `CA${String(i).repeat(32)}`, customParameters: { ticket: t }, mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } } }));
+    held.push(sock);
+  }
+  await sleep(2_000);
+  const busy = await (await postWebhook(path, { ...params, CallSid: `CA${"9".repeat(32)}` })).text();
+  check(held.length === 3 && /lines are busy/.test(busy) && !busy.includes("<Connect>"), "with the business's calls all taken, a new caller hears 'all of our lines are busy' and no stream is opened");
+  for (const sock of held) sock.close();
+  await sleep(1_500);
 } catch (err) {
   console.error("smoke failed:", err);
   failures++;

@@ -35,6 +35,16 @@ export const VAD = {
   /** A single utterance longer than this is force-split, so a caller reading a long
    *  address does not hold the turn — and the STT's memory — forever. */
   maxSpeechSeconds: 20,
+
+  /**
+   * Audio given back from BEFORE the detector's own start of an utterance (speech/vad.js). The detector
+   * needs a moment of speech to believe it, so on phone audio with the caller already talking at the
+   * first sample it started ~200 ms in and the recogniser heard "your opening hours." for "What are
+   * your opening hours?" (voice smoke, no lead-in). 300 ms covers that with room; more would only
+   * feed the recogniser the line noise before the word. Costs no latency: it is audio already received.
+   * ⚠️ Whether 300 ms is right for REAL calls (carrier noise, soft speakers) is a listening question.
+   */
+  prerollMs: 300,
 };
 
 export const BARGE_IN = {

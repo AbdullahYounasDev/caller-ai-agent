@@ -36,17 +36,23 @@ export class CallRecorder {
    * @param {string} [args.fromNumber]
    * @param {string} [args.toNumber]
    * @param {string} [args.phoneNumberId] which of the business's numbers it came in on (§6.29)
+   * @param {string} [args.conversationId] CONTINUE this conversation (a call that came back from an unanswered
+   *   transfer, §6.30) instead of starting one. Only a conversation of THIS tenant and agent is continued;
+   *   anything else starts a fresh one — a ticket's claim is never trusted past the tenant boundary.
    * @param {object} [args.db]         Prisma client; injectable for tests
    */
-  static async open({ tenantId, agentId = null, transport, engine, fromNumber = null, toNumber = null, phoneNumberId = null, db = prisma }) {
-    const conversation = await db.conversation.create({ data: { tenantId, agentId, channel: "voice" } });
+  static async open({ tenantId, agentId = null, transport, engine, fromNumber = null, toNumber = null, phoneNumberId = null, conversationId = null, db = prisma }) {
+    const existing = conversationId ? await db.conversation.findFirst({ where: { id: conversationId, tenantId, agentId }, select: { id: true } }) : null;
+    const conversation = existing ?? (await db.conversation.create({ data: { tenantId, agentId, channel: "voice" } }));
     const call = await db.callLog.create({
       data: { tenantId, agentId, conversationId: conversation.id, transport, engine, fromNumber, toNumber, phoneNumberId },
     });
-    return new CallRecorder({ db, tenantId, callId: call.id, conversationId: conversation.id });
+    return new CallRecorder({ db, tenantId, callId: call.id, conversationId: conversation.id, continued: Boolean(existing) });
   }
 
-  constructor({ db, tenantId, callId, conversationId }) {
+  constructor({ db, tenantId, callId, conversationId, continued = false }) {
+    /** True when this call carries on a conversation that already existed (resumed after a transfer). */
+    this.continued = continued;
     this.db = db;
     this.tenantId = tenantId;
     this.callId = callId;
@@ -152,12 +158,14 @@ export class CallRecorder {
    * @param {number} summary.turnCount
    * @param {number} summary.interruptions
    * @param {number[]} summary.responseTimes  per-turn responseMs
+   * @param {Promise<string|null>|string|null} [summary.recordingUrl]  where the call's audio was kept (§6.30), if it was
    */
-  async close({ status, reason, turnCount, interruptions, responseTimes }) {
+  async close({ status, reason, turnCount, interruptions, responseTimes, recordingUrl = null }) {
     if (this.closed) return;
     this.flushEvents();
     this.closed = true;
     await Promise.allSettled([...this.pending]);
+    const recording = await Promise.resolve(recordingUrl).catch(() => null);
 
     await this.db.callLog
       .update({
@@ -170,6 +178,7 @@ export class CallRecorder {
           turnCount,
           interruptions,
           medianResponseMs: median(responseTimes),
+          ...(recording ? { recordingUrl: recording } : {}),
         },
       })
       .catch((err) => console.error(`[voice] could not close call ${this.callId}:`, err?.message ?? err));

@@ -80,7 +80,7 @@ describe("the voice ticket carries the line", () => {
     const verifier = createTicketVerifier({ secret });
     const line = { numberId: "n1", toNumber: "+442071234567" };
     const { ticket } = issueTicket({ tenantId: "chain", agentId: "dublin", line, ttlMs: 60_000, secret });
-    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "chain", agentId: "dublin", line: { ...line, fromNumber: null } });
+    assert.deepEqual(verifier.verify(ticket), { ok: true, tenantId: "chain", agentId: "dublin", line: { ...line, fromNumber: null }, resume: null });
   });
 
   test("a phone call also keeps who is calling, signed", () => {

@@ -93,19 +93,21 @@ export function createTwilioTransport(ws, { env = process.env, fetchImpl = fetch
      * transfer webhook, which rings the next (twilio-webhook.js continueTransfer).
      *
      * `connected: true` means the call has LEFT the agent — whether anyone then answers is Twilio's
-     * business from there on, and a call nobody answers ends with a fixed line and goodbye. The
-     * agent cannot take a call-back after that. `connected: false` (the instruction was refused, or
+     * business from there on. When nobody does, the transfer webhook brings the call BACK to the agent
+     * (a new stream whose ticket carries `resume`: the conversation to carry on, §6.30), so a call-back
+     * can be taken; without `resume` it ends with a fixed line and goodbye. `connected: false` (the instruction was refused, or
      * Twilio is unreachable) leaves the call with the agent, which then says nobody is available.
      *
      * @param {Array<{phone: string, role?: string, name?: string}>} contacts  in the order to try
-     * @param {{summary?: string}} [context]
+     * @param {{summary?: string, resume?: object}} [context]  `resume`: where the call comes back to (tenant, agent,
+     *   line, conversation, call, language, how many times it already has) — see twilio-webhook.js
      * @returns {Promise<{connected: boolean, reason?: "failed"}>}
      */
-    async transferInOrder(contacts, { summary = "" } = {}) {
+    async transferInOrder(contacts, { summary = "", resume = null } = {}) {
       const config = twilioConfig(env);
       const secret = ticketSecret(env);
       if (!callSid || !config.canTransfer || !secret) return { connected: false, reason: "failed" };
-      const twiml = buildTransferTwiml({ contacts, index: 0, summary, config, secret, now: now() });
+      const twiml = buildTransferTwiml({ contacts, index: 0, summary, resume, config, secret, now: now() });
       if (!twiml) return { connected: false, reason: "failed" };
       await sleep(TRANSFER_SETTLE_MS);
       const result = await redirectCall({ accountSid: config.accountSid, authToken: config.authToken, callSid, twiml, fetchImpl });

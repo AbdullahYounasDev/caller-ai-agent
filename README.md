@@ -38,9 +38,11 @@ failures behind each rule, what works and what does not, and the measured number
   Urdu and Roman Urdu — the word lists are plain files in `src/lib/phrases/`, one per language.
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.
 - **Phone calls through Twilio:** the webhook (it checks the request really came from Twilio), the phone transport and passing
-  a caller to a person are built and proven against a simulated Twilio (`npm run twilio:smoke`). Not yet tried through
-  Twilio's real network. See `CLAUDE.md` §6.30 and `.env.example`.
-- **Not built yet:** call recording, and the backend's half (stood in here).
+  a caller to a person are built and proven against a simulated Twilio (`npm run twilio:smoke`). A transfer nobody answers
+  comes back to the agent (a call-back can be taken); a full gateway is told to the caller out loud; the caller's first words
+  are no longer clipped; calls are recorded (stereo WAV, played from the console's call history) while the agent's recording
+  switch is on. Not yet tried through Twilio's real network. See `CLAUDE.md` §6.30 and `.env.example`.
+- **Not built yet:** the backend's half (stood in here), including the real storage, retention and consent rules for recordings.
 
 ## Stack
 

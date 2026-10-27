@@ -57,15 +57,27 @@ const sign = (payload, secret) => createHmac("sha256", secret).update(payload).d
  * @param {string|null} [args.agentId]  null = the tenant's default agent
  * @param {{numberId: string, toNumber: string, fromNumber?: string|null}|null} [args.line] the number the call is
  *   "dialled" on (§6.29) and, on a phone call, who is calling — signed too, so neither can be forged
+ * @param {{conversationId: string, callId?: string|null, language?: string|null, count?: number}|null} [args.resume]
+ *   this call is a CONTINUATION of one that was handed to people and came back unanswered (§6.30): the
+ *   conversation to carry on, the call it continues, the language last spoken and how many times the
+ *   call has already come back (the webhook stops it coming back for ever)
  * @param {number} args.ttlMs
  * @param {string} args.secret
  * @param {number} [args.now]
  * @returns {{ticket: string, expiresAt: number}}
  */
-export function issueTicket({ tenantId, agentId = null, line = null, ttlMs, secret, now = Date.now() }) {
+export function issueTicket({ tenantId, agentId = null, line = null, resume = null, ttlMs, secret, now = Date.now() }) {
   const expiresAt = now + ttlMs;
   const claims = { t: tenantId, a: agentId, e: expiresAt, n: randomBytes(12).toString("base64url") };
   if (line) Object.assign(claims, { l: line.numberId, d: line.toNumber, ...(line.fromNumber ? { f: line.fromNumber } : {}) });
+  if (resume?.conversationId) {
+    Object.assign(claims, {
+      rc: resume.conversationId,
+      ...(resume.callId ? { rk: resume.callId } : {}),
+      ...(resume.language ? { rg: resume.language } : {}),
+      rn: Math.max(1, Math.trunc(resume.count ?? 1)),
+    });
+  }
   const payload = b64url(JSON.stringify(claims));
   return { ticket: `${payload}.${sign(payload, secret)}`, expiresAt };
 }
@@ -84,7 +96,7 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
   return {
     /**
      * @param {string} ticket
-     * @returns {{ok: true, tenantId: string, agentId: string|null, line: {numberId: string, toNumber: string, fromNumber: string|null}|null} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
+     * @returns {{ok: true, tenantId: string, agentId: string|null, line: {numberId: string, toNumber: string, fromNumber: string|null}|null, resume: {conversationId: string, callId: string|null, language: string|null, count: number}|null} | {ok: false, reason: "malformed"|"signature"|"expired"|"replayed"}}
      */
     verify(ticket) {
       const at = now();
@@ -109,7 +121,8 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
         typeof claims?.t !== "string" || typeof claims?.e !== "number" || typeof claims?.n !== "string" ||
         (claims.a != null && typeof claims.a !== "string") ||
         (claims.l != null && (typeof claims.l !== "string" || typeof claims.d !== "string")) ||
-        (claims.f != null && typeof claims.f !== "string")
+        (claims.f != null && typeof claims.f !== "string") ||
+        (claims.rc != null && (typeof claims.rc !== "string" || (claims.rk != null && typeof claims.rk !== "string") || (claims.rg != null && typeof claims.rg !== "string") || typeof claims.rn !== "number"))
       ) {
         return { ok: false, reason: "malformed" };
       }
@@ -117,7 +130,8 @@ export function createTicketVerifier({ secret, now = () => Date.now() }) {
       if (used.has(claims.n)) return { ok: false, reason: "replayed" };
 
       used.set(claims.n, claims.e);
-      return { ok: true, tenantId: claims.t, agentId: claims.a ?? null, line: claims.l ? { numberId: claims.l, toNumber: claims.d, fromNumber: claims.f ?? null } : null };
+      return { ok: true, tenantId: claims.t, agentId: claims.a ?? null, line: claims.l ? { numberId: claims.l, toNumber: claims.d, fromNumber: claims.f ?? null } : null,
+        resume: claims.rc ? { conversationId: claims.rc, callId: claims.rk ?? null, language: claims.rg ?? null, count: claims.rn } : null };
     },
   };
 }

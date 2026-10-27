@@ -8,6 +8,7 @@ import { describeTwilioSetup, twilioConfig } from "@/lib/telephony/twilio-config
 import { redirectCall } from "@/lib/telephony/twilio-rest";
 import { answerInboundCall, buildTransferTwiml, continueTransfer, whisperTwiml, INBOUND_LIMIT } from "@/lib/telephony/twilio-webhook";
 import { readVerifiedTwilioRequest } from "@/lib/telephony/twilio-request";
+import { checkGatewayCapacity } from "@/lib/telephony/gateway-check";
 import { createTicketVerifier } from "@/lib/voice/ticket";
 
 // The phone path's server half (CLAUDE.md §6.30): who may call our webhooks, what they answer, and how a
@@ -117,7 +118,7 @@ describe("a call comes in", () => {
     assert.match(xml, /<Connect><Stream url="wss:\/\/voice\.example\.com\/twilio">/);
     const ticket = /name="ticket" value="([^"]+)"/.exec(xml)[1];
     const verdict = createTicketVerifier({ secret: ENV.VOICE_SESSION_SECRET, now: () => 2_000 }).verify(ticket);
-    assert.deepEqual(verdict, { ok: true, tenantId: "t1", agentId: "agent-1", line: { numberId: "n1", toNumber: "+442071234567", fromNumber: "+923001234567" } });
+    assert.deepEqual(verdict, { ok: true, tenantId: "t1", agentId: "agent-1", line: { numberId: "n1", toNumber: "+442071234567", fromNumber: "+923001234567" }, resume: null });
   });
 
   test("the number is looked up as Twilio sent it; 'Called' is used when 'To' is missing", async () => {
@@ -153,6 +154,19 @@ describe("a call comes in", () => {
     assert.ok(INBOUND_LIMIT.limit >= 60, "far above what a real business gets");
   });
 
+  test("a gateway that is full, stopped or silent is told to the caller out loud — never a stream that closes in silence", async () => {
+    for (const [reason, result, line] of [["busy", "busy", /lines are busy/], ["tenant_busy", "busy", /lines are busy/], ["unavailable", "unavailable", /trouble taking your call/], ["unreachable", "unavailable", /trouble taking your call/]]) {
+      const asked = [];
+      const { xml, outcome } = await answer({}, { gateway: async (tenantId) => (asked.push(tenantId), { ok: false, reason }) });
+      assert.deepEqual(asked, ["t1"], "the gateway is asked about THIS business");
+      assert.match(xml, line, reason);
+      assert.match(xml, /<Hangup\/>/);
+      assert.ok(!xml.includes("<Connect>") && !xml.includes("ticket"), `${reason} must not issue a ticket`);
+      assert.deepEqual([outcome.result, outcome.reason], [result, reason]);
+    }
+    assert.equal((await answer({}, { gateway: async () => ({ ok: true }) })).outcome.result, "connected");
+  });
+
   test("no public gateway address, or no secret: an honest apology, never a stream to nowhere", async () => {
     const noGateway = await answer({}, { env: { ...ENV, VOICE_GATEWAY_PUBLIC_URL: "" } });
     assert.equal(noGateway.outcome.result, "misconfigured");
@@ -180,35 +194,91 @@ describe("a transfer, person by person", () => {
     assert.equal(buildTransferTwiml({ contacts, index: 3, config, secret }), null);
   });
 
-  test("not answered: the next person; and the next; then a fixed line and goodbye", () => {
+  test("not answered: the next person; and the next; then a fixed line and goodbye", async () => {
     const env = ENV;
-    const second = continueTransfer({ token: tokenOf(first), params: { DialCallStatus: "no-answer" }, env, now: 2_000 });
+    const second = await continueTransfer({ token: tokenOf(first), params: { DialCallStatus: "no-answer" }, env, now: 2_000 });
     assert.equal(second.outcome.result, "next");
     assert.match(second.xml, />\+923215551234<\/Number>/);
-    const third = continueTransfer({ token: tokenOf(second.xml), params: { DialCallStatus: "busy" }, env, now: 3_000 });
+    const third = await continueTransfer({ token: tokenOf(second.xml), params: { DialCallStatus: "busy" }, env, now: 3_000 });
     assert.match(third.xml, />\+923335550000<\/Number>/);
-    const end = continueTransfer({ token: tokenOf(third.xml), params: { DialCallStatus: "failed" }, env, now: 4_000 });
+    const end = await continueTransfer({ token: tokenOf(third.xml), params: { DialCallStatus: "failed" }, env, now: 4_000 });
     assert.equal(end.outcome.result, "exhausted");
     assert.match(end.xml, /nobody is available to take your call/);
     assert.match(end.xml, /<Hangup\/>/);
   });
 
-  test("answered and finished: the call simply ends", () => {
+  test("answered and finished: the call simply ends", async () => {
     for (const DialCallStatus of ["completed", "answered"]) {
-      const done = continueTransfer({ token: tokenOf(first), params: { DialCallStatus }, env: ENV, now: 2_000 });
+      const done = await continueTransfer({ token: tokenOf(first), params: { DialCallStatus }, env: ENV, now: 2_000 });
       assert.deepEqual([done.outcome.result, done.xml], ["finished", hangup()]);
     }
   });
 
-  test("a forged, expired or missing state rings nobody", () => {
+  test("a forged, expired or missing state rings nobody", async () => {
     const [payload, sig] = tokenOf(first).split(".");
     const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, "base64url")), p: ["+10000000000", "+10000000001"] })).toString("base64url");
     for (const token of [`${forged}.${sig}`, null, "junk"]) {
-      const result = continueTransfer({ token, params: { DialCallStatus: "no-answer" }, env: ENV, now: 2_000 });
+      const result = await continueTransfer({ token, params: { DialCallStatus: "no-answer" }, env: ENV, now: 2_000 });
       assert.equal(result.outcome.result, "invalid");
       assert.ok(!result.xml.includes("<Dial"));
     }
-    assert.equal(continueTransfer({ token: tokenOf(first), params: { DialCallStatus: "no-answer" }, env: ENV, now: 1_000 + 11 * 60_000 }).outcome.result, "invalid");
+    assert.equal((await continueTransfer({ token: tokenOf(first), params: { DialCallStatus: "no-answer" }, env: ENV, now: 1_000 + 11 * 60_000 })).outcome.result, "invalid");
+  });
+
+  describe("nobody answers: the call goes BACK to the agent", () => {
+    const resume = { tenantId: "t1", agentId: "agent-1", line: { numberId: "n1", toNumber: "+442071234567", fromNumber: "+923001234567" }, conversationId: "conv-9", callId: "call-7", language: "ur", count: 0 };
+    const withWayBack = buildTransferTwiml({ contacts: contacts.slice(0, 2), index: 0, summary: "s", resume, config, secret, now: 1_000 });
+    const open = async () => ({ ok: true });
+    const verdictOf = (xml, now = 5_000) => createTicketVerifier({ secret, now: () => now }).verify(/name="ticket" value="([^"]+)"/.exec(xml)[1]);
+
+    test("after the last person: a new stream whose ticket carries the conversation, the line, the language and the count", async () => {
+      const second = await continueTransfer({ token: tokenOf(withWayBack), params: { DialCallStatus: "no-answer" }, env: ENV, gateway: open, now: 2_000 });
+      assert.equal(second.outcome.result, "next", "the way back travels on to the next person's token");
+      const back = await continueTransfer({ token: tokenOf(second.xml), params: { DialCallStatus: "no-answer" }, env: ENV, gateway: open, now: 3_000 });
+      assert.equal(back.outcome.result, "resumed");
+      assert.match(back.xml, /<Connect><Stream url="wss:\/\/voice\.example\.com\/twilio">/);
+      assert.ok(!back.xml.includes("<Say"), "no Twilio voice: the agent speaks to the caller itself");
+      assert.deepEqual(verdictOf(back.xml), {
+        ok: true, tenantId: "t1", agentId: "agent-1",
+        line: { numberId: "n1", toNumber: "+442071234567", fromNumber: "+923001234567" },
+        resume: { conversationId: "conv-9", callId: "call-7", language: "ur", count: 1 },
+      });
+    });
+
+    test("it only comes back if the gateway has room — otherwise the fixed line and goodbye, with the reason kept", async () => {
+      const token = tokenOf((await continueTransfer({ token: tokenOf(withWayBack), params: { DialCallStatus: "busy" }, env: ENV, now: 2_000 })).xml);
+      for (const gateway of [async () => ({ ok: false, reason: "busy" }), undefined]) {
+        const back = await continueTransfer({ token, params: { DialCallStatus: "busy" }, env: ENV, gateway, now: 3_000 });
+        assert.equal(back.outcome.result, "exhausted");
+        assert.match(back.xml, /nobody is available to take your call/);
+        assert.ok(!back.xml.includes("<Connect>"));
+      }
+    });
+
+    test("a call that has already come back twice is not brought back a third time", async () => {
+      const looped = buildTransferTwiml({ contacts: contacts.slice(0, 1), index: 0, resume: { ...resume, count: 2 }, config, secret, now: 1_000 });
+      const result = await continueTransfer({ token: tokenOf(looped), params: { DialCallStatus: "no-answer" }, env: ENV, gateway: open, now: 2_000 });
+      assert.deepEqual([result.outcome.result, result.outcome.reason], ["exhausted", "resume_limit"]);
+    });
+
+    test("a transfer set up without a way back ends as before; answered calls never come back", async () => {
+      const plain = await continueTransfer({ token: tokenOf(buildTransferTwiml({ contacts: contacts.slice(0, 1), index: 0, config, secret, now: 1_000 })), params: { DialCallStatus: "no-answer" }, env: ENV, gateway: open, now: 2_000 });
+      assert.equal(plain.outcome.result, "exhausted");
+      const answered = await continueTransfer({ token: tokenOf(withWayBack), params: { DialCallStatus: "completed" }, env: ENV, gateway: open, now: 2_000 });
+      assert.equal(answered.outcome.result, "finished");
+    });
+
+    test("the ticket for the way back is single-use and cannot be altered", async () => {
+      const lone = buildTransferTwiml({ contacts: contacts.slice(0, 1), index: 0, resume, config, secret, now: 1_000 });
+      const back = await continueTransfer({ token: tokenOf(lone), params: { DialCallStatus: "no-answer" }, env: ENV, gateway: open, now: 2_000 });
+      const ticket = /name="ticket" value="([^"]+)"/.exec(back.xml)[1];
+      const verifier = createTicketVerifier({ secret, now: () => 3_000 });
+      assert.equal(verifier.verify(ticket).ok, true);
+      assert.equal(verifier.verify(ticket).reason, "replayed");
+      const [payload, sig] = ticket.split(".");
+      const forged = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(payload, "base64url")), rc: "someone-elses-conversation" })).toString("base64url");
+      assert.equal(createTicketVerifier({ secret, now: () => 3_000 }).verify(`${forged}.${sig}`).reason, "signature");
+    });
   });
 
   test("what the person who picks up hears: the summary, escaped, and nothing from an unreadable state", () => {
@@ -278,5 +348,32 @@ describe("only Twilio may call the webhooks", () => {
     assert.equal((await readVerifiedTwilioRequest(request({ signature: good, body: new URLSearchParams({ ...params, To: "+10000000000" }).toString() }), ENV)).status, 403);
     assert.equal((await readVerifiedTwilioRequest(request({ signature: good }), {})).status, 503, "unsigned requests are never accepted just because nothing is configured");
     assert.equal((await readVerifiedTwilioRequest(request({ signature: good, body: "a=".padEnd(70_000, "x") }), ENV)).status, 413);
+  });
+});
+
+describe("asking the gateway whether it has room", () => {
+  const reply = (body, ok = true) => async () => ({ ok, json: async () => body });
+  const ask = (body, options = {}) => checkGatewayCapacity({ env: ENV, tenantId: "t1", fetchImpl: reply(body), ...options });
+
+  test("ready with room → ok; it asks the gateway's /health about this business only", async () => {
+    let asked;
+    const result = await checkGatewayCapacity({ env: ENV, tenantId: "a b", fetchImpl: async (url) => ((asked = url), { json: async () => ({ status: "ready", activeCalls: 2, maxCalls: 6, tenantAvailable: true }) }) });
+    assert.deepEqual(result, { ok: true });
+    assert.equal(asked, "https://voice.example.com/health?tenant=a%20b");
+  });
+
+  test("every way of having no room says which", async () => {
+    assert.deepEqual(await ask({ status: "ready", activeCalls: 6, maxCalls: 6 }), { ok: false, reason: "busy" });
+    assert.deepEqual(await ask({ status: "ready", activeCalls: 1, maxCalls: 6, tenantAvailable: false }), { ok: false, reason: "tenant_busy" });
+    assert.deepEqual(await ask({ status: "loading" }), { ok: false, reason: "unavailable" });
+    assert.deepEqual(await ask({ status: "error" }), { ok: false, reason: "unavailable" });
+  });
+
+  test("no answer, a network error, a non-JSON reply or no address configured → unreachable, never a thrown error", async () => {
+    assert.deepEqual(await checkGatewayCapacity({ env: ENV, fetchImpl: async () => { throw new Error("ECONNREFUSED"); } }), { ok: false, reason: "unreachable" });
+    assert.deepEqual(await checkGatewayCapacity({ env: ENV, fetchImpl: async () => ({ json: async () => { throw new Error("not json"); } }) }), { ok: false, reason: "unreachable" });
+    assert.deepEqual(await checkGatewayCapacity({ env: { ...ENV, VOICE_GATEWAY_PUBLIC_URL: "" }, fetchImpl: reply({}) }), { ok: false, reason: "unreachable" });
+    const slow = await checkGatewayCapacity({ env: ENV, timeoutMs: 20, fetchImpl: (url, { signal }) => new Promise((_, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")))) });
+    assert.deepEqual(slow, { ok: false, reason: "unreachable" });
   });
 });

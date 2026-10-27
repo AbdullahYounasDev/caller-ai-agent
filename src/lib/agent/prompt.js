@@ -445,7 +445,7 @@ export function buildVoiceGreeting(config) {
  * start of every slow turn is exactly what makes an agent sound like a machine. Every
  * Urdu line avoids first-person verbs, so none of them depends on the voice's gender.
  *
- * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"|"transfer_unanswered"} kind
+ * @param {"filler"|"fallback"|"unheard"|"connecting"|"not_in_service"|"handoff_failed"|"still_there"|"silence_goodbye"|"take_your_time"|"listening"|"closing"|"transfer_unanswered"|"busy"} kind
  * @param {"en"|"ur"} language
  * @param {number} [variant]  any integer; picks one of the phrasings
  * @returns {string}
@@ -511,6 +511,13 @@ export function voiceLine(kind, language, variant = 0) {
     transfer_unanswered: {
       en: ["I'm sorry, nobody is available to take your call right now. Please call again a little later. Goodbye."],
       ur: ["معذرت، اس وقت کوئی آپ کی کال لینے کے لیے دستیاب نہیں ہے۔ براہِ کرم تھوڑی دیر بعد دوبارہ کال کریں۔ خدا حافظ۔"],
+    },
+    // Every line of the gateway is taken (or it cannot be reached): said by the phone company's own
+    // voice before the webhook hangs up, so a caller is told the truth instead of hearing silence
+    // (telephony/gateway-check.js, §6.30).
+    busy: {
+      en: ["Sorry, all of our lines are busy at the moment. Please try again in a few minutes. Goodbye."],
+      ur: ["معذرت، اس وقت ہماری تمام لائنیں مصروف ہیں۔ براہِ کرم چند منٹ بعد دوبارہ کال کریں۔ خدا حافظ۔"],
     },
   };
   const options = lines[kind][language === "ur" ? "ur" : "en"];

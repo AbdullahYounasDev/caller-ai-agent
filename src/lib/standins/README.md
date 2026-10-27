@@ -11,6 +11,7 @@ side exists. Nothing outside this folder knows the data lives in `ai_engine`.
 | `records.js` | the backend's bookings / callback requests / food orders (`OR-` references), and the staff screen that confirms them | a `tenant_core` table + dashboard API (`PATCH …/records/:id`) |
 | `events.js` | the engine → backend signed event delivery (`POST /internal/events`) | the outbox + HMAC sender described in docs/handoff-to-backend.md |
 | `numbers.js` | the backend's phone numbers and which agent each one rings (B11) | a `tenant_core` table + `GET /internal/numbers/{e164}`; the engine reads it ONLY through `tenant/registry.js resolveDialledNumber()` |
+| `recordings.js` | the backend's call-recording storage (B11c) | object storage + retention; `call_logs.recording_url` then holds its URL. Today a local folder (`RECORDINGS_DIR`) shared by the voice gateway (writes) and the app (reads) |
 
 **Also stood in, outside this folder** (each behind its own seam — CLAUDE.md §4 lists them all):
 agents and their settings (`agent_configs`, read through `src/lib/tenant/config.js`) and which agents use each
