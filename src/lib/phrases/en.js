@@ -58,6 +58,63 @@ export const PAUSES = {
 /** Question words: "wait, how much is it?" asks something — it is not a request to hold. */
 export const QUESTION_WORDS = ["what", "how", "when", "where", "why", "which", "who", "whats", "hows", "whose"];
 
+/**
+ * CLOSINGS — how a conversation comes to its end (lib/voice/closing.js decides; the call then
+ * ends by itself after the owner's delay, CLAUDE.md §6.24):
+ *   anythingElse  the AGENT asking whether there is anything else — looked for in its last sentence;
+ *   declineMore   the caller's "no, that's all" — read that way ONLY right after the agent asked
+ *                 anythingElse ("no" anywhere else is an answer to something);
+ *   farewell      a goodbye in the AGENT's last sentence ("have a great day", "goodbye").
+ * A caller's own goodbye ("bye", "that's all, thanks") is lib/voice/intent.js GOODBYE.
+ */
+export const CLOSINGS = {
+  anythingElse: [
+    "anything else",
+    "something else",
+    "any other question/questions/query/queries/thing/things",
+    "anything more",
+    "else i can help/do",
+    "else can i help/do",
+    "is that all/everything",
+    "will that be all/everything",
+  ],
+  declineMore: [
+    "no/nope/nah",
+    "no thank you/thanks",
+    "nothing",
+    "nothing else/more",
+    "that is all/it/everything",
+    "that will be all/it",
+    "that should be all/it",
+    "i am good/fine/done/okay/ok/sorted",
+    "i am all set/good",
+    "all good",
+    "not right now",
+    "not today",
+    "no more questions",
+  ],
+  farewell: [
+    "goodbye",
+    "good bye",
+    "bye",
+    "have a good/great/nice/lovely/wonderful/pleasant day/evening/afternoon/morning/weekend/night",
+    "enjoy your day/evening/weekend",
+    "take care",
+    "thank you/thanks for calling",
+    "talk to you soon",
+  ],
+};
+
+/**
+ * Words with no meaning of their own in a "no, that's all". Stricter than FILLER on purpose:
+ * FILLER's "want", "know" or "more" would turn "no, I want to know more" into a goodbye.
+ */
+export const CLOSING_FILLER = [
+  "no", "nope", "nah", "am", "so", "much", "very", "really", "okay", "ok", "alright", "right", "well", "oh", "um", "uh", "actually",
+  "thanks", "thank", "you", "cheers", "sir", "madam", "maam", "for", "now", "your", "the", "help", "i", "think", "guess",
+  "yes", "yeah", "great", "perfect", "fine", "good", "lovely", "and", "bye", "goodbye", "all", "that", "is", "it", "everything",
+];
+
 /** Words that name the business itself — used inside the phrases below. */
 const BUSINESS = "company/business/firm/organisation/organization/agency/clinic/practice/hospital/restaurant/cafe/shop/store/brand/office/centre/center/team/place/service/outfit/establishment/startup";
 

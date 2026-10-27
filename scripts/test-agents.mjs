@@ -296,6 +296,14 @@ ok(/اے آئی اسسٹنٹ.*کال ریکارڈ کی جا رہی ہے/.test(bu
 const kbGalway = (await createAgent(KB, { name: "Galway", copyFrom: kbDublin })).id;
 const galCfg = await getAgentConfig(KB, { agentId: kbGalway, skipCache: true });
 ok(galCfg.recordCalls === true && galCfg.greeting.en === dubCfg.greeting.en, "a new agent copies the greeting and the recording switch of the agent it starts from");
+// Ending the call by itself is per agent too, and copied (lib/voice/closing.js).
+await saveAgentConfig(KB, { autoEndCalls: false }, { agentId: kbLondon });
+await saveAgentConfig(KB, { autoEndCalls: true, endCallDelaySeconds: 7 }, { agentId: kbDublin });
+const dubEnd = await getAgentConfig(KB, { agentId: kbDublin, skipCache: true });
+const lonEnd = await getAgentConfig(KB, { agentId: kbLondon, skipCache: true });
+ok(dubEnd.autoEndCalls === true && dubEnd.endCallDelaySeconds === 7 && lonEnd.autoEndCalls === false && lonEnd.endCallDelaySeconds === 3, "ending calls by itself, and the wait, are set per agent");
+const kbKilkenny = (await createAgent(KB, { name: "Kilkenny", copyFrom: kbDublin })).id;
+ok((await getAgentConfig(KB, { agentId: kbKilkenny, skipCache: true })).endCallDelaySeconds === 7, "…and a new agent copies them");
 await saveAgentConfig(KB, { greeting: { en: "Galway here." } }, { agentId: kbGalway });
 ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).greeting.en === dubCfg.greeting.en, "…and changing the copy leaves the original alone");
 

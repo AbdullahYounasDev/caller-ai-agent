@@ -8,6 +8,7 @@ import {
 import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config";
 import { emptyHandoffConfig, normalizeHandoffConfig } from "@/lib/handoff/config";
 import { normalizeGreeting } from "@/lib/voice/greeting";
+import { normalizeCallEnding } from "@/lib/voice/closing";
 import { assertCanAddAgent } from "@/lib/tenant/registry";
 import { countNumbersForAgent } from "@/lib/standins/numbers";
 
@@ -59,6 +60,9 @@ const DEFAULTS = {
   // built-in greeting (AI notice; recording notice only while recordCalls is on).
   greeting: {},
   recordCalls: false,
+  // The call ends by itself once the conversation is over, after this many seconds of quiet
+  // (lib/voice/closing.js).
+  ...normalizeCallEnding(),
   // What the agent collects for a customer's request (lib/collect/config.js). Off until the
   // business sets it up, so an existing tenant's agent behaves exactly as before.
   collect: emptyCollectConfig(),
@@ -199,6 +203,7 @@ function normalizeConfig(row, tenantUiLocale) {
     voices: row.voices && typeof row.voices === "object" && !Array.isArray(row.voices) ? row.voices : {},
     greeting: normalizeGreeting(row.greeting),
     recordCalls: row.recordCalls === true,
+    ...normalizeCallEnding(row),
     // Normalized on every read: a stored document that has drifted from the schema degrades
     // to the nearest valid one instead of reaching the engine malformed.
     collect: normalizeCollectConfig(row.collect),
@@ -220,6 +225,8 @@ const AGENT_SETTINGS = [
   "voices",
   "greeting",
   "recordCalls",
+  "autoEndCalls",
+  "endCallDelaySeconds",
 ];
 
 /**

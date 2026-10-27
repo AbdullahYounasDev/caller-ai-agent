@@ -51,6 +51,11 @@ export const SPELLINGS = {
   paas: ["pas", "paas"],
   milta: ["milti", "milte", "milty"],
   shuba: ["shoba", "field"],
+  nahi: ["nahin", "nai", "nahee", "nahein", "nhi", "nahi"],
+  shukriya: ["shukria", "shukriyah", "shukrya", "shukriyaa", "shukryia"],
+  kafi: ["kaafi", "kaafee"],
+  ilawa: ["alawa", "ilaawa", "elawa"],
+  sawal: ["sawaal", "swal", "question"],
 };
 
 const YOU = "aap/tum/tm";
@@ -164,6 +169,42 @@ export const PAUSES = {
 
 /** Question words (see en.js QUESTION_WORDS), in canonical spelling. */
 export const QUESTION_WORDS = ["kya", "kitna", "kitni", "kitne", "kab", "kahan", "kyun", "kaun", "kaise", "kaunsi"];
+
+/** CLOSINGS — how a conversation comes to its end (see en.js CLOSINGS), in canonical spelling. */
+export const CLOSINGS = {
+  anythingElse: [
+    "aur kuch",
+    "kuch aur",
+    "koi aur sawal/baat/kaam/madad/cheez",
+    "aur koi sawal/baat/kaam/madad/cheez",
+    "is ke ilawa",
+  ],
+  declineMore: [
+    "nahi",
+    "ji nahi",
+    "nahi ji",
+    "nahi shukriya",
+    "bas",
+    "bas yehi",
+    "bas itna hi",
+    "bas kafi hai",
+    "kuch nahi",
+    "aur kuch nahi",
+    "nahi bas",
+  ],
+  farewell: [
+    "khuda hafiz",
+    "allah hafiz",
+    "fi amanillah",
+    "call karne ka shukriya",
+  ],
+};
+
+/** Words with no meaning of their own in a "no, that's all" (see en.js CLOSING_FILLER), in canonical spelling. */
+export const CLOSING_FILLER = [
+  "nahi", "bas", "ji", "jee", "shukriya", "bohat", "bahut", "aap", "ka", "ki", "hai", "hain", "theek", "acha", "achha", "sir", "janab",
+  "meherbani", "haan", "aur", "bhai", "sahab", "sahib", "baji", "thanks", "thank", "you", "ok", "okay", "khuda", "hafiz", "allah", "sab",
+];
 
 /** Words with no meaning of their own in an opener (see en.js FILLER), in their canonical spelling. */
 export const FILLER = [

@@ -8,6 +8,7 @@ import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
 import { validateHandoffConfig } from "@/lib/handoff/config";
 import { greetingProblems } from "@/lib/voice/greeting";
+import { callEndingProblems } from "@/lib/voice/closing";
 import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 
 /**
@@ -208,6 +209,10 @@ function validatePatch(patch, tr) {
   }
   if (patch.recordCalls !== undefined && typeof patch.recordCalls !== "boolean") {
     errors.push(tr("validation:recordCalls.invalid"));
+  }
+  // Ending the call by itself (lib/voice/closing.js): a switch and 2–10 seconds of quiet.
+  for (const problem of callEndingProblems(patch)) {
+    errors.push(tr(`validation:callEnding.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
   }
 
   if (patch.capabilities !== undefined) {

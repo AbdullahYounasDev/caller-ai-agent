@@ -123,5 +123,7 @@
   "greeting.unknownLanguage": "“{value}” ایسی زبان نہیں جو آپ کا ایجنٹ بول سکے۔",
   "greeting.tooLong": "سلام بہت لمبا ہے — اسے {max} حروف سے کم رکھیں۔",
   "greeting.unknownPlaceholder": "“{value}” کال کرنے والے کو ویسے ہی پڑھ کر سنایا جائے گا۔ صرف {allowed} استعمال ہو سکتا ہے۔",
-  "recordCalls.invalid": "کال ریکارڈنگ یا آن ہو یا آف۔"
+  "recordCalls.invalid": "کال ریکارڈنگ یا آن ہو یا آف۔",
+  "callEnding.autoEndInvalid": "کال کا خود ختم ہونا آن یا آف ہونا چاہیے۔",
+  "callEnding.delayRange": "{min} سے {max} سیکنڈ کے درمیان وقفہ منتخب کریں۔"
 }

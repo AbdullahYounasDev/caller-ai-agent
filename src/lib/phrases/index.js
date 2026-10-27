@@ -30,6 +30,10 @@ export const OPENER_KINDS = /** @type {OpenerKind[]} */ (["identity", "about", "
 export const OVERVIEW_KINDS = new Set(["identity", "about", "offerings", "help"]);
 /** The groups of ./en.js PAUSES: what a caller says about the call itself (voice/session.js). */
 export const PAUSE_KINDS = ["holdOn", "stillHere"];
+/** The groups of ./en.js CLOSINGS: how a conversation comes to its end (voice/closing.js). */
+export const CLOSING_KINDS = ["anythingElse", "declineMore", "farewell"];
+/** "No, that's all" is a short thing to say; anything longer is the caller carrying on. */
+const MAX_DECLINE_WORDS = 8;
 const LEFTOVER_ALLOWED = { identity: 0, about: 1, offerings: 1, help: 0, aiCheck: 0, holdOn: 2, stillHere: 0 };
 /** A pause phrase is a short thing to say; a long message that contains "wait" is about something else. */
 const MAX_PAUSE_WORDS = 10;
@@ -137,6 +141,8 @@ const compileGroups = (language, set, kinds) =>
 for (const language of LANGUAGES) {
   language.groups = compileGroups(language, "OPENERS", OPENER_KINDS);
   language.pauseGroups = compileGroups(language, "PAUSES", PAUSE_KINDS);
+  language.closingGroups = compileGroups(language, "CLOSINGS", CLOSING_KINDS);
+  language.closingFiller = new Set((language.data.CLOSING_FILLER ?? []).map((w) => language.canonicalise(normalizeText(w))));
   language.questionWords = new Set((language.data.QUESTION_WORDS ?? []).map((w) => language.canonicalise(normalizeText(w))));
   language.filler = new Set(language.data.FILLER.map((w) => language.canonicalise(normalizeText(w))));
 }
@@ -209,8 +215,7 @@ export function detectOpener(message, { businessName = "" } = {}) {
  */
 export function detectPause(message, { kinds = PAUSE_KINDS } = {}) {
   // A question is never a request to hold, whatever else it says ("wait, how much is it?").
-  const asks = /[?؟]/.test(String(message ?? "")) || LANGUAGES.some((language) => language.tokens(message).some((w) => language.questionWords.has(w)));
-  if (asks) kinds = kinds.filter((k) => k !== "holdOn");
+  if (asksSomething(message)) kinds = kinds.filter((k) => k !== "holdOn");
   const found = findPhrase(message, {
     groupsOf: (language) => language.pauseGroups.filter((g) => kinds.includes(g.kind)),
     maxWords: MAX_PAUSE_WORDS,
@@ -218,7 +223,78 @@ export function detectPause(message, { kinds = PAUSE_KINDS } = {}) {
   return found?.kind ?? null;
 }
 
-function findPhrase(message, { businessName = "", groupsOf, maxWords }) {
+/**
+ * The caller's "no, that's all" / "nahi shukriya" / "بس" — ./en.js CLOSINGS declineMore. Only
+ * meaningful right after the agent asked whether there is anything else (voice/closing.js); a
+ * question is never a decline ("no, what about Sundays?").
+ * @param {string} message
+ * @returns {boolean}
+ */
+export function isDecliningMore(message) {
+  if (asksSomething(message)) return false;
+  return Boolean(
+    findPhrase(message, {
+      groupsOf: (language) => language.closingGroups.filter((g) => g.kind === "declineMore"),
+      fillerOf: (language) => language.closingFiller,
+      leftoverFor: () => 0,
+      maxWords: MAX_DECLINE_WORDS,
+    })
+  );
+}
+
+/**
+ * The last sentence of something the agent said, and whether it is a question.
+ * @param {string} reply
+ * @returns {{text: string, question: boolean}}
+ */
+export function lastSentence(reply) {
+  const parts = String(reply ?? "").match(/[^.!?۔؟]+[.!?۔؟]*/g) ?? [];
+  for (let i = parts.length - 1; i >= 0; i--) {
+    if (/\p{L}/u.test(parts[i])) return { text: parts[i].trim(), question: /[?؟]\s*$/.test(parts[i]) };
+  }
+  return { text: "", question: false };
+}
+
+/** Does the agent's LAST sentence contain a phrase of this CLOSINGS group (anywhere in it)? */
+function lastSentenceHas(reply, kind) {
+  const { text } = lastSentence(reply);
+  if (!text) return false;
+  for (const language of LANGUAGES) {
+    const tokens = language.tokens(text);
+    if (!tokens.length) continue;
+    const group = language.closingGroups.find((g) => g.kind === kind);
+    for (const steps of group.phrases) {
+      for (let start = 0; start < tokens.length; start++) if (matchAt(steps, tokens, start, [])) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Did the agent just ask whether there is anything else ("Is there anything else I can help
+ * with?", "کیا آپ کو کچھ اور جاننا ہے؟")?
+ * @param {string} reply what the agent said
+ */
+export function asksAnythingElse(reply) {
+  return lastSentenceHas(reply, "anythingElse");
+}
+
+/**
+ * Did the agent end on a goodbye ("…Have a great day!", "خدا حافظ")? A reply that ends with a
+ * question is never a farewell — the agent is waiting for an answer.
+ * @param {string} reply what the agent said
+ */
+export function saysFarewell(reply) {
+  if (lastSentence(reply).question) return false;
+  return lastSentenceHas(reply, "farewell");
+}
+
+/** A question mark, or a question word in any of the languages. */
+function asksSomething(message) {
+  return /[?؟]/.test(String(message ?? "")) || LANGUAGES.some((language) => language.tokens(message).some((w) => language.questionWords.has(w)));
+}
+
+function findPhrase(message, { businessName = "", groupsOf, maxWords, fillerOf = (language) => language.filler, leftoverFor = (kind) => LEFTOVER_ALLOWED[kind] }) {
   const text = String(message ?? "");
   if (!text.trim()) return null;
   for (const language of LANGUAGES) {
@@ -240,8 +316,9 @@ function findPhrase(message, { businessName = "", groupsOf, maxWords }) {
           const used = matchAt(steps, tokens, start, nameTokens);
           if (!used) continue;
           const taken = new Set(used);
-          const leftover = tokens.filter((w, i) => !taken.has(i) && !language.filler.has(w) && !nameIdx.has(i) && !/^\d+$/.test(w) && w.length > 1);
-          if (leftover.length <= LEFTOVER_ALLOWED[group.kind]) {
+          const filler = fillerOf(language);
+          const leftover = tokens.filter((w, i) => !taken.has(i) && !filler.has(w) && !nameIdx.has(i) && !/^\d+$/.test(w) && w.length > 1);
+          if (leftover.length <= leftoverFor(group.kind)) {
             return { kind: group.kind, language: language.id, phrase: group.source[p] };
           }
         }

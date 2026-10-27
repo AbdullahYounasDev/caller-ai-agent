@@ -226,6 +226,7 @@ src/lib/
     transports/browser.js      # the console's WebSocket protocol; Twilio will be a sibling
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
+    closing.js                 # when a call ends by itself (goodbye, "no thanks" after "anything else?", the agent's farewell) + the per-agent switch and delay — pure (§6.26)
     greeting.js                # each agent's call greeting: built-in text (AI notice; recording notice only while recording is on), the owner's own text, the console's warnings — pure (§6.24)
     sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
   collect/                     # ★ REQUEST-TAKING (§6.25) — what the agent collects, validates and hands over
@@ -235,7 +236,7 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
-  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; question words, filler, greeting notice words) · index.js = the matcher, pure
+  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
@@ -2017,13 +2018,25 @@ engine's, behind three seams, so Twilio is a transport swap:
   an empty transcript used to be met with silence. Now: "Sorry, I didn't catch that" (fixed line, Urdu without gendered
   forms or Latin names), and a second time in a row `brain.noteUnheard` → hand off if the business set it up.
 
-**Ending a call well** (`voice/config.js SILENCE`, `CLOSING`; tests in voice-session):
+**Ending a call well** (`voice/config.js SILENCE`, `voice/closing.js`; tests in voice-session, voice-closing):
 - **Never hangs up on silence without asking.** 15 s after the AGENT stopped talking (not from the caller's last word,
   never while the agent is thinking or speaking) → "Are you still there?"; 10 s more → a polite goodbye line, then the call
   ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end. A caller who
   said "hold on" gets 60 s and then 20 s (`SILENCE.hold`, §6.24 turn-quality item 6).
-- **A finished conversation ends itself.** Caller says goodbye (short message ≤ 8 words, never mid-request) → the agent
-  answers → 2.5 s of quiet → the call ends (`agent_goodbye`); speech in that quiet keeps it open.
+- **A finished conversation ends itself — decided by rules, owner-controlled** (`voice/closing.js decideCallEnd`, pure;
+  the words in `lib/phrases` CLOSINGS, en / ur / Roman Urdu). Per AGENT: `autoEndCalls` (default on) and
+  `endCallDelaySeconds` (2–10, default 3) — migration `20261027100000_agent_call_ending`, hand-written, HNSW line removed;
+  console: Agent tab → "Ending the call". The call ends when the agent's reply asked NOTHING and: the caller said goodbye
+  in a short message (≤ 8 words: `intent.js` GOODBYE — `caller_goodbye`); or the agent's previous reply asked "anything
+  else?" and the caller declined ("no thanks", "nahi shukriya", "بس" — `no_more_questions`; a plain "no" anywhere else is
+  an answer, not a goodbye); or the agent itself closed ("…Have a great day!", "خدا حافظ" in its LAST sentence —
+  `agent_farewell`). Never mid-request, after "hold on", during a transfer, on a failed or cut-off turn, or while the
+  caller is talking. If the caller closed but the reply had no goodbye, the fixed `voiceLine("closing")` ("Thank you for
+  calling. Goodbye.") is said first. Then: the agent's audio finishes → the owner's seconds of quiet → the call ends
+  (`agent_goodbye`, event `call.ended_by_itself` with the trigger; `call.closing` logs the decision). Speech in that quiet
+  stops the countdown; a cough or click that turns out to be nothing restarts it; anything real cancels it. Off = the
+  caller hangs up (the silence check-in below still ends a silent line). On calls with the switch on, the prompt asks the
+  model for ONE short thanks-and-goodbye sentence at that point and no further question (`CALL_ENDING_STYLE`).
 - **Solution-oriented but never hurried** (`prompt.js HELPING_STYLE`, in every prompt): work toward an answer, a request
   noted or a person connected; one question at a time; never rush, interrupt or talk down; once the need is met, ask once
   whether there is anything else, then close warmly.
@@ -2164,9 +2177,9 @@ filter is independent of the vectors, the ranking within it is unchanged).
 
 **Every per-agent setting, audited end to end (test:agents, real `respond()`):** call forwarding (Dublin passes the
 caller to its own person, London has none), what the agent collects (one agent takes requests, the other does not), the
-reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24) each
+reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24), ending the call by itself and its wait (§6.26) each
 follow the AGENT, and a generic opener is searched with that agent's own business name (§6.20); the dashboard language
-follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 80 checks since the greeting.)
+follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 82 checks since call ending.)
 
 ### 6.29 Phone numbers — "this number was dialled: which business, which agent?"
 
@@ -2351,7 +2364,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 629 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 651 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2529,7 +2542,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 629 unit tests: the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 651 unit tests: ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding

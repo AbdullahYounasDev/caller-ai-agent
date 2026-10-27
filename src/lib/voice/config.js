@@ -84,17 +84,8 @@ export const SILENCE = {
   hold: { checkInAfterMs: 60_000, endAfterCheckInMs: 20_000 },
 };
 
-/**
- * ENDING A CALL THAT HAS COME TO ITS CONCLUSION. When the caller says goodbye ("that's all,
- * thank you", "bye") and the agent has said its own goodbye, the call ends after this short
- * pause of quiet — long enough that a caller who adds "oh, one more thing" is not cut off.
- * Only short messages count (a long sentence that happens to contain "that's all" is not a
- * goodbye), and never in the middle of taking a request.
- */
-export const CLOSING = {
-  afterGoodbyeMs: 2_500,
-  maxGoodbyeWords: 8,
-};
+// ENDING A CALL THAT HAS COME TO ITS CONCLUSION is decided in ./closing.js, and the quiet before
+// it ends is each agent's own setting (agent_configs.end_call_delay_seconds, 2–10 s, default 3).
 
 /**
  * Speech the recogniser could not turn into words: the caller DID talk (this long) and we got

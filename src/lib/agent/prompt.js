@@ -76,6 +76,14 @@ const HELPING_STYLE =
   "push to finish. When their need is met, ask once whether there is anything else; if there is not, close briefly and " +
   "kindly (thank them and say goodbye).";
 
+// The call ends by itself once the conversation is over (lib/voice/closing.js). At that moment a
+// reply that asks one more question keeps the line open, and a goodbye said while the caller still
+// needs something would end the call on them — so both are spelled out, for calls only.
+const CALL_ENDING_STYLE =
+  "ENDING THE CALL: when the caller says goodbye, or says there is nothing else, reply with ONE short, warm sentence " +
+  "that thanks them and says goodbye, and ask nothing more: the call ends by itself after your goodbye. Never say " +
+  "goodbye while the caller still needs something.";
+
 const GENDER_WORDS = { female: "feminine", male: "masculine" };
 
 /**
@@ -154,6 +162,7 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   if (channel === "voice") {
     sections.push(voiceGenderInstruction(config));
     sections.push(voiceHearingInstruction(config));
+    if (config.autoEndCalls !== false) sections.push(CALL_ENDING_STYLE);
   }
 
   // --- 3. Language ---------------------------------------------------------

@@ -130,6 +130,45 @@ export const PAUSES = {
 /** Question words (see en.js QUESTION_WORDS). */
 export const QUESTION_WORDS = ["کیا", "کتنا", "کتنی", "کتنے", "کب", "کہاں", "کیوں", "کون", "کیسے", "کونسا", "کونسی"];
 
+/** CLOSINGS — how a conversation comes to its end (see en.js CLOSINGS). */
+export const CLOSINGS = {
+  anythingElse: [
+    "اور کچھ",
+    "کچھ اور",
+    "مزید کچھ",
+    "کوئی اور سوال/بات/کام/مدد/چیز",
+    "اور کوئی سوال/بات/کام/مدد/چیز",
+    "اس کے علاوہ",
+  ],
+  declineMore: [
+    "نہیں",
+    "جی نہیں",
+    "نہیں جی",
+    "نہیں شکریہ",
+    "بس",
+    "بس یہی",
+    "بس اتنا ہی",
+    "بس کافی ہے",
+    "کچھ نہیں",
+    "اور کچھ نہیں",
+    "نہیں بس",
+  ],
+  farewell: [
+    "خدا حافظ",
+    "اللہ حافظ",
+    "فی امان اللہ",
+    "کال کرنے کا شکریہ",
+    "آپ کا دن اچھا گزرے",
+    "اپنا خیال رکھیں/رکھیے/رکھئے",
+  ],
+};
+
+/** Words with no meaning of their own in a "no, that's all" (see en.js CLOSING_FILLER). */
+export const CLOSING_FILLER = [
+  "نہیں", "بس", "جی", "شکریہ", "بہت", "آپ", "کا", "کی", "ہے", "ٹھیک", "اچھا", "سر", "جناب", "مہربانی", "ہاں", "اور",
+  "بھائی", "صاحب", "باجی", "میڈم", "خدا", "حافظ", "اللہ", "سب", "بالکل",
+];
+
 /** Words with no meaning of their own in an opener (see en.js FILLER). */
 export const FILLER = [
   "جی", "جناب", "ہیلو", "ہائے", "السلام", "علیکم", "اسلام", "سلام", "وعلیکم", "آداب",

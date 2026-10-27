@@ -123,5 +123,7 @@
   "greeting.unknownLanguage": "“{value}” is not a language your agent can speak.",
   "greeting.tooLong": "The greeting is too long — keep it under {max} characters.",
   "greeting.unknownPlaceholder": "“{value}” would be read out to callers as it is. The only placeholder is {allowed}.",
-  "recordCalls.invalid": "Call recording must be on or off."
+  "recordCalls.invalid": "Call recording must be on or off.",
+  "callEnding.autoEndInvalid": "Ending calls by itself must be on or off.",
+  "callEnding.delayRange": "Choose a wait from {min} to {max} seconds."
 }

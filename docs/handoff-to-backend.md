@@ -135,6 +135,8 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `capabilities` | `{ "<capabilityId>": { enabled, channels, params } }` | catalogue: `GET /api/agent-config/catalog` |
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
   | `greeting` | `{ "en"?: string ≤400, "ur"?: string ≤400 }` | the owner's own **call greeting** per language; `{business}` is the only placeholder. Empty/missing = the engine's built-in greeting, which says the caller is speaking with an AI assistant (and that the call is recorded, only while `recordCalls` is on). Spoken exactly as written; the dashboard should show the engine's warnings when it leaves those notices out (`src/lib/voice/greeting.js greetingNotices` — the UK/Ireland require them, the owner decides) |
+  | `autoEndCalls` | boolean, default `true` | the call **ends by itself** once the conversation is over (the caller said goodbye, said "no thanks" after "anything else?", or the agent said goodbye) — CLAUDE.md §6.26. Off = the caller hangs up |
+  | `endCallDelaySeconds` | integer 2–10, default `3` | seconds of quiet after the agent's last words before the call ends; any speech from the caller in that time keeps it open |
   | `recordCalls` | boolean | the owner switched **call recording** on for this agent. Today it only changes the built-in greeting; when Twilio exists the transport records by it, and **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
   | `collect`, `collectVersion` | see B3 | |
 
@@ -455,7 +457,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 629, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 651, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -472,6 +474,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 - Call greeting per agent (`greeting`, `recordCalls` in the settings above): the owner's words or a built-in greeting
   with the AI notice (and the recording notice only while recording is on), with warnings — never refusals — when
   the owner's text leaves them out.
+- Ending a call by itself (`autoEndCalls`, `endCallDelaySeconds` above): after a goodbye, a "no thanks" to
+  "anything else?", or the agent's own goodbye — never mid-request, after "hold on" or while the caller talks.
 - Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are
   recognised by word lists per language (`src/lib/phrases/`) and searched with the business's name.
 - Voice pauses: a sentence cut by a pause is answered as one message; "hold on" / "ek minute" gets a longer wait;
@@ -503,7 +507,9 @@ where call recordings are stored and for how long (`recordCalls` above).
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
+similarity index (`CLAUDE.md` §6.1). Latest: `20261027100000_agent_call_ending` — `agent_configs.auto_end_calls`
+(default true) and `agent_configs.end_call_delay_seconds` (default 3); existing agents keep ending calls after a
+goodbye, as before. Before it: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
 `{}` = the built-in greeting) and `agent_configs.record_calls` (default false); existing agents now greet with the AI
 notice and say nothing about recording. Before it: `20261024100000_phone_numbers` — the stand-in `phone_numbers` table
 (B11) and `call_logs.phone_number_id`; changes no existing row. Before that: `20261023100000_knowledge_per_agent` — the

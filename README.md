@@ -24,7 +24,9 @@ failures behind each rule, what works and what does not, and the measured number
   gets a longer wait, and the agent's own sentences have no long silences in the middle.
 - **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
 - **Passing a caller to a person** (call forwarding) — the agent always says who it is connecting the caller to, in a
-  fixed line the owner can reword — and ending calls politely.
+  fixed line the owner can reword.
+- **Ending a call by itself** once the conversation is over (a goodbye, "no thanks" after "anything else?", or the
+  agent's own goodbye), after a few seconds of quiet the owner chooses — or never, if the owner switches it off.
 - **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
   an AI assistant (and that the call is recorded, only when the agent's recording switch is on).
 - **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,

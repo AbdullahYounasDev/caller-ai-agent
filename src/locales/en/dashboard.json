@@ -395,6 +395,14 @@
   "greeting.notice.noAiNotice": "Your greeting does not tell callers they are speaking with an AI assistant. In the UK and Ireland (and the EU) callers must be told this, and it is good practice everywhere. It is your choice: the greeting is spoken exactly as you wrote it.",
   "greeting.notice.noRecordingNotice": "Call recording is on, but your greeting does not tell callers the call is recorded. The UK, Ireland and most other countries require callers to be told. It is your choice: the greeting is spoken exactly as you wrote it.",
   "greeting.notice.recordingWhileOff": "Your greeting says the call is recorded, but call recording is off. Turn recording on, or remove that sentence so callers are not told something untrue.",
+  "callEnding.title": "Ending the call",
+  "callEnding.autoEnd": "End the call by itself when the conversation is over",
+  "callEnding.autoEndHelp": "The call ends when the caller says goodbye, says \"no, that's all\" after the agent asks if there is anything else, or the agent says goodbye. It never ends while the agent is talking, while the caller is speaking, in the middle of taking a request, or after the caller asks it to wait. If the agent's reply did not say goodbye, it adds \"Thank you for calling. Goodbye.\" first.",
+  "callEnding.delay": "Wait after the agent's last words",
+  "callEnding.delayHelp": "Seconds of quiet before the call ends. If the caller says anything in that time, the call carries on.",
+  "callEnding.offHelp": "Off: the caller hangs up themselves. If the line goes quiet, the agent still asks \"Are you still there?\" and ends a silent call politely.",
+  "callEnding.seconds_one": "{count} second",
+  "callEnding.seconds_other": "{count} seconds",
   "voice.intent.hold": "Asked to wait",
   "voice.intent.presence": "Still on the line"
 }
