@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { LIMITS, DEFAULT_AFTER_MISSES, emptyHandoffConfig } from "@/lib/handoff/config";
+import { ANNOUNCE_LANGUAGES, ANNOUNCE_MAX_CHARS, ANNOUNCE_PLACEHOLDERS, announcementFor, nextContactLine } from "@/lib/handoff/announce";
 
 /**
  * "CALL FORWARDING" — the part of the agent settings where a business says who a caller may be
@@ -13,14 +14,25 @@ import { LIMITS, DEFAULT_AFTER_MISSES, emptyHandoffConfig } from "@/lib/handoff/
  * button saves it), and everything it shows is read from the translations — there is no text
  * of its own here. The server checks every row again on save (PUT /api/agent-config).
  *
+ * The line said before every transfer ("I'm connecting you to Ali, our Representative…") is the
+ * code's, not the model's (lib/handoff/announce.js). The owner may write their own per language;
+ * the preview under it uses the same functions the call does, so what is shown is what is said.
+ *
  * @param {object} props
  * @param {object} props.value       config.escalation
+ * @param {"en"|"ur"} props.replyLanguage  the language the agent speaks (its line is listed first)
  * @param {(next: object) => void} props.onChange
  * @param {(key: string, options?: object) => string} props.t
  * @param {string} props.labelClass @param {string} props.helpClass @param {string} props.inputClass @param {string} props.buttonClass
  */
-export function HandoffPanel({ value, onChange, t, labelClass, helpClass, inputClass, buttonClass }) {
+export function HandoffPanel({ value, replyLanguage = "en", onChange, t, labelClass, helpClass, inputClass, buttonClass }) {
   const config = { ...emptyHandoffConfig(), ...(value ?? {}) };
+  const announce = config.announce ?? {};
+  const setAnnounce = (language, text) => patch({ announce: { ...announce, [language]: text } });
+  // The reply language first: that is the line callers hear today.
+  const announceLanguages = [replyLanguage, ...ANNOUNCE_LANGUAGES.filter((l) => l !== replyLanguage)];
+  // Rows the owner has started filling in; an empty row is dropped on save.
+  const people = config.contacts.filter((c) => c.role?.trim() || c.name?.trim());
   // Typed as one line ("complaint, refund") but stored as a list; kept as text while typing so a
   // trailing comma is not swallowed.
   const [topicsText, setTopicsText] = useState(() => (config.topics ?? []).join(", "));
@@ -129,6 +141,56 @@ export function HandoffPanel({ value, onChange, t, labelClass, helpClass, inputC
               }} />
             <p className={helpClass}>{t("dashboard:handoff.topics.help")}</p>
           </div>
+
+          <fieldset className="flex flex-col gap-3 rounded border border-gray-200 p-3" data-testid="handoff-announce">
+            <legend className="px-1 text-sm font-medium">{t("dashboard:handoff.announce.title")}</legend>
+            <p className={helpClass}>{t("dashboard:handoff.announce.help", { vars: { placeholders: ANNOUNCE_PLACEHOLDERS.join(" ") } })}</p>
+            {announceLanguages.map((language) => {
+              const own = announce[language] ?? "";
+              const rtl = language === "ur";
+              const escalation = { announce: { [language]: own } };
+              const builtIn = announcementFor({ escalation: null, contact: { name: "{name}", role: "{role}" }, language });
+              return (
+                <div key={language} className="flex flex-col gap-1">
+                  <label className={labelClass} htmlFor={`handoff-announce-${language}`}>
+                    {t(`dashboard:handoff.announce.label.${language}`)}
+                    {language === replyLanguage ? ` · ${t("dashboard:handoff.announce.inUse")}` : ""}
+                  </label>
+                  <input id={`handoff-announce-${language}`} className={inputClass} dir={rtl ? "rtl" : "ltr"} maxLength={ANNOUNCE_MAX_CHARS}
+                    placeholder={builtIn} value={own} onChange={(e) => setAnnounce(language, e.target.value)} />
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
+                    <span>{own.trim() ? t("dashboard:handoff.announce.ownText") : t("dashboard:handoff.announce.builtIn")}</span>
+                    <span>
+                      {own.length}/{ANNOUNCE_MAX_CHARS}
+                      {own.trim() && (
+                        <button type="button" className="ms-2 underline" onClick={() => setAnnounce(language, "")}>
+                          {t("dashboard:handoff.announce.useBuiltIn")}
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                  {people.length === 0 ? (
+                    <p className="text-xs text-gray-500">{t("dashboard:handoff.announce.noContacts")}</p>
+                  ) : (
+                    <ul className="flex flex-col gap-1" data-testid={`handoff-announce-preview-${language}`}>
+                      {people.map((contact, index) => (
+                        <li key={contact.id || index} className="rounded bg-gray-50 px-2 py-1 text-sm" dir={rtl ? "rtl" : "ltr"}>
+                          <span className="block text-xs text-gray-500">
+                            {index === 0
+                              ? t("dashboard:handoff.announce.preview", { vars: { who: contact.name || contact.role } })
+                              : t("dashboard:handoff.announce.nextPreview", { vars: { previous: people[index - 1].name || people[index - 1].role } })}
+                          </span>
+                          {index === 0
+                            ? announcementFor({ escalation, contact, language })
+                            : nextContactLine({ escalation, previous: people[index - 1], contact, language })}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              );
+            })}
+          </fieldset>
         </>
       )}
     </div>

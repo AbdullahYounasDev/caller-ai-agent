@@ -131,7 +131,7 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `uiLocale` | `en \| ur` | dashboard language (Urdu renders right-to-left) — **the tenant's**, whichever agent is saved |
   | `replyLanguage` | `en \| ur` | what the agent *says*; it always *understands* both |
   | `hours` | `{ "mon": [["09:00","17:00"]], … "sun": [] }` | opening hours in `timezone` |
-  | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward" }` | **call forwarding** to a person (CLAUDE.md §6.26). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
+  | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward", announce: {en?, ur?} }` | **call forwarding** to a person (CLAUDE.md §6.26). `announce` is the owner's own line said before every transfer (`{name}`/`{role}`; empty = the built-in one). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
   | `capabilities` | `{ "<capabilityId>": { enabled, channels, params } }` | catalogue: `GET /api/agent-config/catalog` |
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
   | `greeting` | `{ "en"?: string ≤400, "ur"?: string ≤400 }` | the owner's own **call greeting** per language; `{business}` is the only placeholder. Empty/missing = the engine's built-in greeting, which says the caller is speaking with an AI assistant (and that the call is recorded, only while `recordCalls` is on). Spoken exactly as written; the dashboard should show the engine's warnings when it leaves those notices out (`src/lib/voice/greeting.js greetingNotices` — the UK/Ireland require them, the owner decides) |
@@ -455,7 +455,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 619, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 629, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.

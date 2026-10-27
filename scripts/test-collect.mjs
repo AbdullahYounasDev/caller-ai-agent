@@ -247,12 +247,17 @@ ok(prismaRow.escalation.contacts[0].phone === "+923001234567", "…in the databa
 
 events.length = 0;
 const hc1 = await newConversation(H);
-stub.state.reply = "Of course, I am connecting you to our Senior doctor, Dr Ayesha.";
+stub.state.reply = "Of course, I understand.";
 r = await say(H, hc1, "I want to speak to the senior doctor please");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "asked", "asking for a person passes the call on");
 ok(r.result.handoff.contacts[0].role === "Senior doctor" && r.result.handoff.contacts[1].role === "Representative", "the contact the caller named is tried first, the others follow");
 ok(r.result.handoff.contacts[0].phone === "+923215551234" && /asked to speak to a person/.test(r.result.handoff.summary), "the transport gets the number and a summary for the person");
-ok(/PASSING THE CALLER ON/.test(r.instruction) && /our Senior doctor, Dr Ayesha/.test(r.instruction), "the model is told to announce who");
+ok(/PASSING THE CALLER ON/.test(r.instruction) && /do NOT name the person/.test(r.instruction), "the model only acknowledges — it is told the announcement is added for it");
+const ANNOUNCED = "I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line.";
+ok(r.result.reply === `Of course, I understand. ${ANNOUNCED}` && r.streamed.endsWith(ANNOUNCED), "the fixed line naming the person is ALWAYS added by the code, streamed and returned");
+const handoffReply = (await prisma.message.findMany({ where: { conversationId: hc1, role: "assistant" }, orderBy: { createdAt: "desc" } }))[0];
+ok(handoffReply.content.endsWith(ANNOUNCED), "…and stored, so the transcript shows what the caller heard");
+ok(r.result.handoff.announcement === ANNOUNCED, "…and handed to the adapter");
 ok(!r.instruction.includes("3215551234") && !r.instruction.includes("+92321"), "…and never sees the phone number");
 ok(events.some((e) => e.type === "handoff.requested" && e.data.reason === "asked" && e.data.contactId && !JSON.stringify(e).includes("3215551234")), "a handoff.requested event carries ids, never the number");
 ok((await prisma.conversation.findUnique({ where: { id: hc1 } })).handoffState?.status === "handed_off", "the conversation is remembered as passed on");
@@ -279,6 +284,14 @@ const hc4 = await newConversation(H);
 r = await say(H, hc4, "I have a complaint about my bill");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "topic", "an owner's always-forward topic passes the call on");
 
+// the owner's own forwarding line, filled in per person
+await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"], announce: { en: "Please hold, {name} from our {role} team will be right with you." } } });
+const hc4b = await newConversation(H);
+stub.state.reply = "I'm sorry to hear that.";
+r = await say(H, hc4b, "I have a complaint about my bill");
+ok(r.result.reply === "I'm sorry to hear that. Please hold, Bilal from our Representative team will be right with you.", "the owner's own line is said instead, filled in for the person being called");
+await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"] } });
+
 // unheard speech (the voice session reports it)
 const { noteUnheard, handoffFailed } = await import("@/lib/agent/respond");
 const hc5 = await newConversation(H, "voice");
@@ -286,6 +299,7 @@ let u = await noteUnheard({ tenantId: H, conversationId: hc5 });
 ok(u?.kind === "rephrase", "speech that could not be read: first time, ask to repeat");
 u = await noteUnheard({ tenantId: H, conversationId: hc5 });
 ok(u?.kind === "handoff" && u.contacts.length === 2 && /could not understand/.test(u.summary), "second time in a row: pass the call on");
+ok(u.announcement === "I'm connecting you to Bilal, our Representative. Please stay on the line.", "…with the fixed line naming the first person");
 await handoffFailed({ tenantId: H, conversationId: hc5 });
 ok((await prisma.conversation.findUnique({ where: { id: hc5 } })).handoffState.status === null, "a transfer nobody answered leaves the conversation open for a call-back");
 ok((await noteUnheard({ tenantId: A, conversationId: hc5 })) === null, "a business with no one to hand to gets null (the session just asks again)");

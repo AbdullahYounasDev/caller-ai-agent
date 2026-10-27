@@ -9,6 +9,7 @@ import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
 import { detectPause } from "@/lib/phrases";
+import { nextContactLine } from "@/lib/handoff/announce";
 import { buildVoiceGreeting, voiceLine } from "@/lib/agent/prompt";
 
 /** Allowance for the client's audio buffering and network jitter when estimating when
@@ -693,7 +694,9 @@ export class CallSession {
     }
     const language = this.lastLanguage ?? "en";
     if (decision?.kind === "handoff") {
-      await this.speakFixed(voiceLine("connecting", language, this.unheardRun), language);
+      // "Sorry, I couldn't understand." then the fixed line naming who they are passed to.
+      const line = [voiceLine("connecting", language, this.unheardRun), decision.announcement].filter(Boolean).join(" ");
+      await this.speakFixed(line, language);
       await this.performHandoff(decision, { turn: this.turnIndex });
       return;
     }
@@ -721,7 +724,15 @@ export class CallSession {
 
     let failure = "unsupported";
     if (typeof this.transport.transfer === "function") {
-      for (const contact of contacts) {
+      for (const [index, contact] of contacts.entries()) {
+        // The caller was told who they were being put through to (the reply ended with it). When that
+        // person does not answer, they are told so and who is tried next — never silence on the line.
+        if (index > 0) {
+          const language = this.lastLanguage ?? (this.config.replyLanguage === "ur" ? "ur" : "en");
+          await this.speakFixed(nextContactLine({ escalation: this.config.escalation, previous: contacts[index - 1], contact, language }), language);
+          await this.untilAudioEnds();
+          if (this.ended) return;
+        }
         this.log("handoff.attempt", { turn, contactId: contact.id });
         let outcome;
         try {

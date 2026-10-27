@@ -454,9 +454,10 @@ export function voiceLine(kind, language, variant = 0) {
       en: ["Sorry, I didn't catch that. Could you say it again, please?", "I'm sorry, the line wasn't clear. Could you repeat that for me?"],
       ur: ["معذرت، آواز واضح نہیں آئی۔ کیا آپ دوبارہ بتا سکتے ہیں؟", "معذرت، بات سمجھ نہیں آئی۔ براہِ کرم ایک بار پھر کہیے۔"],
     },
+    // Said before the transfer line (lib/handoff/announce.js), which names who the caller is passed to.
     connecting: {
-      en: ["I'm sorry I couldn't understand. Let me connect you to a member of our team."],
-      ur: ["معذرت، بات واضح نہیں ہو سکی۔ آپ کی بات ہماری ٹیم کے ایک رکن سے کروائی جا رہی ہے۔"],
+      en: ["I'm sorry, I couldn't understand."],
+      ur: ["معذرت، بات واضح نہیں ہو سکی۔"],
     },
     // A call to a number that rings no agent (unknown, released, not linked yet, the agent or the
     // business not in service — §6.29). Said by the phone transport before it hangs up; there is no
@@ -629,12 +630,16 @@ export function buildHandoffInstruction(plan, { channel }) {
             : plan.reason === "topic"
               ? "This is a matter the business wants a person to handle."
               : "You could not understand or help the caller after trying.";
+      // The announcement itself ("I'm connecting you to Ali, our Representative…") is added by the code
+      // right after this reply (lib/handoff/announce.js) — a model asked to say it sometimes did not.
+      // So the model only acknowledges, and must NOT announce, or the caller hears it twice.
       return (
-        `PASSING THE CALLER ON: ${why} The caller IS being connected to ${who} right now. Tell them so in one or two ` +
-        "short, warm sentences: who they are being connected to, and that it will be a moment. " +
-        (channel === "voice" ? "Do not say goodbye and do not ask anything else — the line is about to be transferred. " : "") +
-        "Do not promise anything else, do not give a phone number, do not guess a waiting time, and do not continue " +
-        "with the original question."
+        `PASSING THE CALLER ON: ${why} The caller is being connected to ${who} right now, and a fixed sentence ` +
+        "telling them who they are being connected to is added automatically RIGHT AFTER your reply. So reply with " +
+        "ONE short, warm sentence only — acknowledge what they asked, or apologise briefly if you could not help — and " +
+        "do NOT say that you are connecting or transferring them, do NOT name the person, " +
+        (channel === "voice" ? "do not say goodbye, do not ask anything, " : "do not ask anything, ") +
+        "do not give a phone number, do not guess a waiting time, and do not continue with the original question."
       );
     }
     case "unavailable":

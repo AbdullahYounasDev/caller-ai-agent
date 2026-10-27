@@ -23,7 +23,8 @@ failures behind each rule, what works and what does not, and the measured number
   Whisper for Urdu), barge-in, full call logging. A sentence cut by a pause is answered as one message, "hold on"
   gets a longer wait, and the agent's own sentences have no long silences in the middle.
 - **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
-- **Passing a caller to a person** (call forwarding) and ending calls politely.
+- **Passing a caller to a person** (call forwarding) — the agent always says who it is connecting the caller to, in a
+  fixed line the owner can reword — and ending calls politely.
 - **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
   an AI assistant (and that the call is recorded, only when the agent's recording switch is on).
 - **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,

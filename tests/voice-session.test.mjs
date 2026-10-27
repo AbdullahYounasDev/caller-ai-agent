@@ -654,6 +654,8 @@ describe("CallSession", () => {
     await h.settle();
     assert.deepEqual(h.sent.transfers.map((t) => t.contact.id), ["c1", "c2"]);
     assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed" && e.data.contactId === "c1" && e.data.reason === "no_answer"));
+    // The caller is told the first person is not available and who is tried next — before the second transfer.
+    assert.ok(h.spoken.some((x) => x.text === "Bilal isn't available right now. I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line."));
     assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
   });
 
@@ -704,7 +706,7 @@ describe("CallSession", () => {
   });
 
   test("speech that could not be read: first time 'say it again', a person asked for on the second", async () => {
-    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "The assistant could not understand or answer the caller." }];
+    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "The assistant could not understand or answer the caller.", announcement: "I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line." }];
     const h = harness({ transcripts: ["", ""], noteUnheard: async () => decisions.shift(), transfer: async () => ({ connected: true }) });
     await h.session.start();
     h.advance(5000);
@@ -718,7 +720,8 @@ describe("CallSession", () => {
     h.hear({ type: "start" }, utterance);
     await h.pump(8000);
     await h.settle();
-    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry I couldn't understand. Let me connect you")));
+    // An apology, then the fixed line that NAMES who the caller is passed to — before the transfer.
+    assert.ok(h.spoken.some((x) => x.text === "I'm sorry, I couldn't understand. I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line."));
     assert.equal(h.sent.transfers[0].context.reason, "not_understood");
     assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
   });

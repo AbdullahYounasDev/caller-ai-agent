@@ -1169,6 +1169,7 @@ export default function Home() {
             <HandoffPanel
               key={`${tenantId}:${config.agentId ?? ""}:${config.updatedAt ?? 0}`}
               value={config.escalation}
+              replyLanguage={config.replyLanguage}
               onChange={(escalation) => patchConfig({ escalation })}
               t={t}
               labelClass={label}

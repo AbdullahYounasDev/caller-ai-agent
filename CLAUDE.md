@@ -1976,7 +1976,7 @@ engine's, behind three seams, so Twilio is a transport swap:
 - **Settings** (`handoff/config.js`) live in the existing `agent_configs.escalation` JSON (no new
   column; the backend later stores one more document next to the others):
   `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours:
-  "callback"|"forward" }`. Phones are stored in international form; ≤5 contacts; "enabled" with nobody to
+  "callback"|"forward", announce: {en?, ur?} }`. Phones are stored in international form; ≤5 contacts; "enabled" with nobody to
   forward to is read as OFF and refused on save (`validation:handoff.*`, en + ur). **Phone numbers are never put in a
   prompt and never sent to a browser** (the chat route strips them; events carry ids only).
 - **The decision is code, not the model** (`handoff/decide.js decideHandoff`, pure, one call per message from
@@ -1992,6 +1992,18 @@ engine's, behind three seams, so Twilio is a transport swap:
   the documents, the caller saying so, or saying the same thing again — all rule-based, zero model calls.
   State is `conversations.handoff_state` (migration `20261021120000_conversation_handoff_state`, hand-written, HNSW line
   removed), restored if the reply fails; a conversation already passed on is not forwarded twice (chat has no hang-up).
+- **What the caller hears before a transfer is the CODE's, never the model's** (`handoff/announce.js`, pure). A real call
+  was forwarded in silence: the model was told to announce the transfer and greeted the caller instead. Now the model
+  is told to say ONE short acknowledgement and NOT to announce or name anyone, and `respond()` appends a fixed line
+  for the person being called — "I'm connecting you to Ali, our Representative. Please stay on the line." — to the
+  streamed, returned and stored reply (chat and voice alike; `result.handoff.announcement`). The owner may write their
+  own line per language (`announce` {en?, ur?}, ≤200 chars, `{name}` and `{role}` the only placeholders — anything else
+  in braces is refused, it would be read aloud); empty = the built-in line (Urdu in the passive, so it never depends
+  on the voice's gender). A person with only a name or only a role still gets a natural sentence. If the first person
+  does not answer, the session says so and announces the next ("Ali isn't available right now. I'm connecting you to
+  Adan, our Senior…", `nextContactLine`); unheard speech that ends in a transfer says "I'm sorry, I couldn't
+  understand." + the announcement. The console (Agent tab → Call forwarding) previews the line for every person with
+  the same functions. Tests: tests/handoff-announce, voice-session, test:collect.
 - **The transport places the transfer** — the seam Twilio fills: `transport.transfer(contact, { summary, reason,
   callId }) → Promise<{ connected: boolean, reason?: "busy"|"no_answer"|"failed" }>`. `CallSession.performHandoff`
   waits for the announcement to finish playing, tries the contacts in order, and on `connected` ends the call as
@@ -2339,7 +2351,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 619 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 629 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2517,7 +2529,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 619 unit tests: pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 629 unit tests: the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding

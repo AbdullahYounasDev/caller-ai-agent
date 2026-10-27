@@ -9,6 +9,7 @@ import { advanceCollection, draftFromMarker, readsAsAnswer } from "@/lib/collect
 import { planHandoff } from "@/lib/handoff/turn";
 import { handoffAvailable } from "@/lib/handoff/config";
 import { decideHandoff, readHandoffState, newHandoffState, summariseForPerson } from "@/lib/handoff/decide";
+import { announcementFor } from "@/lib/handoff/announce";
 import { emitEngineEvent } from "@/lib/standins/events";
 import { createExtractor } from "@/lib/collect/extract";
 import { createMarkerFilter, stripMarker } from "@/lib/collect/marker";
@@ -331,7 +332,14 @@ export async function respond({
     throw withdrawn ? new TurnSupersededError() : err;
   }
   if (passOn) passOn(markers.end());
-  const { text: assistantReply, type: markedType } = stripMarker(rawReply);
+  const { text: modelReply, type: markedType } = stripMarker(rawReply);
+  // PASSING THE CALLER ON: the line that tells them who they are being connected to is said by
+  // the CODE, after the model's words (lib/handoff/announce.js). Left to the model, a real call was
+  // transferred with no word about it. Streamed like the rest of the reply, so a call speaks it and
+  // the chat shows it, and stored with it, so the next turn's history says what the caller heard.
+  const announcement = handoffTurn.result?.kind === "handoff" ? handoffTurn.result.announcement : null;
+  if (announcement && passOn) passOn(`${/\s$/.test(modelReply) || !modelReply ? "" : " "}${announcement}`);
+  const assistantReply = announcement ? `${modelReply.trim()} ${announcement}`.trim() : modelReply;
   const generationMs = since(generationStartedAt);
 
   // The model recognised a request the rules missed: start the draft so the NEXT message is
@@ -515,6 +523,8 @@ export async function noteUnheard({ tenantId, agentId = null, conversationId }) 
     reason: action.reason,
     contacts: action.contacts,
     summary: summariseForPerson({ reason: action.reason, callerMessages: recent.map((m) => m.content).reverse() }),
+    // What the caller hears before the transfer (lib/handoff/announce.js), in the agent's language.
+    announcement: announcementFor({ escalation: config.escalation, contact: action.contacts[0], language: config.replyLanguage }),
   };
   emitEngineEvent({ type: "handoff.requested", tenantId, data: { conversationId, agentId: config.agentId ?? null, channel: "voice", reason: action.reason, contactId: action.contacts[0]?.id ?? null } });
   return result;
