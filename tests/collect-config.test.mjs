@@ -24,7 +24,7 @@ describe("the catalogue is complete in both languages", () => {
         assert.ok(f.label[lang]?.length > 1, `${f.id} label ${lang}`);
         assert.ok(f.question[lang]?.length > 1, `${f.id} question ${lang}`);
       }
-      assert.ok(["text", "longtext", "phone", "email", "number", "datetime", "choice", "yesno"].includes(f.type), f.id);
+      assert.ok(["text", "longtext", "phone", "email", "number", "datetime", "choice", "yesno", "items"].includes(f.type), f.id);
     }
     for (const t of RECORD_TYPES) for (const lang of ["en", "ur"]) assert.ok(t.label[lang] && t.description[lang], `${t.id} ${lang}`);
     for (const i of INDUSTRIES) for (const lang of ["en", "ur"]) assert.ok(i.label[lang], `${i.id} ${lang}`);

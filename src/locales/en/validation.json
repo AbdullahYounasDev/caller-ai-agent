@@ -67,6 +67,7 @@
   "collect.customLabelRequired": "The detail “{id}” needs a name.",
   "collect.customOptionsRequired": "The detail “{id}” needs at least two choices.",
   "collect.customTooMany": "You can add at most {max} details of your own.",
+  "collect.conditionInvalid": "In {type}, “{id}” is asked only after another answer — keep it below that question, and keep that question in the list.",
   "records.notFound": "That request could not be found.",
   "records.invalidStatus": "That is not a status a request can have.",
   "records.invalidTransition": "A request cannot be moved to that status from where it is.",
@@ -82,6 +83,9 @@
   "handoff.topicTooLong": "A topic must be {max} characters or fewer.",
   "handoff.tooManyTopics": "You can add at most {max} topics.",
   "handoff.enabledNeedsContact": "Add at least one person with a phone number before switching call forwarding on.",
+  "handoff.announceInvalid": "The forwarding line must be text, in English or Urdu.",
+  "handoff.announceTooLong": "The forwarding line must be {max} characters or fewer.",
+  "handoff.announcePlaceholder": "The forwarding line can only use {allowed}. {value} would be read out to the caller as it is.",
   "agents.invalidId": "That agent id is not valid.",
   "agents.notFound": "That agent could not be found.",
   "agents.archived": "This agent is archived and no longer answers. Restore it first.",
@@ -120,5 +124,13 @@
   "greeting.unknownLanguage": "“{value}” is not a language your agent can speak.",
   "greeting.tooLong": "The greeting is too long — keep it under {max} characters.",
   "greeting.unknownPlaceholder": "“{value}” would be read out to callers as it is. The only placeholder is {allowed}.",
-  "recordCalls.invalid": "Call recording must be on or off."
+  "recordCalls.invalid": "Call recording must be on or off.",
+  "callEnding.autoEndInvalid": "Ending calls by itself must be on or off.",
+  "callEnding.delayRange": "Choose a wait from {min} to {max} seconds.",
+  "summary.invalid": "The business summary must be text.",
+  "summary.tooLong": "The business summary must be {max} characters or fewer.",
+  "summary.hasPrice": "The summary mentions a price ({price}). Prices change, and the summary is always in the agent's mind, so an old price would be quoted with confidence. Keep prices in your documents — the agent looks them up there — and remove it from the summary.",
+  "summary.sourcesInvalid": "Choose between 1 and {max} documents to summarise.",
+  "summary.rateLimited": "Too many summaries at once. Please wait a minute and try again.",
+  "summary.nothingUsable": "None of the chosen documents can be used for this agent's summary: they are still importing, failed, or are limited to other agents."
 }

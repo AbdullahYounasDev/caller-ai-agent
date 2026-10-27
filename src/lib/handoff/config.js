@@ -1,4 +1,5 @@
 import { normalizePhone } from "@/lib/collect/validate";
+import { announceProblems, normalizeAnnounce } from "./announce";
 
 /**
  * A BUSINESS'S HUMAN-HANDOFF SETTINGS — who a caller may be passed to, and when.
@@ -15,7 +16,9 @@ import { normalizePhone } from "@/lib/collect/validate";
  *     afterMisses: 2,                              how many times the agent may fail to understand
  *                                                  or help before it forwards (1–4)
  *     topics: ["complaint", "refund", "emergency"], words that ALWAYS forward
- *     outsideHours: "callback"                     closed → offer a call-back; "forward" → forward anyway
+ *     outsideHours: "callback",                    closed → offer a call-back; "forward" → forward anyway
+ *     announce: { en?: "...", ur?: "..." }         the owner's own line before a transfer, with {name}
+ *                                                  and {role}; empty = the built-in one (announce.js)
  *   }
  *
  * The phone numbers are NEVER put in a prompt (the model would read them out): they are only
@@ -42,7 +45,7 @@ export const OUTSIDE_HOURS = ["callback", "forward"];
 
 /** @returns {object} the settings of a business that has not set handoff up (off). */
 export function emptyHandoffConfig() {
-  return { enabled: false, contacts: [], whenCallerAsks: true, afterMisses: DEFAULT_AFTER_MISSES, topics: [], outsideHours: "callback" };
+  return { enabled: false, contacts: [], whenCallerAsks: true, afterMisses: DEFAULT_AFTER_MISSES, topics: [], outsideHours: "callback", announce: {} };
 }
 
 const clean = (value, max) =>
@@ -70,6 +73,11 @@ function parse(raw) {
   if (!Number.isInteger(misses) || misses < LIMITS.missesMin || misses > LIMITS.missesMax) {
     if (input.afterMisses !== undefined) problems.push({ code: "missesRange", vars: { min: LIMITS.missesMin, max: LIMITS.missesMax } });
   } else out.afterMisses = misses;
+
+  // The line said before a transfer: refused only when it cannot be spoken as meant (too long, a
+  // placeholder other than {name}/{role} that would be read out literally).
+  problems.push(...announceProblems(input.announce));
+  out.announce = normalizeAnnounce(input.announce);
 
   if (input.outsideHours !== undefined) {
     if (OUTSIDE_HOURS.includes(input.outsideHours)) out.outsideHours = input.outsideHours;

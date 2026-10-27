@@ -8,6 +8,10 @@ import { translator, dirFor, LOCALE_META, REPLY_LANGUAGES } from "@/lib/i18n";
 import { VoiceCallPanel } from "./voice/VoiceCallPanel";
 import { VoicePicker } from "./voice/VoicePicker";
 import { GreetingPanel } from "./voice/GreetingPanel";
+import { CallEndingPanel } from "./voice/CallEndingPanel";
+import { SummaryDraft } from "./knowledge/SummaryDraft";
+import { SummaryPanel } from "./knowledge/SummaryPanel";
+import { SUMMARY_MAX_DOCUMENTS } from "@/lib/agent/summary-rules";
 import { CollectPanel } from "./collect/CollectPanel";
 import { HandoffPanel } from "./handoff/HandoffPanel";
 import { AgentPicker } from "./agents/AgentPicker";
@@ -257,6 +261,10 @@ export default function Home() {
   const [config, setConfig] = useState(null);
   const [catalog, setCatalog] = useState([]);
   const [configStatus, setConfigStatus] = useState(null);
+  // The business summary (§6.20): whether it is still in step with its documents, and the AI's
+  // draft while the owner checks it (null = the review window is closed).
+  const [summaryStatus, setSummaryStatus] = useState(null);
+  const [summaryDraft, setSummaryDraft] = useState(null);
   const [savingConfig, setSavingConfig] = useState(false);
   const [reloadingConfig, setReloadingConfig] = useState(false);
 
@@ -331,6 +339,7 @@ export default function Home() {
           ? { ...configData.config, uiLocale: prev.uiLocale }
           : configData.config
       );
+      setSummaryStatus(configData.summaryStatus ?? null);
 
       // Adopt the saved language ONCE, so the page opens in the language the
       // business chose. Tracked in a ref rather than on the config object: the
@@ -394,6 +403,9 @@ export default function Home() {
             voices: config.voices,
             greeting: config.greeting ?? {},
             recordCalls: Boolean(config.recordCalls),
+            autoEndCalls: config.autoEndCalls !== false,
+            endCallDelaySeconds: config.endCallDelaySeconds ?? 3,
+            profileSummary: config.profileSummary ?? "",
             escalation: config.escalation,
           }),
         }
@@ -403,6 +415,7 @@ export default function Home() {
         throw new Error(data.details ? data.details.join(" · ") : data.error || "Save failed");
       }
       setConfig(data.config);
+      setSummaryStatus(data.summaryStatus ?? null);
       setUiLocale(data.config.uiLocale);
       setConfigStatus(t("common:state.saved"));
       // The picker shows the business name of an unnamed agent: re-read it.
@@ -416,6 +429,47 @@ export default function Home() {
 
   function patchConfig(patch) {
     setConfig((prev) => ({ ...prev, ...patch }));
+  }
+
+  /** "Summarize for the agent": the AI writes a draft of the ticked documents; nothing is saved yet. */
+  async function startSummary() {
+    const ids = [...selectedIds];
+    if (!ids.length || ids.length > SUMMARY_MAX_DOCUMENTS) return;
+    setSummaryDraft({ loading: true, ids });
+    try {
+      const res = await fetch(`/api/agent-config/summary?tenantId=${encodeURIComponent(tenantId)}${agentQuery}&locale=${uiLocale}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceIds: ids, language: uiLocale }),
+      });
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.error || "Summary failed");
+      setSummaryDraft({ loading: false, ids, ...data, text: data.draft });
+    } catch (err) {
+      setSummaryDraft({ loading: false, ids, sources: [], error: humanizeError(err.message, t) });
+    }
+  }
+
+  /** The owner approved the draft: save it into this agent's profile, and nothing else of the agent. */
+  async function saveSummary() {
+    const draft = summaryDraft;
+    setSummaryDraft({ ...draft, saving: true, error: null });
+    try {
+      const res = await fetch(`/api/agent-config?tenantId=${encodeURIComponent(tenantId)}${agentQuery}&locale=${uiLocale}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profileSummary: draft.text, profileSummarySourceIds: draft.sources.map((s) => s.id) }),
+      });
+      const data = await readJsonSafe(res);
+      if (!res.ok) throw new Error(data.details ? data.details.join(" · ") : data.error || "Save failed");
+      // Only the summary: unsaved edits in the Agent tab are left as they are.
+      setConfig((prev) => ({ ...prev, profileSummary: data.config.profileSummary, profileSummarySources: data.config.profileSummarySources }));
+      setSummaryStatus(data.summaryStatus ?? null);
+      setSummaryDraft(null);
+      setIngestStatus(t("dashboard:summary.saved"));
+    } catch (err) {
+      setSummaryDraft({ ...draft, saving: false, error: humanizeError(err.message, t) });
+    }
   }
 
   function toggleCapability(id, enabled) {
@@ -1165,10 +1219,30 @@ export default function Home() {
               helpClass={help}
               inputClass={inputCls}
             />
+
+            <CallEndingPanel
+              config={config}
+              onChange={patchConfig}
+              t={t}
+              labelClass={label}
+              helpClass={help}
+              inputClass={inputCls}
+            />
+
+            <SummaryPanel
+              config={config}
+              status={summaryStatus}
+              onChange={patchConfig}
+              t={t}
+              labelClass={label}
+              helpClass={help}
+              inputClass={inputCls}
+            />
   
             <HandoffPanel
               key={`${tenantId}:${config.agentId ?? ""}:${config.updatedAt ?? 0}`}
               value={config.escalation}
+              replyLanguage={config.replyLanguage}
               onChange={(escalation) => patchConfig({ escalation })}
               t={t}
               labelClass={label}
@@ -1434,6 +1508,13 @@ export default function Home() {
             </div>
           )}
   
+          {/* ---- the business summary is recommended once there are documents (§6.20) ---- */}
+          {docs.length > 0 && config && !config.profileSummary && (
+            <p className="mb-3 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900" data-testid="summary-recommend">
+              {t("dashboard:summary.recommend")}
+            </p>
+          )}
+
           {/* ---- existing documents ---- */}
           {docs.length === 0 ? (
             <p className="mb-4 text-sm text-gray-400">{t("dashboard:knowledge.empty")}</p>
@@ -1448,6 +1529,18 @@ export default function Home() {
                   />
                   {t("dashboard:knowledge.selectAll")}
                 </label>
+                {selectedIds.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={startSummary}
+                    disabled={selectedIds.size > SUMMARY_MAX_DOCUMENTS || summaryDraft != null}
+                    title={selectedIds.size > SUMMARY_MAX_DOCUMENTS ? t("dashboard:summary.tooMany", { vars: { max: SUMMARY_MAX_DOCUMENTS } }) : undefined}
+                    className="ms-auto rounded border border-blue-300 px-3 py-1 text-xs text-blue-700 disabled:opacity-40"
+                    data-testid="summarize-selected"
+                  >
+                    {t("dashboard:summary.button", { count: selectedIds.size })}
+                  </button>
+                )}
                 {selectedIds.size > 0 && (
                   <button
                     type="button"
@@ -1619,6 +1712,22 @@ export default function Home() {
               {ingestStatus && <p className="text-sm">{ingestStatus}</p>}
             </div>
           </form>
+        </Modal>
+      )}
+
+      {summaryDraft && (
+        <Modal title={t("dashboard:summary.modalTitle")} onClose={() => !summaryDraft.saving && setSummaryDraft(null)}>
+          <SummaryDraft
+            state={summaryDraft}
+            onChange={(text) => setSummaryDraft((d) => ({ ...d, text }))}
+            onSave={saveSummary}
+            onCancel={() => setSummaryDraft(null)}
+            replacing={Boolean(config?.profileSummary)}
+            t={t}
+            language={uiLocale === "ur" ? "ur" : "en"}
+            inputClass={inputCls}
+            helpClass={help}
+          />
         </Modal>
       )}
 

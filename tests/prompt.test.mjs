@@ -337,13 +337,15 @@ describe("buildHandoffInstruction — the model words what the system decided", 
     assert.match(text, /Do not mention a person or a transfer/);
   });
 
-  test("handoff: names who, never a number, no goodbye on a call", () => {
+  test("handoff: the model only acknowledges — the code adds the announcement — no number, no goodbye on a call", () => {
     const plan = { kind: "handoff", reason: "asked", contact: { role: "Senior doctor", name: "Dr Ayesha" } };
     const voice = buildHandoffInstruction(plan, { channel: "voice" });
     assert.match(voice, /being connected to our Senior doctor, Dr Ayesha right now/);
-    assert.match(voice, /Do not say goodbye/);
+    assert.match(voice, /added automatically RIGHT AFTER your reply/);
+    assert.match(voice, /do NOT say that you are connecting or transferring them, do NOT name the person/);
+    assert.match(voice, /do not say goodbye/);
     assert.match(voice, /do not give a phone number/);
-    assert.doesNotMatch(buildHandoffInstruction(plan, { channel: "chat" }), /Do not say goodbye/);
+    assert.doesNotMatch(buildHandoffInstruction(plan, { channel: "chat" }), /do not say goodbye/);
   });
 
   test("each reason has its own opening", () => {

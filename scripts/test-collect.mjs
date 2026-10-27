@@ -247,12 +247,17 @@ ok(prismaRow.escalation.contacts[0].phone === "+923001234567", "…in the databa
 
 events.length = 0;
 const hc1 = await newConversation(H);
-stub.state.reply = "Of course, I am connecting you to our Senior doctor, Dr Ayesha.";
+stub.state.reply = "Of course, I understand.";
 r = await say(H, hc1, "I want to speak to the senior doctor please");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "asked", "asking for a person passes the call on");
 ok(r.result.handoff.contacts[0].role === "Senior doctor" && r.result.handoff.contacts[1].role === "Representative", "the contact the caller named is tried first, the others follow");
 ok(r.result.handoff.contacts[0].phone === "+923215551234" && /asked to speak to a person/.test(r.result.handoff.summary), "the transport gets the number and a summary for the person");
-ok(/PASSING THE CALLER ON/.test(r.instruction) && /our Senior doctor, Dr Ayesha/.test(r.instruction), "the model is told to announce who");
+ok(/PASSING THE CALLER ON/.test(r.instruction) && /do NOT name the person/.test(r.instruction), "the model only acknowledges — it is told the announcement is added for it");
+const ANNOUNCED = "I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line.";
+ok(r.result.reply === `Of course, I understand. ${ANNOUNCED}` && r.streamed.endsWith(ANNOUNCED), "the fixed line naming the person is ALWAYS added by the code, streamed and returned");
+const handoffReply = (await prisma.message.findMany({ where: { conversationId: hc1, role: "assistant" }, orderBy: { createdAt: "desc" } }))[0];
+ok(handoffReply.content.endsWith(ANNOUNCED), "…and stored, so the transcript shows what the caller heard");
+ok(r.result.handoff.announcement === ANNOUNCED, "…and handed to the adapter");
 ok(!r.instruction.includes("3215551234") && !r.instruction.includes("+92321"), "…and never sees the phone number");
 ok(events.some((e) => e.type === "handoff.requested" && e.data.reason === "asked" && e.data.contactId && !JSON.stringify(e).includes("3215551234")), "a handoff.requested event carries ids, never the number");
 ok((await prisma.conversation.findUnique({ where: { id: hc1 } })).handoffState?.status === "handed_off", "the conversation is remembered as passed on");
@@ -279,6 +284,14 @@ const hc4 = await newConversation(H);
 r = await say(H, hc4, "I have a complaint about my bill");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "topic", "an owner's always-forward topic passes the call on");
 
+// the owner's own forwarding line, filled in per person
+await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"], announce: { en: "Please hold, {name} from our {role} team will be right with you." } } });
+const hc4b = await newConversation(H);
+stub.state.reply = "I'm sorry to hear that.";
+r = await say(H, hc4b, "I have a complaint about my bill");
+ok(r.result.reply === "I'm sorry to hear that. Please hold, Bilal from our Representative team will be right with you.", "the owner's own line is said instead, filled in for the person being called");
+await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"] } });
+
 // unheard speech (the voice session reports it)
 const { noteUnheard, handoffFailed } = await import("@/lib/agent/respond");
 const hc5 = await newConversation(H, "voice");
@@ -286,6 +299,7 @@ let u = await noteUnheard({ tenantId: H, conversationId: hc5 });
 ok(u?.kind === "rephrase", "speech that could not be read: first time, ask to repeat");
 u = await noteUnheard({ tenantId: H, conversationId: hc5 });
 ok(u?.kind === "handoff" && u.contacts.length === 2 && /could not understand/.test(u.summary), "second time in a row: pass the call on");
+ok(u.announcement === "I'm connecting you to Bilal, our Representative. Please stay on the line.", "…with the fixed line naming the first person");
 await handoffFailed({ tenantId: H, conversationId: hc5 });
 ok((await prisma.conversation.findUnique({ where: { id: hc5 } })).handoffState.status === null, "a transfer nobody answered leaves the conversation open for a call-back");
 ok((await noteUnheard({ tenantId: A, conversationId: hc5 })) === null, "a business with no one to hand to gets null (the session just asks again)");
@@ -373,6 +387,53 @@ stub.state.reply = (n) => `Reply ${n}.`;
   ok(typeof plain.reply === "string" && (await prisma.message.count({ where: { conversationId: cn } })) === 2, "a signal that is never used changes nothing");
 }
 stub.state.reply = (n) => `Reply ${n}.`;
+
+// ── a restaurant order, end to end (§6.25) ─────────────────────────────────
+{
+  const R = "__collect_test_c__";
+  await prisma.record.deleteMany({ where: { tenantId: R } });
+  await prisma.customer.deleteMany({ where: { tenantId: R } });
+  await saveAgentConfig(R, { businessName: "Karachi Kitchen", timezone: "Asia/Karachi", hours: null, replyLanguage: "en" });
+  const menuless = { ...presetConfig("restaurant"), enabled: true };
+  const savedMenuless = await saveCollectConfig(R, validateCollectConfig(menuless).config);
+  ok(savedMenuless.collect.recordTypes.order.enabled === true, "the restaurant preset saves with orders on even before the menu is in…");
+  const co = await newConversation(R);
+  stub.state.extraction = () => ({ values: {}, date: null, time: null });
+  await say(R, co, "I'd like to order two chicken biryanis");
+  ok((await draftOf(co)) === null, "…but with no menu no order is taken");
+  const withMenu = {
+    ...menuless,
+    menu: [
+      { label: { en: "Chicken Biryani", ur: "چکن بریانی" } },
+      { label: { en: "Raita", ur: "رائتہ" } },
+      { label: { en: "Coke", ur: "کوک" } },
+    ],
+  };
+  await saveCollectConfig(R, validateCollectConfig(withMenu).config);
+  const order = await newConversation(R);
+  let o = await say(R, order, "I'd like to order two chicken biryanis and a raita");
+  ok(o.result.collection?.state === "ask" && (await draftOf(order))?.type === "order", "an order is started, the dishes said with it already noted");
+  ok(/Never say the order is placed/.test(o.instruction) && /Never state a price or a total/.test(o.instruction), "the model is told never to say 'placed' or invent a price");
+  await say(R, order, "Ahmed");
+  await say(R, order, "0300 1234567");
+  o = await say(R, order, "delivery please");
+  ok(o.result.collection?.field === "address", "delivery: the address is asked");
+  stub.state.extraction = () => ({ values: { order_items: "1 x Pizza" }, date: null, time: null });
+  o = await say(R, order, "House 5, Street 3, Clifton");
+  stub.state.extraction = () => ({ values: {}, date: null, time: null });
+  const rec = (await listRecords(R, {})).items?.[0] ?? (await prisma.record.findFirst({ where: { tenantId: R } }));
+  ok(rec?.type === "order" && /^OR-/.test(rec.reference), "saved at the last required detail, as an order request with an OR- reference");
+  // (JSONB reorders keys, so compare the meaning, not the text.)
+  const storedOrder = (rec?.data?.order_items ?? []).map((l) => `${l.qty} × ${l.id} (${l.name})`).join(", ");
+  ok(storedOrder === "2 × chicken_biryani (Chicken Biryani), 1 × raita (Raita)", `the dishes and quantities are stored, checked against the menu (${storedOrder})`);
+  ok(rec?.data?.address === "House 5, Street 3, Clifton" && rec?.data?.order_type === "delivery", "…with the delivery address");
+  o = await say(R, order, "Oh, and add a coke as well");
+  const after = await prisma.record.findFirst({ where: { tenantId: R } });
+  ok(after.data.order_items.length === 3 && after.data.order_items[2].id === "coke" && (await prisma.record.count({ where: { tenantId: R } })) === 1, "'add a coke' updates the same request");
+  await prisma.record.deleteMany({ where: { tenantId: R } });
+  await prisma.customer.deleteMany({ where: { tenantId: R } });
+}
+stub.state.extraction = () => ({ values: {}, date: null, time: null });
 
 await wipe();
 await prisma.agentConfig.deleteMany({ where: { tenantId: { in: ["__collect_test_c__", "__collect_test_handoff__"] } } });

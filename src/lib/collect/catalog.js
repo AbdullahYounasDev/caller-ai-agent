@@ -33,14 +33,15 @@ export const COLLECT_LANGUAGES = ["en", "ur"];
  *   datetime  a date and a time, in the business's time zone, checked against opening hours
  *   choice    one entry of a list the business defines (its services, its staff)
  *   yesno     yes or no
+ *   items     dishes from the business's MENU, each with a quantity (an order — order.js)
  */
-export const FIELD_TYPES = ["text", "longtext", "phone", "email", "number", "datetime", "choice", "yesno"];
+export const FIELD_TYPES = ["text", "longtext", "phone", "email", "number", "datetime", "choice", "yesno", "items"];
 
 /** Field types an owner may use for a CUSTOM field (phone/email/datetime have fixed meanings). */
 export const CUSTOM_FIELD_TYPES = ["text", "longtext", "number", "choice", "yesno"];
 
-/** The lists a `choice` field can draw its options from. */
-export const CHOICE_SOURCES = ["services", "staff"];
+/** The lists a `choice` (or `items`) field can draw its options from. */
+export const CHOICE_SOURCES = ["services", "staff", "menu"];
 
 /**
  * @typedef {object} FieldDef
@@ -50,7 +51,10 @@ export const CHOICE_SOURCES = ["services", "staff"];
  * @property {"normal"|"sensitive"} sensitivity             sensitive = off by default, flagged in the console
  * @property {{en: string, ur: string}} label
  * @property {{en: string, ur: string}} question
- * @property {"services"|"staff"} [source]                  for `choice`: which owner-defined list
+ * @property {"services"|"staff"|"menu"} [source]           for `choice` / `items`: which owner-defined list
+ * @property {Array<{id: string, label: {en: string, ur: string}, also?: string[]}>} [options]
+ *                                                          for a `choice` with a FIXED list (pickup / delivery);
+ *                                                          `also` = other ways callers say it
  * @property {number} [min]                                 for `number`
  * @property {number} [max]                                 for `number` (and the length of text)
  */
@@ -155,6 +159,54 @@ export const FIELDS = [
     question: { en: "What is it regarding?", ur: "یہ کس سلسلے میں ہے؟" },
   },
   {
+    id: "order_items",
+    type: "items",
+    source: "menu",
+    group: "visit",
+    sensitivity: "normal",
+    // Lines in one order (order.js ORDER_LIMITS).
+    max: 20,
+    label: { en: "Order", ur: "آرڈر" },
+    question: { en: "What would you like to order?", ur: "آپ کیا آرڈر کرنا چاہیں گے؟" },
+  },
+  {
+    id: "order_type",
+    type: "choice",
+    group: "visit",
+    sensitivity: "normal",
+    max: 40,
+    label: { en: "Pickup or delivery", ur: "پک اپ یا ڈیلیوری" },
+    question: {
+      en: "Will you pick it up, or would you like it delivered?",
+      ur: "آپ خود لے جائیں گے یا ڈیلیوری چاہیے؟",
+    },
+    // A fixed list (no owner list to draw from), with the ways callers actually say each one.
+    options: [
+      {
+        id: "pickup",
+        label: { en: "Pickup", ur: "پک اپ" },
+        also: ["pick up", "pickup", "pick it up", "picking up", "pick", "takeaway", "take away", "collect", "collection", "come and get", "khud", "le jaunga", "le jaungi", "le jayenge", "le jayen", "خود", "لے جاؤں", "لے جائیں", "لے جاؤں گا", "لے جاؤں گی", "ٹیک اوے"],
+      },
+      {
+        id: "delivery",
+        label: { en: "Delivery", ur: "ڈیلیوری" },
+        also: ["deliver", "delivered", "delivery", "home delivery", "bring it", "send it", "bhej", "bhejein", "bhej dein", "ghar", "ghar pe", "ghar par", "بھیج", "گھر", "ڈیلیور", "ڈیلیوری"],
+      },
+    ],
+  },
+  {
+    id: "order_time",
+    type: "text",
+    group: "visit",
+    sensitivity: "normal",
+    max: 80,
+    label: { en: "Preferred time", ur: "ترجیحی وقت" },
+    question: {
+      en: "When would you like it — as soon as possible, or at a particular time?",
+      ur: "آپ کو کب چاہیے — جتنی جلدی ہو سکے، یا کسی خاص وقت پر؟",
+    },
+  },
+  {
     id: "callback_window",
     type: "text",
     group: "visit",
@@ -225,6 +277,8 @@ export const FIELD_GROUPS = ["identity", "visit", "place", "other"];
  * @property {boolean} scheduled     it is about a point in time: needs the `datetime` field
  * @property {string[]} mustReach    at least one of these fields must be collected, or the team cannot reach the customer
  * @property {string[]} mustInclude  fields that cannot be left out
+ * @property {string} [needsList]    a list the business must fill in before the agent takes this ("menu"); until
+ *                                   then the type is not offered (config.js enabledRecordTypes) and the console warns
  */
 
 /** @type {RecordTypeDef[]} */
@@ -251,6 +305,19 @@ export const RECORD_TYPES = [
     mustReach: ["phone"],
     mustInclude: ["phone"],
   },
+  {
+    id: "order",
+    label: { en: "Order request", ur: "آرڈر کی درخواست" },
+    description: {
+      en: "A customer orders from your menu, for pickup or delivery. Your team confirms the order and the total; the agent never says the order is placed.",
+      ur: "گاہک آپ کے مینو سے پک اپ یا ڈیلیوری کے لیے آرڈر دیتا ہے۔ آپ کی ٹیم آرڈر اور کل رقم کی تصدیق کرتی ہے؛ ایجنٹ کبھی نہیں کہتا کہ آرڈر ہو گیا۔",
+    },
+    scheduled: false,
+    mustReach: ["phone"],
+    mustInclude: ["phone", "order_items"],
+    // Only dishes on the menu can be ordered: no menu, nothing to order from.
+    needsList: "menu",
+  },
 ];
 
 const RECORD_TYPE_BY_ID = new Map(RECORD_TYPES.map((r) => [r.id, r]));
@@ -263,7 +330,8 @@ export function getRecordType(id) {
 /**
  * @typedef {object} PresetType
  * @property {boolean} enabled
- * @property {Array<{id: string, required: boolean}>} fields   in the order they are asked
+ * @property {Array<{id: string, required: boolean, question?: {en: string, ur: string}, when?: {field: string, equals: string}}>} fields
+ *   in the order they are asked; `when` = asked only when an earlier answer is that (the address, only for delivery)
  * @property {{en: string, ur: string}} [label]               what this business calls it ("Table reservation")
  */
 
@@ -275,7 +343,27 @@ export function getRecordType(id) {
  * @property {Array<{en: string, ur: string}>} [suggestedServices]
  */
 
-const f = (id, required = true) => ({ id, required });
+const f = (id, required = true, extra = {}) => ({ id, required, ...extra });
+
+/** A food order: what, how many, pickup or delivery, the address only for delivery. */
+const ORDER_FIELDS = [
+  f("name"),
+  f("phone"),
+  f("order_items"),
+  f("order_type"),
+  f("address", true, {
+    question: { en: "What is the delivery address?", ur: "ڈیلیوری کا پتہ کیا ہے؟" },
+    when: { field: "order_type", equals: "delivery" },
+  }),
+  // One open question instead of two (time, then instructions): six questions is already a long
+  // call. An owner who wants the time on its own adds the "Preferred time" field.
+  f("notes", false, {
+    question: {
+      en: "Anything we should know — when you'd like it, the spice level, or an allergy?",
+      ur: "کوئی خاص بات — آپ کو کب چاہیے، مرچ کتنی ہو، یا کسی چیز سے الرجی؟",
+    },
+  }),
+];
 
 /** @type {IndustryPreset[]} */
 export const INDUSTRIES = [
@@ -285,6 +373,8 @@ export const INDUSTRIES = [
     recordTypes: {
       appointment: { enabled: true, fields: [f("name"), f("phone"), f("datetime"), f("reason", false)] },
       callback: { enabled: true, fields: [f("name"), f("phone"), f("reason", false), f("callback_window", false)] },
+      // Off everywhere but the restaurant preset; here so every business can switch it on.
+      order: { enabled: false, fields: ORDER_FIELDS },
     },
   },
   {
@@ -343,6 +433,7 @@ export const INDUSTRIES = [
         fields: [f("name"), f("phone"), f("party_size"), f("datetime"), f("notes", false)],
       },
       callback: { enabled: true, fields: [f("name"), f("phone"), f("reason", false)] },
+      order: { enabled: true, fields: ORDER_FIELDS },
     },
   },
   {
@@ -374,6 +465,8 @@ export const LIMITS = {
   customFieldsMax: 10,
   /** services / staff entries */
   listMax: 60,
+  /** dishes on a menu */
+  menuMax: 150,
   /** options of a custom choice field */
   optionsMax: 30,
   labelMax: 80,

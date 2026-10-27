@@ -124,7 +124,7 @@ the day a suspended tenant keeps being served. **Routes don't call
 the translated, route-facing wrapper next to it in the same file. It is called
 from every route that serves or mutates a tenant's data: `/api/chat`, all of
 `/api/knowledge` (upload/crawl/typed-text, edit, delete, retry) and
-`PUT /api/agent-config`, `/api/agents`, `/api/collect` and `/api/numbers`. See §6.18.
+`PUT /api/agent-config`, `POST /api/agent-config/summary`, `/api/agents`, `/api/collect` and `/api/numbers`. See §6.18.
 
 ---
 
@@ -170,6 +170,7 @@ src/app/
   handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
   agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
   knowledge/DocumentAgents.js  # one document's "All agents / Only: …" and its editor, in the Knowledge tab (§6.28)
+  knowledge/SummaryDraft.js    # the review window for the AI's business-summary draft; SummaryPanel.js = the Agent tab's summary (§6.20)
   numbers/NumbersPanel.js      # the Numbers tab: add / link / release a number, try the lookup (§6.29)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker, GreetingPanel (the Agent tab's call greeting + recording switch)
   api/
@@ -181,8 +182,9 @@ src/app/
     numbers/route.js           # list / add phone numbers; numbers/[id] = link to an agent, rename, release; numbers/lookup = try the routing (§6.29)
     collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned, per agent)
     records/route.js           # list requests the agent took; records/[id] = read / confirm / decline one
-    agent-config/route.js      # GET/PUT — partner's dashboard contract
+    agent-config/route.js      # GET/PUT — partner's dashboard contract (+ summaryStatus: is the business summary out of date?)
     agent-config/catalog/      # capability list, translated, for his UI
+    agent-config/summary/      # POST — the AI's DRAFT business summary of chosen documents; saves nothing (§6.20)
     knowledge/route.js         # list + add/replace: typed text, uploads, URL crawl
     knowledge/[id]/route.js    # read, edit, rename, delete one document
     knowledge/[id]/retry/route.js  # re-embed a FAILED document — no re-upload (§6.15)
@@ -212,6 +214,8 @@ src/lib/
     crawl.js                   # website crawling + SSRF defences (§6.9)
     ingest.js                  # create/REPLACE/rename/delete/retry documents (§6.10, §6.15); who may use each (§6.28)
     knowledge-rules.js         # pure: may this agent use this document? (shared vs limited) — also imported by the console (§6.28)
+    profile-summary.js         # the business summary: draft from chosen documents (agent-scoped), sources + staleness (§6.20)
+    summary-rules.js           # pure: no prices in a summary (strip from drafts, refuse on save), length, form — also the console's
     knowledge-access.js        # the same rule as SQL (fails closed), validating and writing a document's agents (§6.28)
     jobs.js                    # background import queue + cancellation (§6.6, §6.14)
     storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
@@ -226,6 +230,7 @@ src/lib/
     transports/browser.js      # the console's WebSocket protocol; Twilio will be a sibling
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
+    closing.js                 # when a call ends by itself (goodbye, "no thanks" after "anything else?", the agent's farewell) + the per-agent switch and delay — pure (§6.26)
     greeting.js                # each agent's call greeting: built-in text (AI notice; recording notice only while recording is on), the owner's own text, the console's warnings — pure (§6.24)
     sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
   collect/                     # ★ REQUEST-TAKING (§6.25) — what the agent collects, validates and hands over
@@ -233,9 +238,10 @@ src/lib/
     config.js                  # per-tenant collect config: normalise/validate, preset, describeCatalog
     engine.js                  # ★ advanceCollection — the deterministic state machine that owns a request
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
+    order.js                   # an order read against the MENU: dishes + quantities, merging changes, display — pure
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
-  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; question words, filler, greeting notice words) · index.js = the matcher, pure
+  phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
@@ -1339,6 +1345,34 @@ configured. One leak found and closed: with a name and NO purpose the model
 said "we provide software solutions", inferred from "Nyron Software
 **Solutions**" — hence the "don't guess from the name" clause.
 
+**BUILT — the business summary: written by the AI from documents the owner CHOSE, approved by the owner, always
+in the profile** (`lib/agent/profile-summary.js`, `summary-rules.js` pure; per agent: `agent_configs.profile_summary`
++ `profile_summary_sources`, migration `20261027120000_agent_profile_summary`, hand-written, HNSW line removed). The
+owner ticks the documents that describe the business (Knowledge tab → "Summarize for the agent", recommended by a
+hint until the agent has one; ≤10 documents), ONE model call (`POST /api/agent-config/summary`, 6/min per tenant,
+saves NOTHING) writes ≤120 words of general facts (`prompt.js buildSummaryInstruction`: who, what, kinds of products
+or services by name, who it serves, where; never prices, fees, offers, hours, dates, policies, phone numbers or
+addresses; nothing the documents do not say; disagreeing facts left out), the owner reads and edits it in a review
+window and saves it (`PUT /api/agent-config { profileSummary, profileSummarySourceIds }`). It then sits in ABOUT THIS
+BUSINESS ("Summary of the business, from its own documents, approved by the owner: …") on every turn, under the same
+narrow grounding exception as the purpose: "who are you / what do you do" are answered at once, while a price or a
+detail is still searched for. Rules that must not drift:
+- **No price in a summary, ever** — prices change, and a summary in every prompt would quote a stale one with
+  confidence. Twice: sentences with a price (a currency next to digits, "/month", "% off") are removed from the AI's
+  draft and SHOWN to the owner; a summary with a price is REFUSED on save (`validation:summary.hasPrice`), whoever
+  wrote it. Written-out prices ("fifteen hundred rupees") are not caught — the instruction is the first line.
+- **Only documents the AGENT may use** (§6.28): the others come back as skipped ("limited to other agents") and never
+  reach the model. A new agent copies the summary only when every document it came from is shared.
+- **The server records the sources** (`resolveSummarySources`: id, title, a hash of the text NOW); a client never says
+  what a document contained. A document whose TEXT changed since (a rename is not a change) or that was deleted makes
+  `GET /api/agent-config` report `summaryStatus.stale`, and the Agent tab says which one — the owner summarises again.
+  Nothing is regenerated without the owner.
+- Saving from the review window writes only the summary; unsaved edits in the Agent tab are left alone. The Agent tab
+  shows, edits and removes it (Save button), live-flagging a price with the same rule.
+**Verified:** tests/summary-rules (8), `test:agents` (scoping, stripping, the prompt per agent, staleness, copying),
+the review window driven in a browser (with the model's answer mocked: no model key in the build sandbox) and the
+error shown readably when the model is unavailable. **Not verified:** a real model's draft quality, in either language.
+
 **Built, NOT adopted — document title in the embedding.** `chunkDocument(text,
 {title})` can prefix every chunk's `embedText` with the humanised document
 title ("12-storepulse-plans.csv" → "storepulse plans"), which also gives a
@@ -1891,7 +1925,7 @@ for playback, webhook signature → dialled number → tenant in `registry.js`, 
 `transport.transfer`, §6.26); call recording itself (`recording_url` stays null; the per-agent
 `recordCalls` switch and the greeting's notice exist); a local Urdu recogniser.
 
-### 6.25 Taking a request — appointments and call-backs (the collect domain)
+### 6.25 Taking a request — appointments, call-backs and orders (the collect domain)
 
 **What exists:** the owner ticks, in the console's "What your agent collects" tab, which details
 the agent must ask for (name, phone, service, date and time, party size, reason…), per kind of
@@ -1953,6 +1987,36 @@ taken. Backend responsibilities that are stood in for are in
   is token-based ("جی نہیں" is NO — "ji" is a filler); regexes use Unicode word edges, never `\b`.
 - **Stand-ins, not a second backend.** `lib/standins/*` (customers, records, events) sit behind
   fixed interfaces; nothing else touches those tables. The AI never reads them back (§6.11).
+- **Orders (restaurants) — the third request type, `order`** (reference `OR-…`). Fields: name, phone, `order_items`,
+  `order_type` (pickup | delivery), `address` (asked ONLY for delivery), `notes` ("when you'd like it, the spice level,
+  or an allergy" — one open question; `order_time` exists for an owner who wants the time on its own). On in the
+  restaurant preset, off elsewhere (switchable in every business). Rules that must not drift:
+  - **Only dishes on the business's MENU** (`collect.menu`, the owner's own list like services, ≤150). `order_items`
+    (field type `items`, `collect/order.js`, pure) is read by the RULES — the menu's own dish names in the message
+    (English, Urdu script, Roman Urdu; "two", "do", "دو", "2 plates of", "x 3"; a plural or a one-letter slip in a
+    long word) — and, when the rules leave words over ("…and a PIZZA"), by the extractor too, which writes
+    "2 x Chicken Biryani; 1 x Pizza". The two are COMBINED: the rules' dishes plus what only the model heard. A dish
+    not on the menu is never written into the order; the caller is told (`not_on_menu`), and the rest of the order
+    is KEPT (`partial` — the caller does not repeat the other dishes). A word that fits several dishes ("biryani" with
+    chicken and beef biryani) is asked about (`ambiguous_item`), never guessed. A generic word ("chicken") alone is
+    never a dish. Stored as `[{id, name, qty}]` — `name` keeps an old order readable after the menu changes.
+  - **An order already taken changes only when the caller SAYS so** (`mentionsOrderChange`: add / also / another /
+    remove / make it / no X / "hata dein" / "aur bhi" / "ہٹا دیں"): "make it three biryanis" sets the number,
+    "another coke" adds one, "no raita" removes it — and "House 5, Biryani Street" never adds a biryani. After the
+    save a change updates the SAME request, like any correction.
+  - **Pickup or delivery** is a fixed `choice` with the ways callers say it (`options[].also`: "takeaway", "khud le
+    jayenge", "ghar pe bhej dein", "ڈیلیوری"). It may be noticed unasked ("Ahmed, it's for delivery"), never from a
+    question, and an answer already given changes only on "instead / actually / ki jagah".
+  - **Conditional fields — `when: {field, equals}`** on a record type's field (catalog data, kept by the console):
+    asked only when an earlier answer is that value. A field that does not apply is not asked, not required, not in
+    the read-back and not sent to the team (switching to pickup drops the address from the saved request). A broken
+    condition is refused on save (`conditionInvalid`) and DROPPED on read (asked always: one extra question beats a
+    required detail never asked); removing the source question in the console clears conditions on it.
+  - **No menu, no orders** (`needsList: "menu"`): the type stays switched on and the settings save, but
+    `enabledRecordTypes` leaves it out — the agent never offers orders — and the console warns
+    (`missingLists`, "your menu is empty").
+  - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
+    noted and the team confirms it and the total; prices and totals only from the reference material.
 
 **Verified:** `npm test` (539 unit tests, incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
@@ -1961,8 +2025,14 @@ English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn 
 every provider; real Pakistani callers through the voice path; the extraction call's latency
 against a real provider (it runs in parallel with retrieval, but nobody has timed it).
 
+**Orders verified:** tests/collect-order (26: the reader in three languages, menu checks, merging, pickup/delivery,
+conditions, the full conversation for pickup and delivery, a dish not on the menu, an ambiguous dish, a change after
+the save, the prompt), `test:collect` (an order through `respond()` on the real database: no menu → no order; with a
+menu → OR- reference, dishes stored, address for delivery, "add a coke" updates the same row). **Not verified:** the
+real extractor's "2 x dish" output on a real provider, and real callers ordering in Urdu.
+
 **Not built:** WhatsApp/SMS confirmation to the customer's phone; slot availability (opening
-hours only); modifying or cancelling an existing booking; tool execution of any other kind
+hours only); modifying or cancelling an existing booking or order; prices, totals and stock (the team confirms them); tool execution of any other kind
 (`TOOL_EXECUTION_AVAILABLE` stays false — collecting is not executing).
 
 ### 6.26 Passing a caller to a person, ending calls well, and the marker that leaked
@@ -1976,7 +2046,7 @@ engine's, behind three seams, so Twilio is a transport swap:
 - **Settings** (`handoff/config.js`) live in the existing `agent_configs.escalation` JSON (no new
   column; the backend later stores one more document next to the others):
   `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours:
-  "callback"|"forward" }`. Phones are stored in international form; ≤5 contacts; "enabled" with nobody to
+  "callback"|"forward", announce: {en?, ur?} }`. Phones are stored in international form; ≤5 contacts; "enabled" with nobody to
   forward to is read as OFF and refused on save (`validation:handoff.*`, en + ur). **Phone numbers are never put in a
   prompt and never sent to a browser** (the chat route strips them; events carry ids only).
 - **The decision is code, not the model** (`handoff/decide.js decideHandoff`, pure, one call per message from
@@ -1992,6 +2062,18 @@ engine's, behind three seams, so Twilio is a transport swap:
   the documents, the caller saying so, or saying the same thing again — all rule-based, zero model calls.
   State is `conversations.handoff_state` (migration `20261021120000_conversation_handoff_state`, hand-written, HNSW line
   removed), restored if the reply fails; a conversation already passed on is not forwarded twice (chat has no hang-up).
+- **What the caller hears before a transfer is the CODE's, never the model's** (`handoff/announce.js`, pure). A real call
+  was forwarded in silence: the model was told to announce the transfer and greeted the caller instead. Now the model
+  is told to say ONE short acknowledgement and NOT to announce or name anyone, and `respond()` appends a fixed line
+  for the person being called — "I'm connecting you to Ali, our Representative. Please stay on the line." — to the
+  streamed, returned and stored reply (chat and voice alike; `result.handoff.announcement`). The owner may write their
+  own line per language (`announce` {en?, ur?}, ≤200 chars, `{name}` and `{role}` the only placeholders — anything else
+  in braces is refused, it would be read aloud); empty = the built-in line (Urdu in the passive, so it never depends
+  on the voice's gender). A person with only a name or only a role still gets a natural sentence. If the first person
+  does not answer, the session says so and announces the next ("Ali isn't available right now. I'm connecting you to
+  Adan, our Senior…", `nextContactLine`); unheard speech that ends in a transfer says "I'm sorry, I couldn't
+  understand." + the announcement. The console (Agent tab → Call forwarding) previews the line for every person with
+  the same functions. Tests: tests/handoff-announce, voice-session, test:collect.
 - **The transport places the transfer** — the seam Twilio fills: `transport.transfer(contact, { summary, reason,
   callId }) → Promise<{ connected: boolean, reason?: "busy"|"no_answer"|"failed" }>`. `CallSession.performHandoff`
   waits for the announcement to finish playing, tries the contacts in order, and on `connected` ends the call as
@@ -2005,13 +2087,25 @@ engine's, behind three seams, so Twilio is a transport swap:
   an empty transcript used to be met with silence. Now: "Sorry, I didn't catch that" (fixed line, Urdu without gendered
   forms or Latin names), and a second time in a row `brain.noteUnheard` → hand off if the business set it up.
 
-**Ending a call well** (`voice/config.js SILENCE`, `CLOSING`; tests in voice-session):
+**Ending a call well** (`voice/config.js SILENCE`, `voice/closing.js`; tests in voice-session, voice-closing):
 - **Never hangs up on silence without asking.** 15 s after the AGENT stopped talking (not from the caller's last word,
   never while the agent is thinking or speaking) → "Are you still there?"; 10 s more → a polite goodbye line, then the call
   ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end. A caller who
   said "hold on" gets 60 s and then 20 s (`SILENCE.hold`, §6.24 turn-quality item 6).
-- **A finished conversation ends itself.** Caller says goodbye (short message ≤ 8 words, never mid-request) → the agent
-  answers → 2.5 s of quiet → the call ends (`agent_goodbye`); speech in that quiet keeps it open.
+- **A finished conversation ends itself — decided by rules, owner-controlled** (`voice/closing.js decideCallEnd`, pure;
+  the words in `lib/phrases` CLOSINGS, en / ur / Roman Urdu). Per AGENT: `autoEndCalls` (default on) and
+  `endCallDelaySeconds` (2–10, default 3) — migration `20261027100000_agent_call_ending`, hand-written, HNSW line removed;
+  console: Agent tab → "Ending the call". The call ends when the agent's reply asked NOTHING and: the caller said goodbye
+  in a short message (≤ 8 words: `intent.js` GOODBYE — `caller_goodbye`); or the agent's previous reply asked "anything
+  else?" and the caller declined ("no thanks", "nahi shukriya", "بس" — `no_more_questions`; a plain "no" anywhere else is
+  an answer, not a goodbye); or the agent itself closed ("…Have a great day!", "خدا حافظ" in its LAST sentence —
+  `agent_farewell`). Never mid-request, after "hold on", during a transfer, on a failed or cut-off turn, or while the
+  caller is talking. If the caller closed but the reply had no goodbye, the fixed `voiceLine("closing")` ("Thank you for
+  calling. Goodbye.") is said first. Then: the agent's audio finishes → the owner's seconds of quiet → the call ends
+  (`agent_goodbye`, event `call.ended_by_itself` with the trigger; `call.closing` logs the decision). Speech in that quiet
+  stops the countdown; a cough or click that turns out to be nothing restarts it; anything real cancels it. Off = the
+  caller hangs up (the silence check-in below still ends a silent line). On calls with the switch on, the prompt asks the
+  model for ONE short thanks-and-goodbye sentence at that point and no further question (`CALL_ENDING_STYLE`).
 - **Solution-oriented but never hurried** (`prompt.js HELPING_STYLE`, in every prompt): work toward an answer, a request
   noted or a person connected; one question at a time; never rush, interrupt or talk down; once the need is met, ask once
   whether there is anything else, then close warmly.
@@ -2152,9 +2246,9 @@ filter is independent of the vectors, the ranking within it is unchanged).
 
 **Every per-agent setting, audited end to end (test:agents, real `respond()`):** call forwarding (Dublin passes the
 caller to its own person, London has none), what the agent collects (one agent takes requests, the other does not), the
-reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24) each
+reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24), ending the call by itself and its wait (§6.26) each
 follow the AGENT, and a generic opener is searched with that agent's own business name (§6.20); the dashboard language
-follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 80 checks since the greeting.)
+follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 93 checks since the business summary.)
 
 ### 6.29 Phone numbers — "this number was dialled: which business, which agent?"
 
@@ -2265,7 +2359,7 @@ right language, with history persisted per tenant.
 | Area | State |
 | --- | --- |
 | RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
-| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
+| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours, and the owner-approved AI summary of the documents they chose — general facts, never prices) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
 | **Call greeting** | ✅ per agent: the owner's own words or a built-in greeting that says the caller is speaking with an AI assistant, and that the call is recorded only while the agent's recording switch is on; warnings (never refusals) when the owner's text leaves a notice out (§6.24). Recording itself is not built |
 | Keyword half | ✅ language-aware (`english`/`simple` per document — Urdu script is `simple`, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
@@ -2287,7 +2381,7 @@ right language, with history persisted per tenant.
 | **Languages** | ✅ English + Urdu only, everywhere (§7): UI (Urdu is right-to-left), agent replies, voices, speech recognition. The agent understands both whichever it answers in. Italian/Arabic/`auto` removed. ⚠️ Urdu is not native-reviewed and Urdu retrieval/LLM quality is unmeasured |
 | **Phone numbers** | ✅ the lookup "dialled number → business → agent" (`registry.js resolveDialledNumber`): E.164, one number = one agent, refuses unknown / released / unlinked / archived / suspended, cached and dropped on change; calls record their number; the console can call "as if dialling" a number (§6.29). ⚠️ the numbers themselves are a stand-in (buying them is the backend's) and the Twilio webhook is not built |
 | **Several agents per tenant** | ✅ each agent has its own settings, checklist, call forwarding, voice and language; chat, calls and requests are stamped with their agent; a default agent keeps one-agent tenants unchanged; archive, rename, make default; console agent picker (§6.27). Knowledge: one library, each document shared or limited to some agents, retrieval scoped to the agent and failing closed (§6.28) |
-| **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back with a reference; works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
+| **Taking requests** | ✅ the owner chooses what the agent collects (checklist, per request type, industry presets, custom fields); a deterministic engine asks, validates, reads back and saves a `requested` appointment/call-back/order with a reference; orders take only dishes on the owner's menu, pickup or delivery (address only for delivery); works on chat and voice, English and Urdu; "Collected" tab lists them (§6.25). The AI never books. Backend parts are stand-ins (`docs/handoff-to-backend.md`) |
 | Test chat (SSE streaming) | ✅ `/api/chat`; each reply shows which model answered and which document(s) it was grounded in (debug metadata only, never spoken) |
 | **User-facing errors** | ✅ raw provider errors (quota JSON blobs, etc.) are classified and translated before display (§6.16) |
 | Console UI | ✅ upload/write/crawl as three top-level actions; write/edit share one modal + CodeMirror editor; multi-select bulk delete; every action button disables while its own request is in flight |
@@ -2339,7 +2433,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 619 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 685 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2517,7 +2611,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 619 unit tests: pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 685 unit tests: the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding

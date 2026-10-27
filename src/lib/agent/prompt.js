@@ -76,6 +76,14 @@ const HELPING_STYLE =
   "push to finish. When their need is met, ask once whether there is anything else; if there is not, close briefly and " +
   "kindly (thank them and say goodbye).";
 
+// The call ends by itself once the conversation is over (lib/voice/closing.js). At that moment a
+// reply that asks one more question keeps the line open, and a goodbye said while the caller still
+// needs something would end the call on them — so both are spelled out, for calls only.
+const CALL_ENDING_STYLE =
+  "ENDING THE CALL: when the caller says goodbye, or says there is nothing else, reply with ONE short, warm sentence " +
+  "that thanks them and says goodbye, and ask nothing more: the call ends by itself after your goodbye. Never say " +
+  "goodbye while the caller still needs something.";
+
 const GENDER_WORDS = { female: "feminine", male: "masculine" };
 
 /**
@@ -154,6 +162,7 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   if (channel === "voice") {
     sections.push(voiceGenderInstruction(config));
     sections.push(voiceHearingInstruction(config));
+    if (config.autoEndCalls !== false) sections.push(CALL_ENDING_STYLE);
   }
 
   // --- 3. Language ---------------------------------------------------------
@@ -204,6 +213,10 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   const profile = [];
   if (hasName) profile.push(`Name: ${config.businessName}`);
   if (purpose) profile.push(`What we do, in the business's own words: ${purpose}`);
+  // The owner-approved summary of the documents they chose (lib/agent/profile-summary.js):
+  // general facts only, never prices — those stay in the documents and are searched for.
+  const summary = config.profileSummary?.trim();
+  if (summary) profile.push(`Summary of the business, from its own documents, approved by the owner: ${summary.replace(/\s*\n+\s*/g, " ")}`);
   if (config.hours) {
     profile.push(
       `Business hours (timezone ${config.timezone}): ${formatHours(config.hours)}. ` +
@@ -454,9 +467,10 @@ export function voiceLine(kind, language, variant = 0) {
       en: ["Sorry, I didn't catch that. Could you say it again, please?", "I'm sorry, the line wasn't clear. Could you repeat that for me?"],
       ur: ["معذرت، آواز واضح نہیں آئی۔ کیا آپ دوبارہ بتا سکتے ہیں؟", "معذرت، بات سمجھ نہیں آئی۔ براہِ کرم ایک بار پھر کہیے۔"],
     },
+    // Said before the transfer line (lib/handoff/announce.js), which names who the caller is passed to.
     connecting: {
-      en: ["I'm sorry I couldn't understand. Let me connect you to a member of our team."],
-      ur: ["معذرت، بات واضح نہیں ہو سکی۔ آپ کی بات ہماری ٹیم کے ایک رکن سے کروائی جا رہی ہے۔"],
+      en: ["I'm sorry, I couldn't understand."],
+      ur: ["معذرت، بات واضح نہیں ہو سکی۔"],
     },
     // A call to a number that rings no agent (unknown, released, not linked yet, the agent or the
     // business not in service — §6.29). Said by the phone transport before it hangs up; there is no
@@ -629,12 +643,16 @@ export function buildHandoffInstruction(plan, { channel }) {
             : plan.reason === "topic"
               ? "This is a matter the business wants a person to handle."
               : "You could not understand or help the caller after trying.";
+      // The announcement itself ("I'm connecting you to Ali, our Representative…") is added by the code
+      // right after this reply (lib/handoff/announce.js) — a model asked to say it sometimes did not.
+      // So the model only acknowledges, and must NOT announce, or the caller hears it twice.
       return (
-        `PASSING THE CALLER ON: ${why} The caller IS being connected to ${who} right now. Tell them so in one or two ` +
-        "short, warm sentences: who they are being connected to, and that it will be a moment. " +
-        (channel === "voice" ? "Do not say goodbye and do not ask anything else — the line is about to be transferred. " : "") +
-        "Do not promise anything else, do not give a phone number, do not guess a waiting time, and do not continue " +
-        "with the original question."
+        `PASSING THE CALLER ON: ${why} The caller is being connected to ${who} right now, and a fixed sentence ` +
+        "telling them who they are being connected to is added automatically RIGHT AFTER your reply. So reply with " +
+        "ONE short, warm sentence only — acknowledge what they asked, or apologise briefly if you could not help — and " +
+        "do NOT say that you are connecting or transferring them, do NOT name the person, " +
+        (channel === "voice" ? "do not say goodbye, do not ask anything, " : "do not ask anything, ") +
+        "do not give a phone number, do not guess a waiting time, and do not continue with the original question."
       );
     }
     case "unavailable":
@@ -674,11 +692,17 @@ const PROBLEM_GUIDANCE = {
   too_far: "that is too far ahead (more than a year)",
   closed: "the business is closed then ({day}) — say so, mention the opening hours from ABOUT THIS BUSINESS, and ask for another time",
   empty: "nothing usable was said",
+  not_on_menu: "{items} is not on the menu — say we do not have it, and offer to name a few dishes that are",
+  ambiguous_item: '"{said}" could be more than one dish on the menu ({options}) — ask which one',
+  empty_order: "no dish from the menu was named",
+  too_many_items: "an order can have at most {max} different dishes",
 };
 
 function problemSentence(problem) {
   const template = PROBLEM_GUIDANCE[problem.reason] ?? "it could not be used";
   const text = template.replace(/\{(\w+)\}/g, (_, key) => problem.vars?.[key] ?? "");
+  // Part of an order was fine and is kept: only the one dish needs a word.
+  if (problem.partial) return `Part of the customer's last answer for "${problem.field.label}" could not be taken: ${text}. Say so kindly in one short sentence; the rest of it IS noted.`;
   return `The customer's last answer for "${problem.field.label}" could not be used: ${text}. Say so kindly in one short sentence and ask for it again.`;
 }
 
@@ -738,7 +762,13 @@ export function buildCollectionInstruction(plan, { channel }) {
     );
   }
 
-  const header = `TAKING A REQUEST — ${plan.typeLabel}. ${never} This is what you do THIS turn, and nothing else about the request:`;
+  // An order is the same promise with its own words: callers expect "your order is placed" and
+  // a total, and neither is true until a person confirms it (§6.25).
+  const orderRule =
+    plan.type === "order"
+      ? " Never say the order is placed, confirmed, being prepared or on its way — say it is noted and the team will confirm it. Never state a price or a total unless it is in the reference material; the team confirms the total."
+      : "";
+  const header = `TAKING A REQUEST — ${plan.typeLabel}. ${never}${orderRule} This is what you do THIS turn, and nothing else about the request:`;
   const lineCtx = { channel, language };
 
   switch (plan.state) {
@@ -755,6 +785,7 @@ export function buildCollectionInstruction(plan, { channel }) {
       if (ask.have?.date) task += ` The customer already gave the day (${ask.have.date}): ask only for the time.`;
       if (ask.have?.time) task += ` The customer already gave the time (${ask.have.time}): ask only for the day.`;
       if (ask.options?.length) task += ` The choices are: ${ask.options.join(", ")}. Say them if the customer seems unsure.`;
+      if (ask.menu?.length) task += ` Only dishes on the menu can be ordered; if the customer asks what there is, name a few of them, never all: ${ask.menu.join(", ")}.`;
       out.push(task);
       out.push("Ask exactly ONE question. If the customer also asked something else, answer that first in one sentence from the reference material, then ask your question.");
       return out.join("\n");
@@ -825,6 +856,14 @@ export function buildExtractionInstruction({ fields, config, nowMs, timezone, ho
         ? `answer with ONE of these ids: ${list.map((o) => `${o.id} (${[o.label?.en, o.label?.ur].filter(Boolean).join(" / ")})`).join("; ")}`
         : "free text";
       return `- ${f.id} — ${label} — ${options}`;
+    }
+    if (f.type === "items") {
+      const menu = (f.source ? config?.[f.source] ?? [] : []).map((o) => [o.label?.en, o.label?.ur].filter(Boolean).join(" / ")).join("; ");
+      return (
+        `- ${f.id} — ${label} — the dishes and how many of each that the customer ordered or changed in the LATEST message only, ` +
+        `written as "2 x <dish>; 1 x <dish>", using the menu's own names where the dish is on the menu: ${menu}. ` +
+        'Write a dish the customer asked for that is NOT on the menu exactly as they said it. For a dish they want removed write "0 x <dish>".'
+      );
     }
     const how = {
       phone: "the digits as the customer said them",
@@ -897,4 +936,50 @@ function zonedParts(nowMs, timezone) {
   const [y, m, d] = date.split("-").map(Number);
   const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
   return { date, time: `${get("hour")}:${get("minute")}`, dayName: DAY_NAMES[key] };
+}
+
+
+// ── THE BUSINESS SUMMARY (lib/agent/profile-summary.js) ─────────────────────
+
+/**
+ * SYSTEM INSTRUCTION for writing a business's summary from documents its owner chose. Like the
+ * rewrite and the extraction, this call never speaks to a customer: its text is a DRAFT the owner
+ * reads, edits and saves into the agent's profile (ABOUT THIS BUSINESS, above).
+ *
+ * The rules that carry the weight: GENERAL facts only, and never a price, fee or offer — those
+ * change, and a summary is always in the prompt, so a stale price there would be quoted with
+ * confidence long after the price list was corrected (the documents are searched instead). And
+ * nothing the documents do not say: the owner approves the text, but a confident invention is
+ * easy to approve without noticing. Code removes any sentence with a price that slips through
+ * (summary-rules.js stripPrices) and shows the owner what it removed.
+ *
+ * @param {object} args
+ * @param {"en"|"ur"} args.language   what the owner reads and edits the draft in
+ * @param {string} [args.businessName]
+ * @param {number} args.maxWords
+ */
+export function buildSummaryInstruction({ language, businessName, maxWords }) {
+  const named = businessName && businessName !== PLACEHOLDER_BUSINESS_NAME ? ` The business is called ${businessName}.` : "";
+  return [
+    "You write a short overview of a business from its own documents. It is given to the business's phone agent so it can " +
+      "answer when a caller asks who the business is or what it does. You never speak to a customer." +
+      named,
+    `Write in ${LANGUAGE_NAMES[language === "ur" ? "ur" : "en"]}${language === "ur" ? " (Urdu script)" : ""}, at most ${maxWords} words, in plain sentences: no headings, no lists, no markdown.`,
+    "INCLUDE only general facts the documents state: who the business is, what it does, the kinds of products or services " +
+      "it offers (by name, without details), who it serves, and where it operates.",
+    "NEVER INCLUDE prices, fees, costs, discounts, offers, plan or package details, quantities, stock, opening hours, " +
+      "dates, policies (refunds, delivery charges), phone numbers, email or web addresses. These change, and the agent " +
+      "looks them up in the documents when a caller asks.",
+    "Never add anything the documents do not say, never guess, and leave out praise and marketing words (best, leading, " +
+      "world-class). If two documents disagree about a fact, leave that fact out.",
+    "Output only the overview.",
+  ].join("\n");
+}
+
+/**
+ * The user turn for the summary call: the chosen documents, each under its own title.
+ * @param {Array<{title: string, content: string}>} documents  already trimmed to size
+ */
+export function buildSummaryInput(documents) {
+  return documents.map((d, i) => `DOCUMENT ${i + 1}: ${humanizeTitle(d.title) || d.title}\n${d.content}`).join("\n\n---\n\n");
 }

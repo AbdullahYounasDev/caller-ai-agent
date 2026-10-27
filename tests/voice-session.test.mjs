@@ -3,7 +3,10 @@ import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 import { CallSession } from "@/lib/voice/session";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "@/lib/voice/protocol";
-import { BARGE_IN, CLOSING, SILENCE, TTS } from "@/lib/voice/config";
+import { BARGE_IN, SILENCE, TTS } from "@/lib/voice/config";
+import { END_DELAY_SECONDS } from "@/lib/voice/closing";
+
+const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
 
 /**
  * The whole call flow with every dependency faked: no models, no database, no network,
@@ -654,6 +657,8 @@ describe("CallSession", () => {
     await h.settle();
     assert.deepEqual(h.sent.transfers.map((t) => t.contact.id), ["c1", "c2"]);
     assert.ok(h.recorded.events.some((e) => e.type === "handoff.failed" && e.data.contactId === "c1" && e.data.reason === "no_answer"));
+    // The caller is told the first person is not available and who is tried next — before the second transfer.
+    assert.ok(h.spoken.some((x) => x.text === "Bilal isn't available right now. I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line."));
     assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
   });
 
@@ -704,7 +709,7 @@ describe("CallSession", () => {
   });
 
   test("speech that could not be read: first time 'say it again', a person asked for on the second", async () => {
-    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "The assistant could not understand or answer the caller." }];
+    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "The assistant could not understand or answer the caller.", announcement: "I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line." }];
     const h = harness({ transcripts: ["", ""], noteUnheard: async () => decisions.shift(), transfer: async () => ({ connected: true }) });
     await h.session.start();
     h.advance(5000);
@@ -718,7 +723,8 @@ describe("CallSession", () => {
     h.hear({ type: "start" }, utterance);
     await h.pump(8000);
     await h.settle();
-    assert.ok(h.spoken.some((x) => x.text.startsWith("I'm sorry I couldn't understand. Let me connect you")));
+    // An apology, then the fixed line that NAMES who the caller is passed to — before the transfer.
+    assert.ok(h.spoken.some((x) => x.text === "I'm sorry, I couldn't understand. I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line."));
     assert.equal(h.sent.transfers[0].context.reason, "not_understood");
     assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
   });
@@ -806,7 +812,7 @@ describe("CallSession", () => {
     h.hear({ type: "start" }, utterance);
     await h.settle();
     assert.equal(h.sent.closed, null, "not at once: the caller might add something");
-    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    await h.pump(CLOSING_DELAY_MS + 6000);
     assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
     assert.ok(h.recorded.events.some((e) => e.type === "call.closing"));
   });
@@ -819,7 +825,7 @@ describe("CallSession", () => {
     await h.settle();
     await h.pump(1000);
     h.hear({ type: "start" }); // the caller starts to speak again
-    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    await h.pump(CLOSING_DELAY_MS + 6000);
     assert.equal(h.sent.closed, null);
     h.hear(utterance);
     await h.settle();
@@ -832,7 +838,7 @@ describe("CallSession", () => {
     await h.pump(3000);
     h.hear({ type: "start" }, utterance);
     await h.settle();
-    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    await h.pump(CLOSING_DELAY_MS + 6000);
     assert.equal(h.sent.closed, null);
   });
 
@@ -845,8 +851,114 @@ describe("CallSession", () => {
     await h.pump(3000);
     h.hear({ type: "start" }, utterance);
     await h.settle();
-    await h.pump(CLOSING.afterGoodbyeMs + 6000);
+    await h.pump(CLOSING_DELAY_MS + 6000);
     assert.equal(h.sent.closed, null);
+  });
+
+  test("'no thanks' after the agent asked 'anything else?' ends the call — with a goodbye added when the reply had none", async () => {
+    const h = harness({
+      transcripts: ["What time do you open?", "No thanks."],
+      replies: [streams("We open at nine. Is there anything else I can help you with?"), streams("You're welcome.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, null, "a question was asked: the call waits for the answer");
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.ok(h.spoken.some((s) => s.text === "Thank you for calling. Goodbye."), "the fixed goodbye follows a reply that said none");
+    const closing = h.recorded.events.find((e) => e.type === "call.closing");
+    assert.equal(closing.data.trigger, "no_more_questions");
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+    assert.equal(h.recorded.events.find((e) => e.type === "call.ended_by_itself").data.trigger, "no_more_questions");
+  });
+
+  test("the agent's own goodbye ends the call, and no second goodbye is added", async () => {
+    const h = harness({ transcripts: ["Okay great, thanks for the help."], replies: [streams("You're welcome! Have a great day.")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+    assert.equal(h.recorded.events.find((e) => e.type === "call.closing").data.trigger, "agent_farewell");
+    assert.ok(!h.spoken.some((s) => s.text === "Thank you for calling. Goodbye."));
+  });
+
+  test("a plain 'no' that is not an answer to 'anything else?' does not end the call", async () => {
+    const h = harness({
+      transcripts: ["Do you do whitening?", "No."],
+      replies: [streams("Yes, whitening is fifteen thousand. Would you like to book it?"), streams("No problem. Our cleaning is five thousand.")],
+    });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("a goodbye answered with a question keeps the call open", async () => {
+    const h = harness({ transcripts: ["Bye."], replies: [streams("Before you go, would you like our opening hours?")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("the owner's wait is respected: not before it, yes after it", async () => {
+    const h = harness({ config: { endCallDelaySeconds: 8 }, transcripts: ["That's all, thanks. Bye."], replies: [streams("Goodbye!")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    // One second of reply audio, then 8 s of quiet.
+    await h.pump(7000);
+    assert.equal(h.sent.closed, null, "7 s after the goodbye: still open");
+    await h.pump(4000);
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+  });
+
+  test("the owner switched it off: the call stays open for the caller to hang up", async () => {
+    const h = harness({ config: { autoEndCalls: false }, transcripts: ["That's all, thanks. Bye."], replies: [streams("Goodbye!")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 6000);
+    assert.equal(h.sent.closed, null);
+    assert.ok(!h.recorded.events.some((e) => e.type === "call.closing"));
+  });
+
+  test("a cough in the quiet does not keep a finished call open; real words do", async () => {
+    const h = harness({ transcripts: ["That's all, thanks. Bye.", ""], replies: [streams("Goodbye!")] });
+    await h.session.start();
+    await h.pump(3000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    await h.pump(1500);
+    h.hear({ type: "start" });
+    await h.pump(CLOSING_DELAY_MS + 3000);
+    assert.equal(h.sent.closed, null, "while the caller is making a sound, the call never ends");
+    h.hear({ type: "utterance", samples: new Float32Array(3200), durationMs: 200 }); // nothing in it
+    await h.settle();
+    await h.pump(CLOSING_DELAY_MS + 2000);
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+  });
+
+  test("the call-ending style is only on calls, and only while the switch is on", async () => {
+    const { buildSystemInstruction } = await import("@/lib/agent/prompt");
+    const config = { businessName: "Nyron", tone: "professional", replyLanguage: "en" };
+    assert.match(buildSystemInstruction({ config, channel: "voice" }), /ENDING THE CALL: .*ask nothing more/);
+    assert.doesNotMatch(buildSystemInstruction({ config: { ...config, autoEndCalls: false }, channel: "voice" }), /ENDING THE CALL/);
+    assert.doesNotMatch(buildSystemInstruction({ config, channel: "chat" }), /ENDING THE CALL/);
   });
 
   // ── a sentence cut by a pause, and pauses in the call (CLAUDE.md §6.24) ────

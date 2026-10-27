@@ -2,6 +2,7 @@ import { classifyTurn, INTENTS } from "@/lib/voice/intent";
 import { enabledRecordTypes } from "@/lib/collect/config";
 import { handoffAvailable } from "./config";
 import { decideHandoff, readHandoffState, summariseForPerson } from "./decide";
+import { announcementFor } from "./announce";
 
 /**
  * ONE TURN'S HANDOFF, from what respond() already knows — the glue between the pure decision
@@ -59,6 +60,8 @@ export function planHandoff({ config, storedState, message, earlierTurns = [], s
           kind: "handoff",
           reason: action.reason,
           contacts: action.contacts,
+          // Said by the code after the model's reply, so the caller is ALWAYS told (announce.js).
+          announcement: announcementFor({ escalation: handoffConfig, contact, language: config.replyLanguage }),
           summary: summariseForPerson({
             reason: action.reason,
             callerMessages: [...callerMessages.slice(-2), message],

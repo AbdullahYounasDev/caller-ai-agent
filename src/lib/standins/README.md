@@ -8,7 +8,7 @@ side exists. Nothing outside this folder knows the data lives in `ai_engine`.
 | File | Stands in for | The real thing |
 | --- | --- | --- |
 | `customers.js` | the backend's `end_customers` | a `tenant_core` table, found by phone number |
-| `records.js` | the backend's bookings / callback requests, and the staff screen that confirms them | a `tenant_core` table + dashboard API (`PATCH …/records/:id`) |
+| `records.js` | the backend's bookings / callback requests / food orders (`OR-` references), and the staff screen that confirms them | a `tenant_core` table + dashboard API (`PATCH …/records/:id`) |
 | `events.js` | the engine → backend signed event delivery (`POST /internal/events`) | the outbox + HMAC sender described in docs/handoff-to-backend.md |
 | `numbers.js` | the backend's phone numbers and which agent each one rings (B11) | a `tenant_core` table + `GET /internal/numbers/{e164}`; the engine reads it ONLY through `tenant/registry.js resolveDialledNumber()` |
 

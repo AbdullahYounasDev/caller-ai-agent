@@ -2,7 +2,7 @@
 
 An AI phone agent for small businesses — first markets: restaurants and call centres in the UK and Ireland, and
 businesses in Pakistan. A business gives its agent its own material (price list, menu, opening hours, policies) and
-the agent answers its customers in English or Urdu, takes requests (appointments, call-backs) and passes a caller to
+the agent answers its customers in English or Urdu, takes requests (appointments, call-backs, food orders) and passes a caller to
 a person when it should.
 
 **This repo is the AI ENGINE.** The multi-tenant platform (accounts, billing, the business dashboard, buying phone
@@ -22,10 +22,18 @@ failures behind each rule, what works and what does not, and the measured number
 - **Voice calls from the browser** through a separate voice gateway: local speech recognition and synthesis (Groq
   Whisper for Urdu), barge-in, full call logging. A sentence cut by a pause is answered as one message, "hold on"
   gets a longer wait, and the agent's own sentences have no long silences in the middle.
-- **Taking requests** (appointments, call-backs) with a deterministic checklist engine — the AI never books on its own.
-- **Passing a caller to a person** (call forwarding) and ending calls politely.
+- **Taking requests** (appointments, call-backs, and restaurant orders from the owner's own menu — pickup or delivery,
+  the address only for delivery) with a deterministic checklist engine — the AI never books, never says an order is
+  placed, and never quotes a price it was not given.
+- **Passing a caller to a person** (call forwarding) — the agent always says who it is connecting the caller to, in a
+  fixed line the owner can reword.
+- **Ending a call by itself** once the conversation is over (a goodbye, "no thanks" after "anything else?", or the
+  agent's own goodbye), after a few seconds of quiet the owner chooses — or never, if the owner switches it off.
 - **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
   an AI assistant (and that the call is recorded, only when the agent's recording switch is on).
+- **Business summary:** the owner ticks the documents that describe the business, the AI writes a short summary of the
+  general facts, the owner checks and saves it, and the agent always knows it — so "who are you?" is answered at once.
+  Prices are never in it (removed from the draft, refused on save); they stay in the documents and are looked up.
 - **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,
   Urdu and Roman Urdu — the word lists are plain files in `src/lib/phrases/`, one per language.
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.

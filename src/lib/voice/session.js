@@ -3,12 +3,14 @@ import { SentenceChunker, chunkEnding } from "./sentences";
 import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, INTENTS, OUTCOMES } from "./intent";
 import { median } from "./recorder";
-import { BARGE_IN, CLOSING, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
+import { BARGE_IN, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
+import { decideCallEnd } from "./closing";
 import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
 import { detectPause } from "@/lib/phrases";
+import { nextContactLine } from "@/lib/handoff/announce";
 import { buildVoiceGreeting, voiceLine } from "@/lib/agent/prompt";
 
 /** Allowance for the client's audio buffering and network jitter when estimating when
@@ -122,6 +124,13 @@ export class CallSession {
     // call logs it once (`tts.slow`) so a slow machine is visible, not guessed at.
     this.ttsRatio = null;
     this.reportedSlow = false;
+    // What the agent last said (as heard): did it just ask "anything else?" (lib/voice/closing.js).
+    this.lastAgentReply = null;
+    // The conversation is over and the call is about to end by itself ({trigger, delayMs}); cleared
+    // by anything real the caller says, kept (and re-armed) through a cough or a click.
+    this.closing = null;
+    // When the last utterance ended: speech started after it and not yet ended = the caller is talking.
+    this.lastUtteranceAt = null;
   }
 
   // ── lifecycle ────────────────────────────────────────────────────────────
@@ -324,6 +333,7 @@ export class CallSession {
 
   onUtterance(samples, durationMs) {
     const speechEndedAt = this.now();
+    this.lastUtteranceAt = speechEndedAt;
     this.log("speech.ended", { durationMs });
     this.armIdleTimer();
     // The previous half of a sentence is waiting for more: this IS the rest of it.
@@ -384,6 +394,7 @@ export class CallSession {
       this.log("stt.failed", { message: String(err?.message ?? err).slice(0, 200) });
       if (!carry) {
         this.settleState();
+        this.armClosing();
         return;
       }
       transcript = { text: "", ms: 0 };
@@ -391,10 +402,14 @@ export class CallSession {
     if (!this.isSpeech(transcript.text)) {
       if (!carry) {
         this.log("stt.empty", { ms: transcript.ms, durationMs });
-        // A short blip is noise (a cough, a click): not a turn, nothing answered. But a caller who
-        // really spoke and was not understood must not be met with silence.
+        // A short blip is noise (a cough, a click): not a turn, nothing answered — and a call that
+        // was ending carries on ending. But a caller who really spoke and was not understood must
+        // not be met with silence.
         if (durationMs >= UNHEARD.minSpeechMs && !this.ended) await this.onUnheard(durationMs);
-        else this.settleState();
+        else {
+          this.settleState();
+          this.armClosing();
+        }
         return;
       }
       // The rest was noise: the first half is still a question waiting for its answer.
@@ -406,6 +421,8 @@ export class CallSession {
       durationMs += carry.durationMs;
     }
     this.unheardRun = 0;
+    // The caller said something real: whatever was ending is not over.
+    this.closing = null;
     if (this.ended) return;
 
     // A sentence the caller left unfinished ("…with", "…اور") is held for a moment: if the
@@ -610,15 +627,29 @@ export class CallSession {
     if (this.currentTurn === turn) this.currentTurn = null;
     this.settleState();
 
+    // What the caller heard the agent say: the next turn reads "did it ask anything else?" from it.
+    const previousReply = this.lastAgentReply;
+    if (!error) this.lastAgentReply = turn.interrupted ? turn.spoken.join(" ") : (result?.reply ?? turn.sentences.join(" "));
+
     // The reply said the caller is being connected to a person: now do it.
     if (result?.handoff?.kind === "handoff" && !error) {
       await this.performHandoff(result.handoff, { turn: index });
       return;
     }
-    // The caller said goodbye and the agent has answered it: let the call end itself.
-    if (!error && classification.intent === INTENTS.GOODBYE && this.isShortGoodbye(text) && !this.requestOpen(result)) {
-      this.scheduleClosing();
-    }
+    // Has the conversation come to its end? Rules, and the owner's switch (lib/voice/closing.js).
+    const ending = decideCallEnd({
+      settings: this.config,
+      callerText: text,
+      intent: classification.intent,
+      previousReply,
+      reply: this.lastAgentReply ?? "",
+      requestOpen: this.requestOpen(result),
+      onHold: this.patience === "hold",
+      handoff: Boolean(result?.handoff),
+      failed: Boolean(error),
+      interrupted: turn.interrupted,
+    });
+    if (ending.end) await this.closeConversation(ending, { turn: index });
   }
 
   /**
@@ -655,26 +686,49 @@ export class CallSession {
     this.settleState();
   }
 
-  /** @returns {boolean} a short message (not a long sentence that merely contains "that's all") */
-  isShortGoodbye(text) {
-    return String(text).trim().split(/\s+/).length <= CLOSING.maxGoodbyeWords;
-  }
-
   /** @returns {boolean} the turn left a request half-taken: the caller is not finished */
   requestOpen(result) {
     const state = result?.collection?.state;
     return state === "ask" || state === "change";
   }
 
-  /** After the agent's own goodbye has played, a short quiet ends the call (cancelled by any speech). */
-  scheduleClosing() {
+  /**
+   * The conversation is over (lib/voice/closing.js): say goodbye if the reply did not, then end the
+   * call once the last words have PLAYED and the owner's delay of quiet has passed.
+   * @param {{trigger: string, sayClosingLine: boolean, delayMs: number}} ending
+   */
+  async closeConversation(ending, { turn }) {
+    this.closing = ending;
+    this.log("call.closing", { turn, trigger: ending.trigger, closingLine: ending.sayClosingLine, delayMs: ending.delayMs });
+    if (ending.sayClosingLine) {
+      const language = this.lastLanguage ?? (this.config.replyLanguage === "ur" ? "ur" : "en");
+      await this.speakFixed(voiceLine("closing", language), language);
+    }
+    this.armClosing();
+  }
+
+  /**
+   * (Re)start the countdown of a call that is ending. Speech from the caller stops it (onAudio);
+   * a cough or click that turns out to be nothing starts it again; anything real cancels it.
+   * Never ends while the agent's audio is still playing or the caller is talking.
+   */
+  armClosing() {
+    const ending = this.closing;
     this.clearTimer(this.timers.closing);
+    if (!ending || this.ended || this.callerTalking()) return;
     const untilQuiet = Math.max(0, (this.audioPlaysUntil ?? 0) - this.now()) + PLAYBACK_SLACK_MS;
     this.timers.closing = this.setTimer(() => {
-      if (this.ended || this.agentBusy()) return;
-      this.log("call.closing");
+      if (this.ended || this.closing !== ending || this.currentTurn || this.inflight || this.callerTalking()) return;
+      // The client reported the audio still playing (the gateway's estimate was early): wait for it.
+      if (this.agentBusy()) return this.armClosing();
+      this.log("call.ended_by_itself", { trigger: ending.trigger });
       this.end(END_REASONS.AGENT_GOODBYE);
-    }, untilQuiet + CLOSING.afterGoodbyeMs);
+    }, untilQuiet + ending.delayMs);
+  }
+
+  /** @returns {boolean} the caller started speaking and that speech has not ended yet */
+  callerTalking() {
+    return this.lastSpeechStartedAt != null && (this.lastUtteranceAt == null || this.lastSpeechStartedAt > this.lastUtteranceAt);
   }
 
   /**
@@ -684,6 +738,8 @@ export class CallSession {
    */
   async onUnheard(durationMs) {
     this.unheardRun++;
+    // The caller tried to say something: the call is not over.
+    this.closing = null;
     this.log("speech.unheard", { durationMs, inARow: this.unheardRun });
     let decision = null;
     try {
@@ -693,7 +749,9 @@ export class CallSession {
     }
     const language = this.lastLanguage ?? "en";
     if (decision?.kind === "handoff") {
-      await this.speakFixed(voiceLine("connecting", language, this.unheardRun), language);
+      // "Sorry, I couldn't understand." then the fixed line naming who they are passed to.
+      const line = [voiceLine("connecting", language, this.unheardRun), decision.announcement].filter(Boolean).join(" ");
+      await this.speakFixed(line, language);
       await this.performHandoff(decision, { turn: this.turnIndex });
       return;
     }
@@ -721,7 +779,15 @@ export class CallSession {
 
     let failure = "unsupported";
     if (typeof this.transport.transfer === "function") {
-      for (const contact of contacts) {
+      for (const [index, contact] of contacts.entries()) {
+        // The caller was told who they were being put through to (the reply ended with it). When that
+        // person does not answer, they are told so and who is tried next — never silence on the line.
+        if (index > 0) {
+          const language = this.lastLanguage ?? (this.config.replyLanguage === "ur" ? "ur" : "en");
+          await this.speakFixed(nextContactLine({ escalation: this.config.escalation, previous: contacts[index - 1], contact, language }), language);
+          await this.untilAudioEnds();
+          if (this.ended) return;
+        }
         this.log("handoff.attempt", { turn, contactId: contact.id });
         let outcome;
         try {

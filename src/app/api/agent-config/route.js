@@ -8,6 +8,9 @@ import { uiLocaleFor } from "@/lib/tenant/ui-locale";
 import { voiceSelectionProblems } from "@/lib/voice/speech/voices";
 import { validateHandoffConfig } from "@/lib/handoff/config";
 import { greetingProblems } from "@/lib/voice/greeting";
+import { callEndingProblems } from "@/lib/voice/closing";
+import { SUMMARY_MAX_DOCUMENTS, summaryProblems } from "@/lib/agent/summary-rules";
+import { resolveSummarySources, summaryStatus } from "@/lib/agent/profile-summary";
 import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
 
 /**
@@ -57,7 +60,7 @@ export async function GET(request) {
     // settings it is about to edit — that's how edits get silently overwritten.
     const agent = await requireAgent({ tenantId, params: request.nextUrl.searchParams, tr, skipCache: true });
     if (!agent.ok) return NextResponse.json({ error: agent.error }, { status: agent.status });
-    return NextResponse.json({ config: agent.config, locale });
+    return NextResponse.json({ config: agent.config, locale, summaryStatus: await statusOf(tenantId, agent.config) });
   } catch (err) {
     console.error("GET /api/agent-config failed:", err);
     return NextResponse.json(
@@ -96,6 +99,9 @@ export async function PUT(request) {
       return NextResponse.json({ error: tr("validation:body.invalid") }, { status: 400 });
     }
 
+    // A summary's documents are never taken from the client: it names them, the server reads them
+    // and records what they said (lib/agent/profile-summary.js), so "out of date" can be trusted.
+    delete patch.profileSummarySources;
     const errors = validatePatch(patch, tr);
     if (errors.length) {
       return NextResponse.json(
@@ -106,10 +112,14 @@ export async function PUT(request) {
 
     // agent.config.isDefault: a named default agent is saved as "the default" (agentId null), so a
     // tenant with no row yet gets one created rather than a 404.
+    if (patch.profileSummarySourceIds !== undefined) patch.profileSummarySources = await resolveSummarySources(tenantId, patch.profileSummarySourceIds);
+    delete patch.profileSummarySourceIds;
+    // No summary, no documents it came from.
+    if (patch.profileSummary !== undefined && !String(patch.profileSummary ?? "").trim()) patch.profileSummarySources = [];
     const config = await saveAgentConfig(tenantId, patch, { agentId: agent.config.isDefault ? null : agent.agentId });
     // Echo the locale the SAVED config now implies, so a dashboard that just
     // changed its own language knows to re-fetch its strings.
-    return NextResponse.json({ config, locale: config.uiLocale });
+    return NextResponse.json({ config, locale: config.uiLocale, summaryStatus: await statusOf(tenantId, config) });
   } catch (err) {
     console.error("PUT /api/agent-config failed:", err);
     return NextResponse.json(
@@ -209,6 +219,21 @@ function validatePatch(patch, tr) {
   if (patch.recordCalls !== undefined && typeof patch.recordCalls !== "boolean") {
     errors.push(tr("validation:recordCalls.invalid"));
   }
+  // The business summary (lib/agent/summary-rules.js): general facts only — a price is refused,
+  // because a summary is always in the prompt and a stale price there would be quoted confidently.
+  for (const problem of summaryProblems(patch.profileSummary)) {
+    errors.push(tr(`validation:summary.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
+  }
+  if (
+    patch.profileSummarySourceIds !== undefined &&
+    (!Array.isArray(patch.profileSummarySourceIds) || patch.profileSummarySourceIds.length > SUMMARY_MAX_DOCUMENTS || patch.profileSummarySourceIds.some((id) => typeof id !== "string"))
+  ) {
+    errors.push(tr("validation:summary.sourcesInvalid", { vars: { max: SUMMARY_MAX_DOCUMENTS } }));
+  }
+  // Ending the call by itself (lib/voice/closing.js): a switch and 2–10 seconds of quiet.
+  for (const problem of callEndingProblems(patch)) {
+    errors.push(tr(`validation:callEnding.${problem.code}`, problem.vars ? { vars: problem.vars } : undefined));
+  }
 
   if (patch.capabilities !== undefined) {
     if (
@@ -269,4 +294,9 @@ function validatePatch(patch, tr) {
 
 
   return errors;
+}
+
+/** Is the agent's summary still in step with the documents it was written from? null when it has none. */
+async function statusOf(tenantId, config) {
+  return config?.profileSummary ? summaryStatus(tenantId, config.profileSummarySources) : null;
 }

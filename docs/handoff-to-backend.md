@@ -131,10 +131,14 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `uiLocale` | `en \| ur` | dashboard language (Urdu renders right-to-left) — **the tenant's**, whichever agent is saved |
   | `replyLanguage` | `en \| ur` | what the agent *says*; it always *understands* both |
   | `hours` | `{ "mon": [["09:00","17:00"]], … "sun": [] }` | opening hours in `timezone` |
-  | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward" }` | **call forwarding** to a person (CLAUDE.md §6.26). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
+  | `escalation` | `{ enabled, contacts: [{id, role, name, phone}], whenCallerAsks, afterMisses 1–4, topics[], outsideHours: "callback"\|"forward", announce: {en?, ur?} }` | **call forwarding** to a person (CLAUDE.md §6.26). `announce` is the owner's own line said before every transfer (`{name}`/`{role}`; empty = the built-in one). Validated by the engine (`validation:handoff.*`); phones stored as `+92…`. The backend stores the document; the engine reads it |
   | `capabilities` | `{ "<capabilityId>": { enabled, channels, params } }` | catalogue: `GET /api/agent-config/catalog` |
   | `voices` | `{ "en": "kokoro:af_heart", "ur": "kokoro:hf_alpha" }` | ids from `src/lib/voice/speech/voices.js` |
   | `greeting` | `{ "en"?: string ≤400, "ur"?: string ≤400 }` | the owner's own **call greeting** per language; `{business}` is the only placeholder. Empty/missing = the engine's built-in greeting, which says the caller is speaking with an AI assistant (and that the call is recorded, only while `recordCalls` is on). Spoken exactly as written; the dashboard should show the engine's warnings when it leaves those notices out (`src/lib/voice/greeting.js greetingNotices` — the UK/Ireland require them, the owner decides) |
+  | `autoEndCalls` | boolean, default `true` | the call **ends by itself** once the conversation is over (the caller said goodbye, said "no thanks" after "anything else?", or the agent said goodbye) — CLAUDE.md §6.26. Off = the caller hangs up |
+  | `endCallDelaySeconds` | integer 2–10, default `3` | seconds of quiet after the agent's last words before the call ends; any speech from the caller in that time keeps it open |
+  | `profileSummary` | string ≤1200 or null | the **business summary**: written by the engine's AI from documents the owner chose, then edited and approved by the owner (CLAUDE.md §6.20). Always in this agent's prompt. General facts only — a price is refused on save (`validation:summary.*`). Draft: `POST /api/agent-config/summary?tenantId&agentId { sourceIds ≤10, language }` → `{ draft, sources, skipped, removed }` (saves nothing; only documents this agent may use) |
+  | `profileSummarySources` | `[{ id, title, hash }]` | the documents it came from, recorded by the engine when the dashboard saves `profileSummarySourceIds` (never taken from a client). `GET /api/agent-config` adds `summaryStatus { stale, changed[], missing[] }` — show it, so the owner summarises again when a document changed |
   | `recordCalls` | boolean | the owner switched **call recording** on for this agent. Today it only changes the built-in greeting; when Twilio exists the transport records by it, and **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
   | `collect`, `collectVersion` | see B3 | |
 
@@ -157,8 +161,9 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
 ### B3 — "What the agent collects" settings
 
 - **What:** which details the agent asks for (name, phone, service, date-time, party size, reason…), per request
-  type (`appointment`, `callback`), the business's own **services** and **staff** lists, custom fields, order,
-  required/optional, optional custom wording (en + ur).
+  type (`appointment`, `callback`, `order`), the business's own **services**, **staff** and **menu** lists, custom
+  fields, order of questions, required/optional, optional custom wording (en + ur), and conditions (`when`: a question
+  asked only after a particular answer — the delivery address only for delivery).
 - **Why backend:** it is part of the versioned config the dashboard edits.
 - **Engine owns:** the **catalogue** (all possible fields, request types, industry presets, limits, and the
   validation of a saved document) in `src/lib/collect/catalog.js` / `config.js`. The backend must **not**
@@ -172,12 +177,17 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
     "industry": "dental",                  // starting preset, informational
     "services": [{ "id": "root_canal", "label": { "en": "Root canal", "ur": "روٹ کینال" } }],
     "staff":    [{ "id": "dr_ali", "label": { "en": "Dr Ali", "ur": "ڈاکٹر علی" } }],
+    "menu":     [{ "id": "chicken_biryani", "label": { "en": "Chicken Biryani", "ur": "چکن بریانی" } }],   // what an order may contain
     "customFields": [{ "id": "c_parking", "type": "yesno", "label": {…}, "question": {…}, "sensitive": false }],
     "recordTypes": {
       "appointment": { "enabled": true, "fields": [ { "id":"name","required":true }, { "id":"phone","required":true }, { "id":"service","required":true }, { "id":"datetime","required":true }, { "id":"notes","required":false } ] },
-      "callback":    { "enabled": true, "fields": [ … ] } } }
+      "callback":    { "enabled": true, "fields": [ … ] },
+      "order":       { "enabled": true, "fields": [ { "id":"name","required":true }, { "id":"phone","required":true }, { "id":"order_items","required":true },
+                       { "id":"order_type","required":true }, { "id":"address","required":true, "when": { "field":"order_type", "equals":"delivery" } }, { "id":"notes","required":false } ] } } }
   ```
-  Limits: ≤12 fields per type, ≤10 custom fields, ≤60 service/staff entries, ≤30 options per custom choice.
+  Limits: ≤12 fields per type, ≤10 custom fields, ≤60 service/staff entries, ≤150 menu dishes, ≤30 options per custom
+  choice. An `order` type with an empty `menu` saves, but the agent does not take orders until the menu has dishes
+  (the dashboard should say so — `missingLists()` in `src/lib/collect/config.js`).
 - **Backend provides:** persistence + dashboard UI (checklist). Engine reads it with the config in B2.
 - **Engine change:** `saveCollectConfig()` becomes a pass-through; validation stays in the engine.
 
@@ -191,12 +201,15 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   console routes `GET /api/records`, `GET|PATCH /api/records/:id` and the "Collected" tab.
 - **A request (what the backend stores / receives):**
   ```jsonc
-  { "id": "…", "tenantId": "…", "reference": "AP-4K7Q2",      // AP- appointment, CB- call-back; read to the customer
-    "type": "appointment",                                       // appointment | callback
+  { "id": "…", "tenantId": "…", "reference": "AP-4K7Q2",      // AP- appointment, CB- call-back, OR- order; read to the customer
+    "type": "appointment",                                       // appointment | callback | order
     "status": "requested",                                       // requested | confirmed | done | cancelled
     "channel": "voice",                                          // chat | voice (whatsapp later)
     "language": "ur",                                            // language the customer was served in
     "data": { "name": "…", "phone": "+923001234567", "service": "root_canal", "datetime": "2026-10-22T17:00" },
+    // an ORDER's data: { "name", "phone", "order_items": [{ "id": "chicken_biryani", "name": "Chicken Biryani", "qty": 2 }],
+    //   "order_type": "pickup" | "delivery", "address" (delivery only), "notes" } — dishes only from the menu; prices and
+    //   the total are NOT in it: your team confirms them with the customer
     "summary": "Ahmed · Root canal · Thursday, 22 October 2026 at 5:00 pm",
     "scheduledLocal": "2026-10-22T17:00",   // business wall-clock STRING on purpose; turning it into an instant is the backend's call
     "timezone": "Asia/Karachi", "configVersion": 7, "conversationId": "…", "submissionKey": "…", "createdAt": "…" }
@@ -455,7 +468,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 619, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 685, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -472,6 +485,12 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 - Call greeting per agent (`greeting`, `recordCalls` in the settings above): the owner's words or a built-in greeting
   with the AI notice (and the recording notice only while recording is on), with warnings — never refusals — when
   the owner's text leaves them out.
+- The business summary (`profileSummary` above): the AI summarises documents the owner chose, the owner approves it,
+  and the agent always knows it — general facts only, never a price; flagged when a source document changes.
+- Restaurant orders (`order` request type, B3/B4 above): only dishes on the owner's menu, pickup or delivery with
+  the address only for delivery, saved as a request your team confirms (with the total) — never "order placed".
+- Ending a call by itself (`autoEndCalls`, `endCallDelaySeconds` above): after a goodbye, a "no thanks" to
+  "anything else?", or the agent's own goodbye — never mid-request, after "hold on" or while the caller talks.
 - Generic openers ("who are you", "tell me about your company", "aap kya karte hain", "آپ کی سروسز کیا ہیں") are
   recognised by word lists per language (`src/lib/phrases/`) and searched with the business's name.
 - Voice pauses: a sentence cut by a pause is answered as one message; "hold on" / "ek minute" gets a longer wait;
@@ -503,7 +522,11 @@ where call recordings are stored and for how long (`recordCalls` above).
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
+similarity index (`CLAUDE.md` §6.1). Latest: `20261027120000_agent_profile_summary` — `agent_configs.profile_summary`
+(text, null) and `agent_configs.profile_summary_sources` (JSON, default `[]`); nothing changes until an owner writes a
+summary. Before it: `20261027100000_agent_call_ending` — `agent_configs.auto_end_calls`
+(default true) and `agent_configs.end_call_delay_seconds` (default 3); existing agents keep ending calls after a
+goodbye, as before. Before it: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
 `{}` = the built-in greeting) and `agent_configs.record_calls` (default false); existing agents now greet with the AI
 notice and say nothing about recording. Before it: `20261024100000_phone_numbers` — the stand-in `phone_numbers` table
 (B11) and `call_logs.phone_number_id`; changes no existing row. Before that: `20261023100000_knowledge_per_agent` — the

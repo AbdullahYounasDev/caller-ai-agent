@@ -43,12 +43,25 @@ const CALLBACK = edged(
   ].join("|")
 );
 
+// Ordering food: "I'd like to order", "place an order", "home delivery", "order karna hai",
+// "کھانا منگوانا ہے". A bare "order" is not enough ("my order number is…", "in order to").
+const ORDER = edged(
+  [
+    "(?:place|make|give|put in) (?:an |my |a |the )?order|(?:like|want|wanna|need) to order|can i order|could i order|i'?d like to order|" +
+      "order (?:food|some|something|online|a|an|two|three|\\d+)|for (?:home )?delivery|home delivery|deliver (?:to|at) (?:my|me|our)|takeaway order|take ?away order",
+    "آرڈر (?:کرنا|کرنی|دینا|دینی|کر|دے|لکھ)|منگوانا|منگوانی|منگوا(?:دیں|دو|نا)|ڈیلیوری (?:چاہیے|چاہئے|کر|کروانی|کروانا)|کھانا (?:منگوانا|بھیج|چاہیے)",
+    "order (?:karna|karni|dena|deni|kar|de|likh|karwana|karwani)|mangwana|mangwani|mangwa (?:do|dein|den)|delivery (?:chahiye|karwani|karwana|kar do|kardo|karein)|khana (?:mangwana|bhej|chahiye)",
+  ].join("|")
+);
+
 // Changing or cancelling something that already exists is NOT asking for a new one: the
-// agent has no booking to look up (§6.11), so it must not start collecting a second one.
+// agent has no booking or order to look up (§6.11), so it must not start collecting a second one.
 const MODIFYING_EXISTING = edged(
-  "cancel (?:my|the|our) (?:appointment|booking|reservation)|reschedule|change (?:my|the) (?:appointment|booking|time)|postpone|" +
-    "میری (?:اپائنٹمنٹ|بکنگ) (?:منسوخ|تبدیل|ملتوی)|اپائنٹمنٹ (?:منسوخ|تبدیل|ملتوی)|" +
-    "appointment (?:cancel|change|badalni|badalna)|booking (?:cancel|change)|appointment ka time badal|cancel karna hai"
+  "cancel (?:my|the|our) (?:appointment|booking|reservation|order)|reschedule|change (?:my|the) (?:appointment|booking|time|order)|postpone|" +
+    "where is my order|my order (?:is late|has not|hasn'?t|status)|status of my order|" +
+    "میری (?:اپائنٹمنٹ|بکنگ) (?:منسوخ|تبدیل|ملتوی)|اپائنٹمنٹ (?:منسوخ|تبدیل|ملتوی)|میرا آرڈر (?:کہاں|منسوخ|تبدیل|ابھی تک)|آرڈر (?:منسوخ|کینسل)|" +
+    "appointment (?:cancel|change|badalni|badalna)|booking (?:cancel|change)|appointment ka time badal|cancel karna hai|" +
+    "mera order (?:kahan|kidhar|cancel|abhi tak)|order cancel"
 );
 
 /**
@@ -56,7 +69,7 @@ const MODIFYING_EXISTING = edged(
  * on? Null when it asks for none (or for a change to an existing one).
  *
  * @param {string} message
- * @param {string[]} enabledTypes e.g. ["appointment", "callback"]
+ * @param {string[]} enabledTypes e.g. ["appointment", "callback", "order"]
  * @returns {string|null}
  */
 export function detectStartType(message, enabledTypes) {
@@ -69,6 +82,7 @@ export function detectStartType(message, enabledTypes) {
   const found = [];
   if (enabledTypes.includes("callback")) found.push({ type: "callback", at: first(CALLBACK) });
   if (enabledTypes.includes("appointment")) found.push({ type: "appointment", at: first(APPOINTMENT) });
+  if (enabledTypes.includes("order")) found.push({ type: "order", at: first(ORDER) });
   const hits = found.filter((x) => x.at >= 0).sort((a, b) => a.at - b.at);
   return hits[0]?.type ?? null;
 }
