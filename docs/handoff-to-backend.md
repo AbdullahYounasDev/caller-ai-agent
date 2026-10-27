@@ -137,6 +137,8 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `greeting` | `{ "en"?: string ≤400, "ur"?: string ≤400 }` | the owner's own **call greeting** per language; `{business}` is the only placeholder. Empty/missing = the engine's built-in greeting, which says the caller is speaking with an AI assistant (and that the call is recorded, only while `recordCalls` is on). Spoken exactly as written; the dashboard should show the engine's warnings when it leaves those notices out (`src/lib/voice/greeting.js greetingNotices` — the UK/Ireland require them, the owner decides) |
   | `autoEndCalls` | boolean, default `true` | the call **ends by itself** once the conversation is over (the caller said goodbye, said "no thanks" after "anything else?", or the agent said goodbye) — CLAUDE.md §6.26. Off = the caller hangs up |
   | `endCallDelaySeconds` | integer 2–10, default `3` | seconds of quiet after the agent's last words before the call ends; any speech from the caller in that time keeps it open |
+  | `profileSummary` | string ≤1200 or null | the **business summary**: written by the engine's AI from documents the owner chose, then edited and approved by the owner (CLAUDE.md §6.20). Always in this agent's prompt. General facts only — a price is refused on save (`validation:summary.*`). Draft: `POST /api/agent-config/summary?tenantId&agentId { sourceIds ≤10, language }` → `{ draft, sources, skipped, removed }` (saves nothing; only documents this agent may use) |
+  | `profileSummarySources` | `[{ id, title, hash }]` | the documents it came from, recorded by the engine when the dashboard saves `profileSummarySourceIds` (never taken from a client). `GET /api/agent-config` adds `summaryStatus { stale, changed[], missing[] }` — show it, so the owner summarises again when a document changed |
   | `recordCalls` | boolean | the owner switched **call recording** on for this agent. Today it only changes the built-in greeting; when Twilio exists the transport records by it, and **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
   | `collect`, `collectVersion` | see B3 | |
 
@@ -466,7 +468,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 677, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 685, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -483,6 +485,8 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 - Call greeting per agent (`greeting`, `recordCalls` in the settings above): the owner's words or a built-in greeting
   with the AI notice (and the recording notice only while recording is on), with warnings — never refusals — when
   the owner's text leaves them out.
+- The business summary (`profileSummary` above): the AI summarises documents the owner chose, the owner approves it,
+  and the agent always knows it — general facts only, never a price; flagged when a source document changes.
 - Restaurant orders (`order` request type, B3/B4 above): only dishes on the owner's menu, pickup or delivery with
   the address only for delivery, saved as a request your team confirms (with the total) — never "order placed".
 - Ending a call by itself (`autoEndCalls`, `endCallDelaySeconds` above): after a goodbye, a "no thanks" to
@@ -518,7 +522,9 @@ where call recordings are stored and for how long (`recordCalls` above).
 ## 6. Migration note
 
 Engine migrations are hand-written where needed because Prisma would emit a `DROP INDEX` for the HNSW
-similarity index (`CLAUDE.md` §6.1). Latest: `20261027100000_agent_call_ending` — `agent_configs.auto_end_calls`
+similarity index (`CLAUDE.md` §6.1). Latest: `20261027120000_agent_profile_summary` — `agent_configs.profile_summary`
+(text, null) and `agent_configs.profile_summary_sources` (JSON, default `[]`); nothing changes until an owner writes a
+summary. Before it: `20261027100000_agent_call_ending` — `agent_configs.auto_end_calls`
 (default true) and `agent_configs.end_call_delay_seconds` (default 3); existing agents keep ending calls after a
 goodbye, as before. Before it: `20261026100000_agent_greeting` — `agent_configs.greeting` (JSON, default
 `{}` = the built-in greeting) and `agent_configs.record_calls` (default false); existing agents now greet with the AI

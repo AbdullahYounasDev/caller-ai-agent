@@ -31,6 +31,9 @@ failures behind each rule, what works and what does not, and the measured number
   agent's own goodbye), after a few seconds of quiet the owner chooses — or never, if the owner switches it off.
 - **Call greeting per agent:** the owner's own words, or a built-in greeting that tells callers they are speaking with
   an AI assistant (and that the call is recorded, only when the agent's recording switch is on).
+- **Business summary:** the owner ticks the documents that describe the business, the AI writes a short summary of the
+  general facts, the owner checks and saves it, and the agent always knows it — so "who are you?" is answered at once.
+  Prices are never in it (removed from the draft, refused on save); they stay in the documents and are looked up.
 - **Generic openers** ("who are you?", "tell me about your company", "aap kya karte hain?") recognised in English,
   Urdu and Roman Urdu — the word lists are plain files in `src/lib/phrases/`, one per language.
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.

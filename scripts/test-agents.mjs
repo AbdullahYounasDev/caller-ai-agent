@@ -311,6 +311,41 @@ ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).greeting.e
 const opener = await promptFor(kbLondon, "tell me about your company");
 ok(opener.result.searchQuery === "Roma London: tell me about your company" && opener.result.searchTrigger === "overview", "an opener is searched as '<this agent's business>: <question>'");
 ok(/THIS MESSAGE is a general question about the business/.test(opener.instruction), "…and the prompt is told it is a general question");
+
+// ── the business summary (§6.20): written from documents the AGENT may use, approved, in its profile ──
+{
+  const { draftSummary, resolveSummarySources, summaryStatus } = await import("@/lib/agent/profile-summary");
+  const asked = [];
+  const generate = async ({ systemInstruction, history }) => {
+    asked.push({ systemInstruction, input: history[0].parts[0].text });
+    return "Pizza Roma is an Italian restaurant chain serving pizza, lasagne and tiramisu. A margherita costs Rs 1,200. We have branches in Dublin and London.";
+  };
+  const draft = await draftSummary({ tenantId: KB, agentId: kbLondon, businessName: "Pizza Roma", sourceIds: [menu.id, dubDoc.id], language: "en", generate });
+  ok(draft.sources.map((x) => x.id).join() === menu.id && draft.skipped[0]?.reason === "not_for_agent", "a summary for London is written from the shared menu only; Dublin's page is skipped and said so");
+  ok(!asked[0].input.includes("Guinness") && asked[0].input.includes("margherita"), "…and Dublin's page never reaches the model");
+  ok(/NEVER INCLUDE prices/.test(asked[0].systemInstruction) && /Write in English/.test(asked[0].systemInstruction), "the model is told: general facts only, never prices, in the owner's language");
+  ok(!/Rs 1,200/.test(draft.draft) && draft.removed.some((x) => /Rs 1,200/.test(x)) && /Italian restaurant chain/.test(draft.draft), "a sentence with a price is taken out of the draft, and the owner is shown it");
+
+  const sources = await resolveSummarySources(KB, [menu.id, "00000000-0000-0000-0000-000000000000"]);
+  ok(sources.length === 1 && sources[0].id === menu.id && sources[0].hash.length === 16, "the documents a summary came from are recorded by the server, unknown ids dropped");
+  await saveAgentConfig(KB, { profileSummary: draft.draft, profileSummarySources: sources }, { agentId: kbLondon });
+  const lonSummary = await promptFor(kbLondon, "hello");
+  const dubSummary = await promptFor(kbDublin, "hello");
+  ok(lonSummary.instruction.includes("Summary of the business, from its own documents, approved by the owner: Pizza Roma is an Italian restaurant chain"), "the approved summary is in London's prompt, under ABOUT THIS BUSINESS");
+  ok(!dubSummary.instruction.includes("approved by the owner"), "…and only London's: the summary is per agent");
+  ok(!(await summaryStatus(KB, sources)).stale, "a fresh summary is not out of date");
+  await ingestDocument({ tenantId: KB, title: "menu", text: `${MENU} We now also serve risotto.` });
+  const after = await summaryStatus(KB, sources);
+  ok(after.stale && after.changed.join() === "menu", "the menu changed since: the summary is reported out of date");
+
+  // A copy keeps the summary only when every document it came from is shared.
+  const kbLeeds = (await createAgent(KB, { name: "Leeds", copyFrom: kbLondon })).id;
+  ok((await getAgentConfig(KB, { agentId: kbLeeds, skipCache: true })).profileSummary === draft.draft, "a new agent copied from London keeps a summary written from shared documents");
+  await saveAgentConfig(KB, { profileSummary: "Our Dublin branch serves stew.", profileSummarySources: await resolveSummarySources(KB, [dubDoc.id]) }, { agentId: kbDublin });
+  const kbGalway2 = (await createAgent(KB, { name: "Galway Two", copyFrom: kbDublin })).id;
+  const g2 = await getAgentConfig(KB, { agentId: kbGalway2, skipCache: true });
+  ok(g2.profileSummary === null && g2.profileSummarySources.length === 0, "…but never a summary of a document limited to the agent it was copied from");
+}
 }
 
 // ── the engine's cap on active agents ───────────────────────────────────────

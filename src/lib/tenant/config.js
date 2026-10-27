@@ -9,6 +9,7 @@ import { emptyCollectConfig, normalizeCollectConfig } from "@/lib/collect/config
 import { emptyHandoffConfig, normalizeHandoffConfig } from "@/lib/handoff/config";
 import { normalizeGreeting } from "@/lib/voice/greeting";
 import { normalizeCallEnding } from "@/lib/voice/closing";
+import { normalizeSummary } from "@/lib/agent/summary-rules";
 import { assertCanAddAgent } from "@/lib/tenant/registry";
 import { countNumbersForAgent } from "@/lib/standins/numbers";
 
@@ -63,6 +64,10 @@ const DEFAULTS = {
   // The call ends by itself once the conversation is over, after this many seconds of quiet
   // (lib/voice/closing.js).
   ...normalizeCallEnding(),
+  // The business summary the owner approved (lib/agent/profile-summary.js) and the documents it
+  // came from. None until the owner writes one.
+  profileSummary: null,
+  profileSummarySources: [],
   // What the agent collects for a customer's request (lib/collect/config.js). Off until the
   // business sets it up, so an existing tenant's agent behaves exactly as before.
   collect: emptyCollectConfig(),
@@ -204,6 +209,8 @@ function normalizeConfig(row, tenantUiLocale) {
     greeting: normalizeGreeting(row.greeting),
     recordCalls: row.recordCalls === true,
     ...normalizeCallEnding(row),
+    profileSummary: row.profileSummary?.trim() ? row.profileSummary : null,
+    profileSummarySources: Array.isArray(row.profileSummarySources) ? row.profileSummarySources : [],
     // Normalized on every read: a stored document that has drifted from the schema degrades
     // to the nearest valid one instead of reaching the engine malformed.
     collect: normalizeCollectConfig(row.collect),
@@ -227,6 +234,8 @@ const AGENT_SETTINGS = [
   "recordCalls",
   "autoEndCalls",
   "endCallDelaySeconds",
+  "profileSummary",
+  "profileSummarySources",
 ];
 
 /**
@@ -277,6 +286,7 @@ export async function saveAgentConfig(tenantId, patch, { agentId = null } = {}) 
   // back is exactly what the transfer will dial.
   if (data.escalation !== undefined) data.escalation = normalizeHandoffConfig(data.escalation);
   if (data.greeting !== undefined) data.greeting = normalizeGreeting(data.greeting);
+  if (data.profileSummary !== undefined) data.profileSummary = normalizeSummary(data.profileSummary) || null;
 
   const row = await targetRow(tenantId, agentId);
   // The dashboard language belongs to the tenant, so it is written to the default agent
@@ -395,6 +405,13 @@ export async function createAgent(tenantId, { name, copyFrom = null } = {}) {
 
   const copied = {};
   for (const key of AGENT_SETTINGS) if (source[key] !== null && source[key] !== undefined) copied[key] = source[key];
+  // The business summary is copied only when every document it came from is shared with every
+  // agent: a summary of the Dublin-only page must never reach Galway (§6.28).
+  const summaryIds = (Array.isArray(source.profileSummarySources) ? source.profileSummarySources : []).map((s) => s?.id).filter(Boolean);
+  if (summaryIds.length && (await prisma.knowledgeSourceAgent.count({ where: { tenantId, sourceId: { in: summaryIds } } })) > 0) {
+    delete copied.profileSummary;
+    delete copied.profileSummarySources;
+  }
   const row = await prisma.agentConfig.create({
     data: {
       tenantId,

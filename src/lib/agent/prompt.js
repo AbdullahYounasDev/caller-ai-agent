@@ -213,6 +213,10 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   const profile = [];
   if (hasName) profile.push(`Name: ${config.businessName}`);
   if (purpose) profile.push(`What we do, in the business's own words: ${purpose}`);
+  // The owner-approved summary of the documents they chose (lib/agent/profile-summary.js):
+  // general facts only, never prices — those stay in the documents and are searched for.
+  const summary = config.profileSummary?.trim();
+  if (summary) profile.push(`Summary of the business, from its own documents, approved by the owner: ${summary.replace(/\s*\n+\s*/g, " ")}`);
   if (config.hours) {
     profile.push(
       `Business hours (timezone ${config.timezone}): ${formatHours(config.hours)}. ` +
@@ -932,4 +936,50 @@ function zonedParts(nowMs, timezone) {
   const [y, m, d] = date.split("-").map(Number);
   const key = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
   return { date, time: `${get("hour")}:${get("minute")}`, dayName: DAY_NAMES[key] };
+}
+
+
+// ── THE BUSINESS SUMMARY (lib/agent/profile-summary.js) ─────────────────────
+
+/**
+ * SYSTEM INSTRUCTION for writing a business's summary from documents its owner chose. Like the
+ * rewrite and the extraction, this call never speaks to a customer: its text is a DRAFT the owner
+ * reads, edits and saves into the agent's profile (ABOUT THIS BUSINESS, above).
+ *
+ * The rules that carry the weight: GENERAL facts only, and never a price, fee or offer — those
+ * change, and a summary is always in the prompt, so a stale price there would be quoted with
+ * confidence long after the price list was corrected (the documents are searched instead). And
+ * nothing the documents do not say: the owner approves the text, but a confident invention is
+ * easy to approve without noticing. Code removes any sentence with a price that slips through
+ * (summary-rules.js stripPrices) and shows the owner what it removed.
+ *
+ * @param {object} args
+ * @param {"en"|"ur"} args.language   what the owner reads and edits the draft in
+ * @param {string} [args.businessName]
+ * @param {number} args.maxWords
+ */
+export function buildSummaryInstruction({ language, businessName, maxWords }) {
+  const named = businessName && businessName !== PLACEHOLDER_BUSINESS_NAME ? ` The business is called ${businessName}.` : "";
+  return [
+    "You write a short overview of a business from its own documents. It is given to the business's phone agent so it can " +
+      "answer when a caller asks who the business is or what it does. You never speak to a customer." +
+      named,
+    `Write in ${LANGUAGE_NAMES[language === "ur" ? "ur" : "en"]}${language === "ur" ? " (Urdu script)" : ""}, at most ${maxWords} words, in plain sentences: no headings, no lists, no markdown.`,
+    "INCLUDE only general facts the documents state: who the business is, what it does, the kinds of products or services " +
+      "it offers (by name, without details), who it serves, and where it operates.",
+    "NEVER INCLUDE prices, fees, costs, discounts, offers, plan or package details, quantities, stock, opening hours, " +
+      "dates, policies (refunds, delivery charges), phone numbers, email or web addresses. These change, and the agent " +
+      "looks them up in the documents when a caller asks.",
+    "Never add anything the documents do not say, never guess, and leave out praise and marketing words (best, leading, " +
+      "world-class). If two documents disagree about a fact, leave that fact out.",
+    "Output only the overview.",
+  ].join("\n");
+}
+
+/**
+ * The user turn for the summary call: the chosen documents, each under its own title.
+ * @param {Array<{title: string, content: string}>} documents  already trimmed to size
+ */
+export function buildSummaryInput(documents) {
+  return documents.map((d, i) => `DOCUMENT ${i + 1}: ${humanizeTitle(d.title) || d.title}\n${d.content}`).join("\n\n---\n\n");
 }

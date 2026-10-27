@@ -174,18 +174,25 @@ export function HandoffPanel({ value, replyLanguage = "en", onChange, t, labelCl
                   ) : (
                     <ul className="flex flex-col gap-1" data-testid={`handoff-announce-preview-${language}`}>
                       {people.map((contact, index) => (
-                        <li key={contact.id || index} className="rounded bg-gray-50 px-2 py-1 text-sm" dir={rtl ? "rtl" : "ltr"}>
+                        <li key={contact.id || index} className="rounded bg-gray-50 px-2 py-1 text-sm">
                           <span className="block text-xs text-gray-500">
                             {index === 0
                               ? t("dashboard:handoff.announce.preview", { vars: { who: contact.name || contact.role } })
                               : t("dashboard:handoff.announce.nextPreview", { vars: { previous: people[index - 1].name || people[index - 1].role } })}
                           </span>
-                          {index === 0
-                            ? announcementFor({ escalation, contact, language })
-                            : nextContactLine({ escalation, previous: people[index - 1], contact, language })}
+                          {/* The caption is in the dashboard's language; only the spoken line follows the line's own direction. */}
+                          <span className="block" dir={rtl ? "rtl" : "ltr"} lang={language}>
+                            {index === 0
+                              ? announcementFor({ escalation, contact, language })
+                              : nextContactLine({ escalation, previous: people[index - 1], contact, language })}
+                          </span>
                         </li>
                       ))}
                     </ul>
+                  )}
+                  {/* The Urdu voice cannot read English letters inside an Urdu sentence: it spells them out. */}
+                  {rtl && language === replyLanguage && people.some((c) => /[A-Za-z]/.test(`${c.name} ${c.role}`)) && (
+                    <p className="text-xs text-amber-700" data-testid="handoff-announce-latin">{t("dashboard:handoff.announce.latinInUrdu")}</p>
                   )}
                 </div>
               );

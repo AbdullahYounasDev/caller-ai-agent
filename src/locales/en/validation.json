@@ -126,5 +126,11 @@
   "greeting.unknownPlaceholder": "“{value}” would be read out to callers as it is. The only placeholder is {allowed}.",
   "recordCalls.invalid": "Call recording must be on or off.",
   "callEnding.autoEndInvalid": "Ending calls by itself must be on or off.",
-  "callEnding.delayRange": "Choose a wait from {min} to {max} seconds."
+  "callEnding.delayRange": "Choose a wait from {min} to {max} seconds.",
+  "summary.invalid": "The business summary must be text.",
+  "summary.tooLong": "The business summary must be {max} characters or fewer.",
+  "summary.hasPrice": "The summary mentions a price ({price}). Prices change, and the summary is always in the agent's mind, so an old price would be quoted with confidence. Keep prices in your documents — the agent looks them up there — and remove it from the summary.",
+  "summary.sourcesInvalid": "Choose between 1 and {max} documents to summarise.",
+  "summary.rateLimited": "Too many summaries at once. Please wait a minute and try again.",
+  "summary.nothingUsable": "None of the chosen documents can be used for this agent's summary: they are still importing, failed, or are limited to other agents."
 }

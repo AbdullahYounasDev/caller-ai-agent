@@ -124,7 +124,7 @@ the day a suspended tenant keeps being served. **Routes don't call
 the translated, route-facing wrapper next to it in the same file. It is called
 from every route that serves or mutates a tenant's data: `/api/chat`, all of
 `/api/knowledge` (upload/crawl/typed-text, edit, delete, retry) and
-`PUT /api/agent-config`, `/api/agents`, `/api/collect` and `/api/numbers`. See §6.18.
+`PUT /api/agent-config`, `POST /api/agent-config/summary`, `/api/agents`, `/api/collect` and `/api/numbers`. See §6.18.
 
 ---
 
@@ -170,6 +170,7 @@ src/app/
   handoff/HandoffPanel.js      # the Agent tab's "call forwarding" settings (§6.26)
   agents/AgentPicker.js        # the "which agent" bar above the tabs: pick, add, rename, make default, archive (§6.27)
   knowledge/DocumentAgents.js  # one document's "All agents / Only: …" and its editor, in the Knowledge tab (§6.28)
+  knowledge/SummaryDraft.js    # the review window for the AI's business-summary draft; SummaryPanel.js = the Agent tab's summary (§6.20)
   numbers/NumbersPanel.js      # the Numbers tab: add / link / release a number, try the lookup (§6.29)
   voice/                       # the console's voice panel: useVoiceCall (mic/socket/playback), pcm-player, panel, call history, VoicePicker, GreetingPanel (the Agent tab's call greeting + recording switch)
   api/
@@ -181,8 +182,9 @@ src/app/
     numbers/route.js           # list / add phone numbers; numbers/[id] = link to an agent, rename, release; numbers/lookup = try the routing (§6.29)
     collect/route.js           # GET/PUT the owner's "what should the agent collect" configuration (versioned, per agent)
     records/route.js           # list requests the agent took; records/[id] = read / confirm / decline one
-    agent-config/route.js      # GET/PUT — partner's dashboard contract
+    agent-config/route.js      # GET/PUT — partner's dashboard contract (+ summaryStatus: is the business summary out of date?)
     agent-config/catalog/      # capability list, translated, for his UI
+    agent-config/summary/      # POST — the AI's DRAFT business summary of chosen documents; saves nothing (§6.20)
     knowledge/route.js         # list + add/replace: typed text, uploads, URL crawl
     knowledge/[id]/route.js    # read, edit, rename, delete one document
     knowledge/[id]/retry/route.js  # re-embed a FAILED document — no re-upload (§6.15)
@@ -212,6 +214,8 @@ src/lib/
     crawl.js                   # website crawling + SSRF defences (§6.9)
     ingest.js                  # create/REPLACE/rename/delete/retry documents (§6.10, §6.15); who may use each (§6.28)
     knowledge-rules.js         # pure: may this agent use this document? (shared vs limited) — also imported by the console (§6.28)
+    profile-summary.js         # the business summary: draft from chosen documents (agent-scoped), sources + staleness (§6.20)
+    summary-rules.js           # pure: no prices in a summary (strip from drafts, refuse on save), length, form — also the console's
     knowledge-access.js        # the same rule as SQL (fails closed), validating and writing a document's agents (§6.28)
     jobs.js                    # background import queue + cancellation (§6.6, §6.14)
     storage.js                 # Cloudinary — the ORIGINAL file only (§6.13)
@@ -1341,6 +1345,34 @@ configured. One leak found and closed: with a name and NO purpose the model
 said "we provide software solutions", inferred from "Nyron Software
 **Solutions**" — hence the "don't guess from the name" clause.
 
+**BUILT — the business summary: written by the AI from documents the owner CHOSE, approved by the owner, always
+in the profile** (`lib/agent/profile-summary.js`, `summary-rules.js` pure; per agent: `agent_configs.profile_summary`
++ `profile_summary_sources`, migration `20261027120000_agent_profile_summary`, hand-written, HNSW line removed). The
+owner ticks the documents that describe the business (Knowledge tab → "Summarize for the agent", recommended by a
+hint until the agent has one; ≤10 documents), ONE model call (`POST /api/agent-config/summary`, 6/min per tenant,
+saves NOTHING) writes ≤120 words of general facts (`prompt.js buildSummaryInstruction`: who, what, kinds of products
+or services by name, who it serves, where; never prices, fees, offers, hours, dates, policies, phone numbers or
+addresses; nothing the documents do not say; disagreeing facts left out), the owner reads and edits it in a review
+window and saves it (`PUT /api/agent-config { profileSummary, profileSummarySourceIds }`). It then sits in ABOUT THIS
+BUSINESS ("Summary of the business, from its own documents, approved by the owner: …") on every turn, under the same
+narrow grounding exception as the purpose: "who are you / what do you do" are answered at once, while a price or a
+detail is still searched for. Rules that must not drift:
+- **No price in a summary, ever** — prices change, and a summary in every prompt would quote a stale one with
+  confidence. Twice: sentences with a price (a currency next to digits, "/month", "% off") are removed from the AI's
+  draft and SHOWN to the owner; a summary with a price is REFUSED on save (`validation:summary.hasPrice`), whoever
+  wrote it. Written-out prices ("fifteen hundred rupees") are not caught — the instruction is the first line.
+- **Only documents the AGENT may use** (§6.28): the others come back as skipped ("limited to other agents") and never
+  reach the model. A new agent copies the summary only when every document it came from is shared.
+- **The server records the sources** (`resolveSummarySources`: id, title, a hash of the text NOW); a client never says
+  what a document contained. A document whose TEXT changed since (a rename is not a change) or that was deleted makes
+  `GET /api/agent-config` report `summaryStatus.stale`, and the Agent tab says which one — the owner summarises again.
+  Nothing is regenerated without the owner.
+- Saving from the review window writes only the summary; unsaved edits in the Agent tab are left alone. The Agent tab
+  shows, edits and removes it (Save button), live-flagging a price with the same rule.
+**Verified:** tests/summary-rules (8), `test:agents` (scoping, stripping, the prompt per agent, staleness, copying),
+the review window driven in a browser (with the model's answer mocked: no model key in the build sandbox) and the
+error shown readably when the model is unavailable. **Not verified:** a real model's draft quality, in either language.
+
 **Built, NOT adopted — document title in the embedding.** `chunkDocument(text,
 {title})` can prefix every chunk's `embedText` with the humanised document
 title ("12-storepulse-plans.csv" → "storepulse plans"), which also gives a
@@ -2216,7 +2248,7 @@ filter is independent of the vectors, the ranking within it is unchanged).
 caller to its own person, London has none), what the agent collects (one agent takes requests, the other does not), the
 reply language, the opening hours, the forwarding contacts, the call greeting and the recording switch (§6.24), ending the call by itself and its wait (§6.26) each
 follow the AGENT, and a generic opener is searched with that agent's own business name (§6.20); the dashboard language
-follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 82 checks since call ending.)
+follows the tenant (§6.27). Records and calls carry the agent (§6.27). (test:agents: 93 checks since the business summary.)
 
 ### 6.29 Phone numbers — "this number was dialled: which business, which agent?"
 
@@ -2327,7 +2359,7 @@ right language, with history persisted per tenant.
 | Area | State |
 | --- | --- |
 | RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
-| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
+| Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours, and the owner-approved AI summary of the documents they chose — general facts, never prices) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
 | **Call greeting** | ✅ per agent: the owner's own words or a built-in greeting that says the caller is speaking with an AI assistant, and that the call is recorded only while the agent's recording switch is on; warnings (never refusals) when the owner's text leaves a notice out (§6.24). Recording itself is not built |
 | Keyword half | ✅ language-aware (`english`/`simple` per document — Urdu script is `simple`, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
@@ -2401,7 +2433,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 677 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 685 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2579,7 +2611,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 677 unit tests: restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 685 unit tests: the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding

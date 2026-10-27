@@ -476,6 +476,15 @@ model AgentConfig {
   /// Seconds of quiet after the agent's last words before the call ends (2–10).
   endCallDelaySeconds Int     @default(3) @map("end_call_delay_seconds")
 
+  // --- the business summary (src/lib/agent/profile-summary.js) ---
+  /// An overview of the business written by the AI from documents the owner chose, then read,
+  /// edited and approved by the owner. Always in this agent's prompt (ABOUT THIS BUSINESS), so
+  /// "who are you?" needs no search. General facts only: never a price (refused on save).
+  profileSummary        String? @map("profile_summary")
+  /// The documents it was written from: [{ id, title, hash }] — a document changed (another hash)
+  /// or deleted since makes the console say the summary may be out of date.
+  profileSummarySources Json    @default("[]") @map("profile_summary_sources")
+
   // --- what the agent collects (src/lib/collect/config.js) ---
   /// Which details the agent asks for, for which kinds of request (appointment, callback…),
   /// and the business's own lists (services, staff) and custom fields. One JSON document,
