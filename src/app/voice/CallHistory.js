@@ -33,6 +33,19 @@ export function CallHistory({ tenantId, agentId, t, refreshKey }) {
     };
   }, [tenantId, agentId, refreshKey, reloads]);
 
+  async function deleteRecording(id) {
+    if (!window.confirm(t("dashboard:voice.history.recordingConfirm"))) return;
+    try {
+      const res = await fetch(`/api/voice/calls/${id}/recording?tenantId=${encodeURIComponent(tenantId)}`, { method: "DELETE" });
+      if (res.ok) {
+        setDetail((d) => (d ? { ...d, call: { ...d.call, hasRecording: false } } : d));
+        load();
+      }
+    } catch {
+      // the recording simply stays
+    }
+  }
+
   async function toggle(id) {
     if (openId === id) {
       setOpenId(null);
@@ -75,6 +88,7 @@ export function CallHistory({ tenantId, agentId, t, refreshKey }) {
               {call.unanswered > 0 && (
                 <span className="text-amber-700">{t("dashboard:voice.history.unanswered", { count: call.unanswered })}</span>
               )}
+              {call.hasRecording && <span className="text-sky-700" data-testid="recorded-badge">{t("dashboard:voice.history.recordingBadge")}</span>}
               {call.interruptions > 0 && (
                 <span className="text-purple-700">{t("dashboard:voice.history.interruptions", { count: call.interruptions })}</span>
               )}
@@ -91,6 +105,15 @@ export function CallHistory({ tenantId, agentId, t, refreshKey }) {
                   <p className="text-xs text-gray-400">{t("common:state.loading")}</p>
                 ) : (
                   <>
+                    {detail.call?.hasRecording && (
+                      <div className="flex flex-col gap-1" data-testid="call-recording">
+                        <span className="text-xs text-gray-500">{t("dashboard:voice.history.recording")}</span>
+                        <audio controls preload="none" className="w-full" src={`/api/voice/calls/${call.id}/recording?tenantId=${encodeURIComponent(tenantId)}`} />
+                        <button type="button" onClick={() => deleteRecording(call.id)} className="self-start text-xs text-red-600 underline-offset-2 hover:underline">
+                          {t("dashboard:voice.history.recordingDelete")}
+                        </button>
+                      </div>
+                    )}
                     {detail.turns.length === 0 && (
                       <p className="text-xs text-gray-400">{t("dashboard:voice.history.noTurns")}</p>
                     )}

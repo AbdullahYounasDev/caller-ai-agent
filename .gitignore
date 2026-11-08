@@ -49,3 +49,6 @@ next-env.d.ts
 
 # Tesseract language data downloaded on first OCR use (eng.traineddata is the one tracked file)
 urd.traineddata
+
+# call recordings kept by the stand-in storage (src/lib/standins/recordings.js) — real calls, never commit
+/recordings/

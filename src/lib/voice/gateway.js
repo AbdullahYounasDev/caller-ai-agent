@@ -19,6 +19,7 @@ import { CLOSE_REFUSED, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { getVoice, PREVIEW_TEXT } from "./speech/voices";
 import { encodeWav } from "./audio";
 import { hit } from "@/lib/security/rate-limit";
+import { saveRecording } from "@/lib/standins/recordings";
 
 /** Voice previews per client per minute — plenty for someone clicking through the list. */
 const PREVIEW_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -71,7 +72,13 @@ export async function startVoiceGateway({ env = process.env } = {}) {
     if (req.method !== "GET") return json(res, 405, { error: "method not allowed" });
 
     if (url.pathname === "/health") {
+      // `?tenant=ID` (the Twilio webhook asks before it hands a call over, §6.30) adds ONE boolean —
+      // whether that business is under its own concurrent-call limit. Counts are never listed per tenant:
+      // this address is unauthenticated.
+      const tenant = url.searchParams.get("tenant");
+      const tenantAvailable = tenant ? [...sessions].filter((s) => s.tenantId === tenant).length < LIMITS.maxConcurrentCallsPerTenant : undefined;
       return json(res, speech ? 200 : 503, {
+        tenantAvailable,
         status: speech ? "ready" : loadError ? "error" : "loading",
         error: loadError ? "speech models failed to load — see the gateway log" : undefined,
         engine: speech?.engineInfo ?? null,
@@ -151,6 +158,7 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       tenantId: verdict.tenantId,
       agentId: verdict.agentId,
       line: verdict.line,
+      resume: verdict.resume,
       transportName,
       transport,
       stt: speech.stt,
@@ -159,6 +167,9 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       engineInfo: speech.engineInfo,
       brain: { respond, trimLastReply, noteUnheard, handoffFailed, getAgentConfig, invalidateAgentConfig },
       openRecorder: (args) => CallRecorder.open(args),
+      // Phone calls of an agent with recording switched on are kept (standins/recordings.js stands in for the
+      // backend's storage); the session decides which calls — see CallSession.shouldRecordAudio.
+      saveRecording: (args) => saveRecording({ ...args, env }),
     });
   }
 

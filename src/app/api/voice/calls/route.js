@@ -57,6 +57,7 @@ export async function GET(request) {
         durationSec: true,
         createdAt: true,
         endedAt: true,
+        recordingUrl: true,
       },
     });
 
@@ -72,7 +73,7 @@ export async function GET(request) {
     const unansweredByCall = new Map(unanswered.map((u) => [u.callId, u._count._all]));
 
     return NextResponse.json({
-      calls: calls.map((c) => ({ ...c, unanswered: unansweredByCall.get(c.id) ?? 0 })),
+      calls: calls.map(({ recordingUrl, ...c }) => ({ ...c, hasRecording: Boolean(recordingUrl), unanswered: unansweredByCall.get(c.id) ?? 0 })),
     });
   } catch (err) {
     console.error("GET /api/voice/calls failed:", err);

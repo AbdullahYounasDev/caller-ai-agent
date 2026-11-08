@@ -33,8 +33,10 @@ export async function GET(request, context) {
       return NextResponse.json({ error: "Call not found" }, { status: 404 });
     }
 
-    const { turns, events, ...summary } = call;
-    return NextResponse.json({ call: summary, turns, events });
+    // The pointer to the audio is the storage's business; the caller of this API only needs to know there is some
+    // (it is fetched from /api/voice/calls/:id/recording).
+    const { turns, events, recordingUrl, ...summary } = call;
+    return NextResponse.json({ call: { ...summary, hasRecording: Boolean(recordingUrl) }, turns, events });
   } catch (err) {
     console.error("GET /api/voice/calls/[id] failed:", err);
     return NextResponse.json({ error: "Something went wrong" }, { status: 500 });

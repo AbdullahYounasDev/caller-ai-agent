@@ -3,6 +3,7 @@ import { hit } from "@/lib/security/rate-limit";
 import { answerInboundCall, INBOUND_LIMIT } from "@/lib/telephony/twilio-webhook";
 import { readVerifiedTwilioRequest, twimlResponse } from "@/lib/telephony/twilio-request";
 import { sayAndHangup } from "@/lib/telephony/twiml";
+import { checkGatewayCapacity } from "@/lib/telephony/gateway-check";
 
 /**
  * A CALL CAME IN — the URL a business's Twilio number is pointed at (CLAUDE.md §6.30):
@@ -25,6 +26,7 @@ export async function POST(request) {
       params: verified.params,
       resolve: (dialled) => resolveDialledNumber(dialled),
       limit: (key) => hit({ key, ...INBOUND_LIMIT }),
+      gateway: (tenantId) => checkGatewayCapacity({ tenantId }),
     });
     // The result and the reason, never the numbers (they are the callers' and the business's to keep).
     console.log(`[twilio] inbound call: ${outcome.result}${outcome.reason ? ` (${outcome.reason})` : ""}${outcome.tenantId ? ` tenant ${outcome.tenantId}` : ""}`);

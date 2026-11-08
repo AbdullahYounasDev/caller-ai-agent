@@ -223,7 +223,8 @@ src/lib/
   voice/                       # ★ THE VOICE CHANNEL (§6.24) — runs in the gateway process, never in Next
     gateway.js                 # HTTP /health + WebSocket /call; ticket check, call limits, heartbeat
     session.js                 # ★ CallSession — one live call: greet, VAD → STT → respond() → TTS, barge-in
-    recorder.js                # every DB write of a call: call_logs, call_turns, call_events (batched, off the hot path)
+    recorder.js                # every DB write of a call: call_logs, call_turns, call_events (batched, off the hot path); can continue an existing conversation (resume, §6.30)
+    call-audio.js              # a phone call's audio on one timeline → stereo 8 kHz WAV (caller left, agent right), pure (§6.30)
     speech/                    # models.js (manifest) · voices.js (THE voice catalog, pure) · engine.js (loads once)
                                #   · vad.js · stt.js ★ SEAM (Parakeet / Groq Whisper, routed per call) · tts.js ★ SEAM (Kokoro / Piper, cache)
     gateway-url.js             # where the browser reaches the gateway — shared by the session and gateway routes
@@ -243,9 +244,9 @@ src/lib/
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
     config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
   phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
-  standins/                    # fake backend (customers, records, events, phone numbers) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
+  standins/                    # fake backend (customers, records, events, phone numbers, call recordings) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
-                               #   · twilio-signature / twilio-request (is it really Twilio?) · twilio-webhook (answer a call, the transfer chain) · twilio-config · twilio-rest · twiml · signed-token (§6.30)
+                               #   · twilio-signature / twilio-request (is it really Twilio?) · twilio-webhook (answer a call, the transfer chain, the way back) · gateway-check (does the gateway have room?) · twilio-config · twilio-rest · twiml · signed-token (§6.30)
   auth/internal.js             # INTERNAL_API_KEY guard — every route calls it (§2, §6.12)
   tenant/ config.js, registry.js   # ★ the seams (§4); registry.js: requireServiceableTenant() (§6.18), the plan's agent limit hook, resolveDialledNumber() (§6.29)
   tenant/agent-request.js      # which agent a request is for: ?agentId= → requireAgent(), agentScope() (§6.27)
@@ -1693,9 +1694,10 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
     Ireland (and the EU) require it… your choice"), recording on but not mentioned, recording
     mentioned while off. Warnings are never refusals.
   - A new agent copies both settings from the agent it starts from (§6.27).
-  - `recordCalls` records nothing yet (no telephony, browser calls are never recorded); it drives
-    the greeting today and is the switch the phone transport will obey. WHERE recordings are
-    stored is the backend's decision (handoff doc).
+  - `recordCalls` drives the greeting AND the recording: a PHONE call whose agent has it on is recorded (§6.30 —
+    stereo WAV, caller left / agent right); browser calls are never recorded. What callers are told and what
+    happens are one setting. WHERE recordings are finally stored is the backend's decision (handoff doc);
+    the engine keeps them in a local stand-in store meanwhile.
 - **`respond()` gained two OBSERVATION-only additions:** `onStage(stage, data)` ("retrieved",
   "first_token") and a returned `timings` object (+ `searchTrigger`). They change nothing about a
   turn, a throwing callback is swallowed, and the chat route ignores them.
@@ -1922,9 +1924,9 @@ Real calls with the natural voice on the free Gemini tier: STT 0.2–0.4 s, retr
 LLM (Groq), Kokoro at 8 threads (now the default), the fast voice tier for latency-critical lines,
 the 0.5 s VAD window.
 
-**Not built:** call recording itself (`recording_url` stays null; the per-agent `recordCalls` switch and the greeting's
-notice exist); Twilio `mark` events for exact playback (§6.30); a local Urdu recogniser. (The Twilio transport and webhook
-are built — §6.30.)
+**Not built:** Twilio `mark` events for exact playback (§6.30); a local Urdu recogniser; consent capture and
+retention rules for recordings (the backend's, §6.30). (The Twilio transport, webhook and phone call recording are
+built — §6.30.)
 
 ### 6.25 Taking a request — appointments, call-backs and orders (the collect domain)
 
@@ -2361,23 +2363,72 @@ is assumed; per-business subaccounts would make these per-tenant values the back
   a summary first (`<Number url=…whisper>`); when they do not pick up it asks `/transfer`, which rings the next — the state (the
   list, the position, the summary) travels in a SIGNED token in the URLs (`signed-token.js`, kind-tagged, 10 min), so no server
   memory is involved and a forged token rings nobody. `connected: true` means the call has LEFT the agent. If Twilio refuses or is
-  unreachable the call stays with the agent, which says nobody is available (§6.26). **Known limit:** once a transfer is placed the
-  call cannot come back to the agent: when nobody answers, the caller hears a fixed English line ("nobody is available… please call
-  again later") and the call ends, so no call-back can be taken in that case. Twilio's voice has no Urdu, so the summary and that
-  line are English.
-- **Not built / not decided:** recording (the per-agent switch and the greeting's notice exist; where audio lives is the backend's);
-  DTMF; marks for exact playback (the estimate is used); VAD and barge-in thresholds tuned on REAL phone audio; capacity refusals
-  are silent (a full gateway closes the socket).
+  unreachable the call stays with the agent, which says nobody is available (§6.26).
+- **A transfer nobody answers comes BACK to the agent** (`continueTransfer` in `twilio-webhook.js`). When the last person does not
+  pick up, the webhook answers with a new `<Connect><Stream>` on the same Twilio call, carrying a fresh single-use ticket with a
+  RESUME claim (`rc` conversation, `rk` the call it continues, `rg` the language last spoken, `rn` how many times so far). The
+  way back travels in the same SIGNED transfer token as the contact list (`r`), put there by the session
+  (`CallSession.resumeContext()` → `transferInOrder(…, { resume })`). The gateway starts a normal `CallSession` with
+  `resume`: it opens a second `call_logs` row on the SAME conversation (`CallRecorder.open({ conversationId })`, only if that
+  conversation belongs to the same tenant and agent — a ticket claim is not trusted past the tenant boundary), does NOT greet
+  again, clears the conversation's "passed on" state (`brain.handoffFailed`), logs `call.resumed`, and says
+  `voiceLine("handoff_failed")` in the language the call was in — so the caller can leave details for a call-back. Rules:
+  it comes back only if the gateway has room (checked first, below); at most `MAX_RESUMES` = 2 times per call (a caller who
+  keeps asking for a person nobody answers hears the old fixed English line and the call ends: reason `resume_limit` in the
+  log); a transfer set up without a way back, or one that was answered, behaves as before. Twilio's voice has no Urdu, so the
+  summary read to the person who picks up, and the fixed line when it cannot come back, are English.
+- **A full or stopped gateway is told to the caller out loud** (`telephony/gateway-check.js`). Before handing a call over, the
+  webhook asks the gateway's `GET /health?tenant=ID` (1.5 s limit; the same public address the stream uses): not ready →
+  "trouble taking your call"; every line taken → `voiceLine("busy")` ("all of our lines are busy… try again in a few
+  minutes"); this business at its own concurrent-call limit (`tenantAvailable: false` — one boolean per asked tenant, never a
+  per-tenant list, the endpoint is unauthenticated) → the same busy line; no answer → "trouble". No ticket is issued and no
+  stream opened. It is a snapshot courtesy, not the guard: the gateway still enforces every limit when the stream opens (a call
+  that slips in between is closed silently, as before). Said in English by Twilio's voice (it has no Urdu).
+- **The VAD gives back the start of the first word** (`speech/vad.js`, `config.js VAD.prerollMs` = 300). The detector reports an
+  utterance only after it has heard enough speech to believe it, so its segment starts ~200 ms after the caller began when the
+  caller was already talking at the first sample ("What are your opening hours?" reached the recogniser as "your opening
+  hours."). `VoiceActivity` keeps the last `maxSpeechSeconds + 10` s of audio by absolute position (`SampleHistory`) and
+  prepends up to 300 ms before the segment's own `start` — never reaching into the previous utterance, never inventing audio
+  before the stream began. `durationMs` still means the speech itself (the "unheard" check uses it); `prerollMs` is reported
+  beside it. Measured with real models on phone-quality audio, no lead-in: transcript "What are your opening hours?" and "How
+  much does the pro plan cost per month?" complete (before: first words missing). **Still untuned for real lines:** the
+  threshold (0.5), the 0.5 s end-of-turn silence, the 350 ms barge-in and the 300 ms pre-roll were chosen on synthetic speech;
+  carrier noise and soft speakers are a listening job with real recordings (which the recording below now makes possible).
+- **Phone calls are RECORDED when the agent's recording switch is on** (`recordCalls`; `voice/call-audio.js`,
+  `standins/recordings.js`). Only a phone call (`transportName === "twilio"`), only with storage wired in
+  (`saveRecording`, passed by the gateway); a browser call is never recorded. `CallAudioRecorder` builds one stereo 8 kHz 16-bit
+  WAV on one timeline: the caller on the LEFT (the stream is continuous, so its samples are appended; taking every second
+  sample of the 16 kHz up-sampled stream returns the original 8 kHz exactly — true only for a source already limited to 4 kHz,
+  which is why this is phone-only), the agent on the RIGHT, placed where the caller hears it (after what is queued, like
+  `audioPlaysUntil`), and cut at a barge-in (`cut()`) so the file holds what was HEARD. At `end()` the WAV is handed to
+  storage and the call's `recording_url` is set (`CallRecorder.close({ recordingUrl })`); events `recording.started` /
+  `recording.finished`. A storage failure is logged and leaves the call without a recording — never a failed hang-up. A call that
+  was transferred is recorded only until the hand-off; a resumed call is a new `call_logs` row with its own recording. The
+  stand-in store keeps `<RECORDINGS_DIR>/<tenantId>/<callId>.wav` (default `./recordings`, gitignored, files 0600) and
+  `recording_url` = `file:<tenantId>/<callId>.wav`; paths come only from a validated tenant id and call id. It works only while the
+  gateway and the app share a folder (one machine). API: `GET /api/voice/calls/:id/recording?tenantId=` (audio/wav) and
+  `DELETE` (file + pointer) — internal-key guarded, scoped by tenant AND call id, DELETE not blocked by a suspension;
+  call lists/details report `hasRecording`, never the raw pointer; the console's call history plays and deletes it.
+  **Not decided here (the backend's, handoff B11c):** where recordings really live, retention, who may listen, consent capture
+  for jurisdictions that need all-party consent, region of storage. The greeting already says "recorded" exactly while the
+  switch is on.
+- **Not built / not decided:** DTMF; `mark` events for exact playback (the estimate is used); VAD, barge-in and pre-roll values
+  tuned on REAL phone audio; capacity refusals that happen AFTER the stream opened (a race with the check above) are still
+  silent closes; a recording retention job.
 
 **Verified:** `npm test` (the signature against Twilio's published example, tokens, TwiML escaping, every refusal, the transfer chain,
 the REST call, the verified-request reader, the transport's wire format and transfer, the session's ordered transfer), and
 `npm run twilio:smoke` — a fake Twilio against the REAL app and gateway and the real speech models: a wrong or missing signature
 is refused, an unknown number is told "not in service", a signed call to a real number is answered with a stream, the greeting
 arrives as 20 ms μ-law frames, a spoken question sent as 8 kHz μ-law is understood by the recogniser and answered out loud, and
-the call is recorded as transport `twilio` with the numbers and the Twilio call id. **Not verified:** any of it through Twilio's
-real network (no account in the build sandbox) — number configuration, the stream's real timing, carrier audio quality, a real
-transfer. The first real calls are where the VAD/barge-in thresholds get tuned: a speech onset that starts at the very first
-sample was clipped by the VAD in the smoke test (a natural lead-in is fine).
+the call is recorded as transport `twilio` with the numbers and the Twilio call id. The smoke test now also covers the four
+limitation fixes above, with the caller speaking from the very first sample: the first word is heard, the call is recorded
+(stereo, sound on both sides, fetched and deleted through the API, another tenant gets 404), a transfer nobody answers comes
+back to the agent in the same conversation without a second greeting, and a business at its call limit hears "all of our lines
+are busy". Unit tests: the pre-roll over a fake detector, the call audio timeline, the recording store, the resume ticket and
+webhook, the session's resume and recording behaviour. **Not verified:** any of it through Twilio's real network (no account in
+the build sandbox) — number configuration, the stream's real timing, carrier audio quality, a real transfer, the real
+`<Connect><Stream>` after a `<Dial>`. The first real calls are where the VAD/barge-in thresholds get tuned.
 
 
 ---
@@ -2437,7 +2488,8 @@ right language, with history persisted per tenant.
 | --- | --- |
 | RAG retrieval | ⚠️ hybrid — vector search + keyword RRF re-rank + heading diversity (§6.3). Measured on the REAL pipeline against the full `test-docs/` corpus with `npm run eval:real` (saved baseline, 53 standalone questions): **hit@1 74% / hit@3 81% overall** — 92% on direct factual questions, 64% on loosely-phrased ones, 100% on cross-language, **0% on generic "tell me about your company" openers**; off-topic rejection 88% (one leak). Full table in §6.3. (`eval:retrieval`'s old "100% hit@1, MRR 1.000" measured a fixture-only, non-hybrid retriever and is not what this row reports.) |
 | Business profile ("who are you?") | ✅ an `ABOUT THIS BUSINESS` block (name, purpose, hours, and the owner-approved AI summary of the documents they chose — general facts, never prices) is always in the prompt, so the agent answers who-we-are without retrieval; it does not enumerate products it was never given (§6.20). Generic openers are recognised by rule in English, Urdu and Roman Urdu (word files in `lib/phrases`, 15/15 on the eval set) and searched as "<business>: <question>"; ⚠️ the retrieval gain is NOT measured yet (needs embeddings) |
-| **Call greeting** | ✅ per agent: the owner's own words or a built-in greeting that says the caller is speaking with an AI assistant, and that the call is recorded only while the agent's recording switch is on; warnings (never refusals) when the owner's text leaves a notice out (§6.24). Recording itself is not built |
+| **Call greeting** | ✅ per agent: the owner's own words or a built-in greeting that says the caller is speaking with an AI assistant, and that the call is recorded only while the agent's recording switch is on; warnings (never refusals) when the owner's text leaves a notice out (§6.24) |
+| **Call recording** | ✅ a PHONE call of an agent with recording on is saved as a stereo WAV (caller left, agent right, what was heard), played and deleted from the console's call history; browser calls are never recorded (§6.30). ⚠️ stored in a local stand-in folder — where recordings really live, retention and consent are the backend's (handoff B11c) |
 | Keyword half | ✅ language-aware (`english`/`simple` per document — Urdu script is `simple`, precomputed `tsvector`) — ⚠️ but it ANDs every query term, so sentence-length questions get almost no keyword signal in any language (§6.3) |
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
@@ -2469,7 +2521,7 @@ right language, with history persisted per tenant.
 1. **Telephony is built but untried on a real line.** Voice calls work from the browser (§6.24) and through
    Twilio (§6.30: webhook, signature check, phone transport, ordered transfer), proven against a simulated Twilio with the
    real app, gateway and speech models — never through Twilio's network (no account in the build sandbox). VAD, barge-in and
-   latency on real phone audio are untuned; a transfer nobody answers cannot return to the agent. **Voice latency is ~3–4 s to first word on a good free-tier
+   latency on real phone audio are untuned (the first-word clipping is fixed by a pre-roll, the rest needs recorded real calls); a transfer nobody answers now returns to the agent (§6.30), but never against Twilio's real network. **Voice latency is ~3–4 s to first word on a good free-tier
    call and up to ~10 s on a bad one**, because Gemini's free tier takes 3.5–10 s to its first
    token (§6.24). The ~800 ms target needs a fast LLM (Groq — built, needs a key) and probably
    the fast voice tier.
@@ -2510,7 +2562,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 732 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 765 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2689,7 +2741,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 732 unit tests: the Twilio phone path (signature, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 765 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 #   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
@@ -2755,7 +2807,7 @@ stale.
   instead of failing the import.
 - Phone calls (§6.30, optional): `TWILIO_AUTH_TOKEN` (verifies every webhook, places transfers), `TWILIO_ACCOUNT_SID`
   (transfers), `TWILIO_WEBHOOK_BASE_URL` (the public https origin of this app; falls back to `PUBLIC_APP_URL`) and
-  `VOICE_GATEWAY_PUBLIC_URL` (required for phone calls: Twilio opens the stream at `wss://…/twilio`).
+  `VOICE_GATEWAY_PUBLIC_URL` (required for phone calls: Twilio opens the stream at `wss://…/twilio`). `RECORDINGS_DIR` (where phone-call recordings are kept by the stand-in storage, default `./recordings`; the gateway and the app must share it, §6.30).
 - Voice (§6.24, all optional): `VOICE_GATEWAY_PORT` (3001), `VOICE_GATEWAY_PUBLIC_URL` (when the
   browser reaches the gateway somewhere other than this host on that port), `VOICE_SESSION_SECRET`
   (signs session tickets — both processes must share it; falls back to `INTERNAL_API_KEY`),

@@ -139,7 +139,7 @@ Engine errors are `{ "error": "<message translated into the reader's locale>" }`
   | `endCallDelaySeconds` | integer 2–10, default `3` | seconds of quiet after the agent's last words before the call ends; any speech from the caller in that time keeps it open |
   | `profileSummary` | string ≤1200 or null | the **business summary**: written by the engine's AI from documents the owner chose, then edited and approved by the owner (CLAUDE.md §6.20). Always in this agent's prompt. General facts only — a price is refused on save (`validation:summary.*`). Draft: `POST /api/agent-config/summary?tenantId&agentId { sourceIds ≤10, language }` → `{ draft, sources, skipped, removed }` (saves nothing; only documents this agent may use) |
   | `profileSummarySources` | `[{ id, title, hash }]` | the documents it came from, recorded by the engine when the dashboard saves `profileSummarySourceIds` (never taken from a client). `GET /api/agent-config` adds `summaryStatus { stale, changed[], missing[] }` — show it, so the owner summarises again when a document changed |
-  | `recordCalls` | boolean | the owner switched **call recording** on for this agent. Today it only changes the built-in greeting; when Twilio exists the transport records by it, and **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
+  | `recordCalls` | boolean | the owner switched **call recording** on for this agent. It changes the built-in greeting's wording AND makes the engine record that agent's PHONE calls (B11c); **you store the recordings** (where, how long, deletion on request — your decision, UK/EU region for UK/Ireland callers); the engine keeps only the link in `call_logs.recording_url` |
   | `collect`, `collectVersion` | see B3 | |
 
 - **Backend provides:** store one document per agent; make them readable by the engine:
@@ -407,6 +407,9 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   ticket, or the polite "not in service" line and a hang-up; `transports/twilio.js` carries the audio (8 kHz μ-law ⇄ the
   speech models' 16 kHz), barge-in and the transfer (B11b). Verified against a simulated Twilio with the real app, gateway
   and speech models; **not yet through Twilio's real network.**
+  Before handing a call over, the webhook asks the voice gateway for room (`GET /health?tenant=`): a full or stopped gateway,
+  or a business at its own concurrent-call limit, gets a spoken "all of our lines are busy / trouble taking your call" and a
+  hang-up instead of a silent drop.
 - **What you set up, per number, in Twilio:** open the number → "A call comes in" → Webhook, HTTP POST →
   `<engine's public https address>/api/telephony/twilio/voice`. The console's Numbers tab (and
   `GET /api/telephony/twilio/setup`) shows the exact address and which environment settings are still missing. Buying a
@@ -416,8 +419,24 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   SUBACCOUNT per business, the token and sid become per-tenant values you hand over — tell me and the lookup answer grows
   two fields.
 - **Open:** who owns the Twilio account and the purchase API calls (proposal: the backend, since it bills); where call
-  recordings are stored (the per-agent `recordCalls` switch exists, nothing is recorded); whether the engine also needs
+  recordings are stored (the engine records phone calls into a local stand-in folder, B11c); whether the engine also needs
   `GET /internal/tenants/{id}/numbers` for reports.
+
+### B11c — Call recordings (the storage seam)
+
+- **What:** a phone call of an agent whose `recordCalls` is on is recorded by the engine: ONE stereo WAV, 8 kHz 16-bit, caller on
+  the left channel and agent on the right, holding what was actually heard (the agent's speech after a barge-in is cut). Browser
+  test calls are never recorded. A call that is transferred is recorded only until the hand-off; a call that comes back from an
+  unanswered transfer is a second call record with its own recording.
+- **Stood in here:** `src/lib/standins/recordings.js` keeps `<RECORDINGS_DIR>/<tenantId>/<callId>.wav` on the engine's disk and
+  sets `call_logs.recording_url` to `file:<tenantId>/<callId>.wav`. The engine's `GET`/`DELETE`
+  `/api/voice/calls/:id/recording?tenantId=` read and delete it (internal key). The gateway writes and the app reads, so they
+  must share a folder — fine on one machine, not in production.
+- **What you decide and build:** where audio lives (object storage, region — UK/EU for UK/Ireland callers), how long it is kept
+  and the deletion job, who may listen, and what consent a jurisdiction needs beyond the greeting's disclosure (the engine says
+  "this call is recorded" exactly while the switch is on; it cannot capture consent). Replacing the stand-in = one file
+  (`saveRecording` / `readRecording` / `deleteRecording`) plus `recording_url` holding your URL; the route then redirects to it.
+- **Not built in the engine:** retention/expiry, consent capture, transcription search, redaction.
 
 ### B11b — Passing a call to a person (the transfer seam)
 
@@ -428,8 +447,10 @@ API. We revisit this only if a concrete need appears (for example businesses bri
 - **The real phone transport (BUILT, §6.30)** hands the WHOLE ordered list to Twilio once
   (`transport.transferInOrder(contacts, { summary })`): Twilio rings the first person for 20 s, reading them the summary
   first, and asks the engine's `/api/telephony/twilio/transfer` for the next when they do not pick up. The browser
-  console keeps the per-person `transfer(contact, …)` simulation. **Known limit:** once placed, the call cannot return to
-  the agent — if nobody answers, the caller hears a fixed English line and the call ends (no call-back can be taken).
+  console keeps the per-person `transfer(contact, …)` simulation. **If nobody answers, the call comes BACK to the agent**
+  (a new media stream on the same Twilio call; same conversation, no second greeting, "nobody is available — I can take your
+  details" and the call-back flow); at most twice per call, and only if the voice gateway has room — otherwise the caller
+  hears a fixed English line and the call ends. Nothing for you to build; it matters only if you replace the webhook.
 - **What the backend provides:** storing the `escalation` document (B2), and — if it owns Twilio numbers (B11) — the
   caller-id / number to dial out from. The engine never logs or returns the contacts' numbers except to the transport.
 - **Events:** `handoff.requested`, `handoff.unavailable` (B7).
@@ -487,7 +508,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 732, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 765, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.
@@ -523,7 +544,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 2. Real outbox + signed event sender (B7).
 3. Usage events (B8) once the shape is agreed.
 4. The first REAL phone call (the webhook and transport are built, B11): tune the VAD / barge-in / latency on real
-   audio; recording calls when `recordCalls` is on (the greeting's disclosure wording is done; where audio is stored is yours).
+   audio (recordings now make that possible); the recording storage is yours (B11c).
 5. Listen to real calls on a real laptop after the pause and speech-gap fixes (measured here with real voices,
    not yet heard on a live call).
 6. Measure Urdu retrieval/answers (the eval baseline predates the language change) and tune latency.

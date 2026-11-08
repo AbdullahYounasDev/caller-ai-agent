@@ -3,6 +3,7 @@ import { SentenceChunker, chunkEnding } from "./sentences";
 import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, INTENTS, OUTCOMES } from "./intent";
 import { median } from "./recorder";
+import { CallAudioRecorder } from "./call-audio";
 import { BARGE_IN, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
@@ -64,6 +65,9 @@ export class CallSession {
    * @param {{numberId?: string|null, toNumber?: string|null, fromNumber?: string|null}|null} [args.line]
    *   the phone line the call came in on (§6.29): which of the business's numbers was dialled, and
    *   by whom — recorded on the call. null for a plain console call.
+   * @param {{conversationId: string, callId?: string|null, language?: string|null, count?: number}|null} [args.resume]
+   *   this call is the same phone call COMING BACK from a transfer nobody answered (§6.30): it carries on
+   *   the conversation, does not greet again, says nobody is available and can take a call-back
    * @param {"browser"|"twilio"} args.transportName
    * @param {object} args.transport            see above
    * @param {{forCall(call: {vocabulary?: string[]}): import("./speech/stt").Transcriber}} args.stt
@@ -73,12 +77,16 @@ export class CallSession {
    * @param {object} args.engineInfo           stored on the call row
    * @param {object} args.brain                { respond, getAgentConfig, invalidateAgentConfig }
    * @param {(args: object) => Promise<object>} args.openRecorder   CallRecorder.open
+   * @param {(args: {tenantId: string, callId: string, wav: Buffer}) => Promise<string|null>} [args.saveRecording]
+   *   keeps a finished call's audio and returns the reference to store on the call (standins/recordings.js).
+   *   Without it nothing is recorded. Used only for a PHONE call whose agent has recording switched on (§6.30).
    * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
    */
-  constructor({ tenantId, agentId = null, line = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, clock = {} }) {
+  constructor({ tenantId, agentId = null, line = null, resume = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, saveRecording = null, clock = {} }) {
     this.tenantId = tenantId;
     this.agentId = agentId;
     this.line = line;
+    this.resume = resume;
     this.transportName = transportName;
     this.transport = transport;
     this.stt = stt;
@@ -87,6 +95,9 @@ export class CallSession {
     this.engineInfo = engineInfo;
     this.brain = brain;
     this.openRecorder = openRecorder;
+    this.saveRecording = saveRecording;
+    /** The call's audio while it is being recorded (voice/call-audio.js); null when this call is not recorded. */
+    this.audio = null;
     this.now = clock.now ?? (() => performance.now());
     this.setTimer = clock.setTimeout ?? setTimeout;
     this.clearTimer = clock.clearTimeout ?? clearTimeout;
@@ -165,9 +176,11 @@ export class CallSession {
         fromNumber: this.line?.fromNumber ?? null,
         toNumber: this.line?.toNumber ?? null,
         phoneNumberId: this.line?.numberId ?? null,
+        conversationId: this.resume?.conversationId ?? null,
         engine: this.callEngine,
       });
       this.vad = this.createVad();
+      if (this.shouldRecordAudio()) this.audio = new CallAudioRecorder({ now: this.now });
     } catch (err) {
       console.error("[voice] call setup failed:", err);
       this.transport.notify(SERVER.ERROR, { code: ERROR_CODES.INTERNAL, message: "Call setup failed" });
@@ -184,6 +197,7 @@ export class CallSession {
     this.log("call.started", {
       transport: this.transportName,
       ...(this.line?.toNumber ? { toNumber: this.line.toNumber } : {}),
+      ...(this.resume ? { resumedFromCallId: this.resume.callId ?? null, resumes: this.resume.count ?? 1 } : {}),
       replyLanguage: this.config.replyLanguage,
       stt: this.transcriber.id,
     });
@@ -194,6 +208,7 @@ export class CallSession {
       this.log("stt.urdu_unavailable", { stt: this.transcriber.id });
     }
 
+    if (this.audio) this.log("recording.started", { reason: "the agent's recording switch is on" });
     this.timers.max = this.setTimer(() => this.end(END_REASONS.MAX_DURATION), LIMITS.maxCallMs);
     this.armIdleTimer();
 
@@ -201,7 +216,7 @@ export class CallSession {
     // hears someone pick up immediately. Its voice is loaded first (a no-op for the
     // default voices, which the gateway loads at start-up); the others load in the
     // background while the greeting plays.
-    const greeting = buildVoiceGreeting(this.config);
+    const greeting = this.resume ? await this.resumeLine() : buildVoiceGreeting(this.config);
     await this.tts.prepare([this.voices[greeting.language]]).catch(() => {});
     void this.tts.prepare(Object.values(this.voices)).catch(() => {});
     this.recorder.agentLine(greeting.text);
@@ -216,7 +231,7 @@ export class CallSession {
     for (const piece of [...pieces.push(greeting.text), ...pieces.flush()]) {
       await this.speak(turn, piece, { language: greeting.language, cache: true });
     }
-    this.log("greeting.spoken", { ms: turn.firstAudioSynthMs, language: greeting.language });
+    this.log(this.resume ? "resume.spoken" : "greeting.spoken", { ms: turn.firstAudioSynthMs, language: greeting.language });
     this.currentTurn = null;
     this.settleState();
 
@@ -228,6 +243,25 @@ export class CallSession {
         .catch(() => {});
     }
     return true;
+  }
+
+  /**
+   * What a call that has come back from an unanswered transfer says instead of a greeting: nobody is
+   * available and the details can be taken for a call-back (the same fixed line as the other transports).
+   * The conversation's handoff state is cleared first — it still said "passed on" — so the agent
+   * carries on as itself (and can pass the caller on again, up to the webhook's limit).
+   *
+   * @returns {Promise<{text: string, language: "en"|"ur"}>}
+   */
+  async resumeLine() {
+    this.log("call.resumed", { conversationId: this.resume.conversationId, previousCallId: this.resume.callId ?? null, resumes: this.resume.count ?? 1 });
+    try {
+      await this.brain.handoffFailed?.({ tenantId: this.tenantId, conversationId: this.recorder.conversationId });
+    } catch (err) {
+      console.error("[voice] could not reset the handoff state on resume:", err);
+    }
+    const language = this.resume.language === "ur" ? "ur" : this.resume.language === "en" ? "en" : this.config.replyLanguage === "ur" ? "ur" : "en";
+    return { text: voiceLine("handoff_failed", language), language };
   }
 
   /**
@@ -267,6 +301,30 @@ export class CallSession {
       turnCount: this.turnIndex,
       interruptions: this.interruptions,
       responseTimes: this.responseTimes,
+      recordingUrl: this.keepRecording(),
+    });
+  }
+
+  /**
+   * Is THIS call's audio kept? Only a phone call (the console's browser calls are never recorded) whose agent
+   * has the recording switch on — the switch the built-in greeting's "this call is recorded" reads, so what
+   * callers are told and what happens are one setting (§6.24) — and only when storage is wired in.
+   */
+  shouldRecordAudio() {
+    return Boolean(this.saveRecording && this.transportName === "twilio" && this.config?.recordCalls === true);
+  }
+
+  /** Stop recording and hand the audio to storage. @returns {Promise<string|null>} the reference for the call row */
+  keepRecording() {
+    const audio = this.audio;
+    this.audio = null;
+    if (!audio) return Promise.resolve(null);
+    const wav = audio.toWav();
+    if (!wav) return Promise.resolve(null);
+    this.log("recording.finished", { seconds: Math.round(audio.seconds()), bytes: wav.length });
+    return Promise.resolve(this.saveRecording({ tenantId: this.tenantId, callId: this.recorder.callId, wav })).catch((err) => {
+      console.error("[voice] could not keep the recording:", err?.message ?? err);
+      return null;
     });
   }
 
@@ -283,6 +341,7 @@ export class CallSession {
    */
   onAudio(samples) {
     if (this.ended || !this.vad) return;
+    this.audio?.caller(samples);
     let events;
     try {
       events = this.vad.push(samples);
@@ -784,7 +843,7 @@ export class CallSession {
       this.log("handoff.attempt", { turn, contactIds: contacts.map((c) => c.id) });
       let outcome;
       try {
-        outcome = await this.transport.transferInOrder(contacts, { summary: handoff.summary ?? "", reason: handoff.reason ?? null, callId: this.recorder?.callId ?? null });
+        outcome = await this.transport.transferInOrder(contacts, { summary: handoff.summary ?? "", reason: handoff.reason ?? null, callId: this.recorder?.callId ?? null, resume: this.resumeContext() });
       } catch (err) {
         console.error("[voice] transfer failed:", err);
         outcome = { connected: false, reason: "failed" };
@@ -836,6 +895,23 @@ export class CallSession {
     const language = this.lastLanguage ?? "en";
     await this.speakFixed(voiceLine("handoff_failed", language), language);
     this.settleState();
+  }
+
+  /**
+   * Where this call comes back to if a transfer nobody answers sends it home (twilio-webhook.js): the
+   * conversation to carry on and what a resumed call needs to sound the same. Plain values — it travels
+   * in a signed token.
+   */
+  resumeContext() {
+    return {
+      tenantId: this.tenantId,
+      agentId: this.agentId,
+      line: this.line,
+      conversationId: this.recorder.conversationId,
+      callId: this.recorder.callId,
+      language: this.lastLanguage ?? (this.config.replyLanguage === "ur" ? "ur" : "en"),
+      count: this.resume?.count ?? 0,
+    };
   }
 
   /** Speak one of the fixed lines (prompt.js voiceLine) outside any turn: no model, cached audio. */
@@ -1016,6 +1092,7 @@ export class CallSession {
     this.interruptions++;
     this.clientPlaying = false;
     this.audioPlaysUntil = null;
+    this.audio?.cut();
     this.transport.clear();
     this.log("playback.interrupted", { turn: turn?.index ?? null, afterSpeechMs: speechMs, spokenSentences: turn?.spoken.length ?? 0 });
     this.setState(CALL_STATES.HEARING);
@@ -1044,6 +1121,7 @@ export class CallSession {
     const durationMs = (audio.samples.length / audio.sampleRate) * 1000;
     const startsAt = Math.max(this.now(), this.audioPlaysUntil ?? 0);
     this.audioPlaysUntil = startsAt + durationMs;
+    this.audio?.agent(audio.samples, audio.sampleRate);
     this.transport.audio(audio.samples, audio.sampleRate);
 
     this.clearTimer(this.timers.settle);
