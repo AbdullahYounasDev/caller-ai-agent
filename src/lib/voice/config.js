@@ -58,6 +58,68 @@ export const BARGE_IN = {
   minSpeechMs: 350,
 };
 
+/**
+ * THE ECHO GUARD (echo-guard.js): tells the agent's own voice, coming back through the caller's speaker and
+ * microphone, from a person talking. The numbers are the matching rules; the first set was chosen on synthetic
+ * loopback (npm run voice:echo) — real speakerphones are a listening job, like every number in this file.
+ * Every doubt answers "not an echo" (fail open), so a wrong value here can only bring back today's behaviour.
+ */
+export const ECHO_GUARD = {
+  /** One envelope step. */
+  frameMs: 10,
+  /** The loudness floor (rms, full scale = 1): −50 dBFS. Quieter than this is the room, not speech. */
+  floor: 0.003,
+  /** How far behind the agent's audio the echo may arrive: speaker + room + network + the client's buffer. */
+  minLagMs: -60,
+  maxLagMs: 900,
+  /** Least frames compared (10 ms each): too few and any two signals can look alike. */
+  minWindowFrames: 30,
+  /** The agent's audio must be audible for at least this many frames (10 ms each) of the window, at the lag asked about. */
+  minReferenceFrames: 20,
+  /** A flat envelope (steady noise, a held tone) carries no pattern to match. */
+  minVariance: 0.05,
+  /** A window this quiet (mean rms, −44 dBFS) with nothing moving holds no speech at all. */
+  quietRms: 0.01,
+  /** STEP 1, learning the echo path: a long window (frames), searched over every delay, must match this well. */
+  minLearnFrames: 60,
+  /** …and the agent must have been audible for this many frames (10 ms each) of it, at the delay tried. */
+  learnMinActiveFrames: 60,
+  learnWindowFrames: 250,
+  learnCorrelation: 0.85,
+  relearnEveryFrames: 30,
+  /** The path is also learned while the agent speaks (and for this many frames after its audio ended). */
+  learnWhileRecentFrames: 150,
+  /** An echo path not confirmed for this long (frames) is forgotten — the phone was moved, headphones plugged in. */
+  forgetAfterFrames: 2000,
+  /** STEP 2, asking at the learned delay (± this many frames): a modest match is strong evidence with nothing to search. */
+  lagToleranceFrames: 3,
+  /** Pearson correlation of the two log-loudness patterns needed to call it an echo, at the known delay. */
+  minCorrelation: 0.55,
+  /** The microphone may be at most this many times louder than the echo explains, and only for this share of its energy. */
+  residualMargin: 1.6,
+  maxResidual: 0.35,
+  /** The echo's tail after the agent stopped (end of a sentence): how far back to look for agent audio, how much
+   *  of it must have been there, and how much a microphone may RISE (ratio of the last 200 ms to the first) and
+   *  still be a decaying tail. */
+  tailLookBackMs: 800,
+  tailMinFrames: 5,
+  tailRisingRatio: 1.2,
+  /** The echo's size may be up to this many times the size learned (+8 dB) before it is taken for a louder sound. */
+  gainDrift: 2.5,
+  /** An echo is quieter than the source (the microphone may amplify: AGC) — above this the match is a coincidence. */
+  maxGain: 3,
+  /** A whole utterance is judged in windows of this many frames (1.5 s), half-overlapping; all must be echo to drop it. */
+  spanWindowFrames: 150,
+  /** …and a sound heard before the guard has had enough of the agent's audio to look for an echo path at all (the
+   *  first second or so of the call's first words) may wait this long: either it is judged an echo, or the guard
+   *  finds there is none (headphones) and the agent is interrupted as before. */
+  coldGraceMs: 1500,
+  /** While the agent is between two sentences (nothing to compare with yet) a sound may wait this long to become decidable. */
+  undecidedGraceMs: 400,
+  /** At a barge-in the question covers this much of the latest speech. */
+  bargeWindowMs: 600,
+};
+
 export const LIMITS = {
   /** Hard ceiling on one call. Protects the shared model quota from a forgotten tab. */
   maxCallMs: 15 * 60_000,
@@ -199,6 +261,18 @@ export const TTS = {
  */
 export function fastFirstChunkEnabled(env = process.env) {
   return /^(1|true|on|yes)$/i.test(String(env.VOICE_FAST_FIRST_CHUNK ?? "").trim());
+}
+
+/**
+ * THE ECHO GUARD is ON unless VOICE_ECHO_GUARD is 0, false, off or no. Unlike the fast start it can be on by
+ * default because its failure mode is measured and one-sided: it only ever answers "the agent's own voice"
+ * when the microphone provably follows what the agent just played, every doubt keeps today's behaviour, and
+ * with headphones it does nothing (npm run voice:echo). The switch exists for the day a real room says otherwise.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ */
+export function echoGuardEnabled(env = process.env) {
+  return !/^(0|false|off|no)$/i.test(String(env.VOICE_ECHO_GUARD ?? "").trim());
 }
 
 /** The gateway's own port. The browser connects to it directly (Next.js route

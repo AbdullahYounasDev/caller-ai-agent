@@ -5,6 +5,7 @@ import { CallSession } from "@/lib/voice/session";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "@/lib/voice/protocol";
 import { BARGE_IN, SILENCE, TTS } from "@/lib/voice/config";
 import { END_DELAY_SECONDS } from "@/lib/voice/closing";
+import { EchoGuard } from "@/lib/voice/echo-guard";
 
 const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
 
@@ -14,7 +15,7 @@ const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, resume, transportName = "browser", saveRecording, synthDelayMs = 0, synthMs = 7, speechMs, fastFirstChunk = false, installedVoices = null, synthMsFor = null } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, resume, transportName = "browser", saveRecording, synthDelayMs = 0, synthMs = 7, speechMs, fastFirstChunk = false, installedVoices = null, synthMsFor = null, echoGuard = false } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -132,6 +133,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, transf
     transportName,
     saveRecording,
     fastFirstChunk,
+    echoGuard,
     transport,
     stt,
     tts,
@@ -1510,5 +1512,232 @@ describe("the fast start: the first piece of a reply in the fast voice", () => {
     await askOnce(h);
     assert.ok(h.recorded.events.some((e) => e.type === "tts.failed"));
     assert.equal(h.sent.audio.length > 3, true, "the second piece was still spoken after the greeting");
+  });
+});
+
+describe("the echo guard in the call: the agent's own voice is not the caller", () => {
+  /** A stand-in for echo-guard.js with the answers the test dictates; records what the session fed it. */
+  function fakeEcho({ own = false, span = false } = {}) {
+    const fake = {
+      own,
+      span,
+      position: 32000,
+      references: [],
+      callerChunks: 0,
+      cuts: [],
+      starts: 0,
+      checks: 0,
+      spans: [],
+      pushCaller() { fake.callerChunks++; },
+      pushReference(samples, sampleRate, playsAtMs) { fake.references.push({ n: samples.length, sampleRate, playsAtMs }); },
+      cutReference(atMs) { fake.cuts.push(atMs); },
+      speechStarted() { fake.starts++; },
+      bargeCheck() { fake.checks++; return { own: fake.own, verdict: { echo: fake.own, reason: fake.own ? "echo" : "no_match", correlation: 0.9, lagMs: 300 } }; },
+      assessSpan(from, to) { fake.spans.push([from, to]); return { echo: fake.span, windows: 1, reason: "echo" }; },
+    };
+    return fake;
+  }
+
+  /** The reply "We open at nine every weekday." is being spoken, with more on the way. */
+  async function talkingAgent(extra = {}) {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      transcripts: ["What are your hours?"],
+      replies: [
+        async ({ onChunk }) => {
+          onChunk("We open at nine every weekday. ");
+          await gate;
+          onChunk("We close at six.");
+          return { reply: "We open at nine every weekday. We close at six.", sources: ["hours.md"], timings: {} };
+        },
+      ],
+      ...extra,
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    return { h, release };
+  }
+
+  test("OFF unless the gateway asks: no guard object, and the barge-in is exactly as before", async () => {
+    const { h, release } = await talkingAgent();
+    assert.equal(h.session.echo, null);
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    assert.equal(h.sent.clears, 1);
+    release();
+    await h.settle();
+    assert.ok(!h.recorded.events.some((e) => e.type === "echo.suppressed"));
+  });
+
+  test("ON builds a real guard", () => {
+    const h = harness({ echoGuard: true });
+    assert.ok(h.session.echo instanceof EchoGuard);
+  });
+
+  test("sound the guard says is the agent's own voice does NOT interrupt it, and is logged once", async () => {
+    const { h, release } = await talkingAgent({ echoGuard: true });
+    const echo = fakeEcho({ own: true });
+    h.session.echo = echo;
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    h.hear({ type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 42 });
+    h.hear({ type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 74 });
+    assert.equal(h.sent.clears, 0, "the agent keeps talking");
+    assert.equal(h.session.interruptions, 0);
+    assert.equal(echo.checks, 3, "asked at every ongoing report, so a person who joins in is caught at once");
+    assert.equal(h.recorded.events.filter((e) => e.type === "echo.suppressed").length, 1, "one log line per stretch of speech");
+    assert.equal(h.session.echoSuppressed, 1);
+    assert.equal(echo.starts, 1, "a new stretch of speech starts the guard's grace over");
+
+    // and the moment the sound stops matching the agent's voice, it IS an interruption
+    echo.own = false;
+    h.hear({ type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 106 });
+    assert.equal(h.sent.clears, 1);
+    assert.equal(h.session.interruptions, 1);
+    release();
+    await h.settle();
+  });
+
+  test("a short sound is not even asked about (below the barge-in length), and a quiet agent is not asked at all", async () => {
+    const { h, release } = await talkingAgent({ echoGuard: true });
+    const echo = fakeEcho({ own: true });
+    h.session.echo = echo;
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs - 100 });
+    assert.equal(echo.checks, 0);
+    release();
+    await h.settle();
+    h.advance(20_000); // everything has finished playing
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    assert.equal(echo.checks, 0, "the agent is not audible: nothing to take for an echo");
+  });
+
+  test("while the agent is only THINKING (no audio yet) there is no echo to take for the caller: the guard is not consulted", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      echoGuard: true,
+      transcripts: ["What are your hours?"],
+      replies: [
+        async () => {
+          await gate; // the model has said nothing yet
+          return { reply: "We open at nine.", sources: [], timings: {} };
+        },
+      ],
+    });
+    await h.session.start();
+    h.advance(30_000); // the greeting has long finished playing
+    const echo = fakeEcho({ own: true });
+    h.session.echo = echo;
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    assert.equal(echo.checks, 0, "nothing the agent played could be coming back");
+    assert.equal(h.sent.clears, 1, "the caller talking over a thinking agent is a barge-in, as before");
+    release();
+    await h.settle();
+  });
+
+  test("FAIL OPEN: a guard that throws leaves today's behaviour, the agent is interrupted", async () => {
+    const { h, release } = await talkingAgent({ echoGuard: true });
+    const echo = fakeEcho();
+    echo.bargeCheck = () => {
+      throw new Error("boom");
+    };
+    h.session.echo = echo;
+    const quiet = console.error;
+    console.error = () => {};
+    try {
+      h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    } finally {
+      console.error = quiet;
+    }
+    assert.equal(h.sent.clears, 1);
+    release();
+    await h.settle();
+  });
+
+  test("the guard is fed what the call hears and what the agent plays, and told when the agent is cut off", async () => {
+    const { h, release } = await talkingAgent({ echoGuard: true });
+    const echo = fakeEcho();
+    h.session.echo = echo;
+    h.session.onAudio(new Float32Array(512));
+    assert.ok(echo.callerChunks >= 1);
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    assert.equal(h.sent.clears, 1);
+    assert.equal(echo.cuts.length, 1, "a barge-in tells the guard the rest of the reply will not be heard");
+    release();
+    await h.settle();
+
+    // audio is placed on the guard's timeline when it is sent
+    const h2 = harness({ echoGuard: true });
+    const echo2 = fakeEcho();
+    const realStart = h2.session.start.bind(h2.session);
+    h2.session.start = async () => {
+      h2.session.echo = echo2; // swapped in before the greeting is spoken
+      return realStart();
+    };
+    await h2.session.start();
+    assert.ok(echo2.references.length >= 1, "the greeting was handed to the guard");
+    assert.equal(echo2.references[0].sampleRate, 22050);
+    assert.equal(typeof echo2.references[0].playsAtMs, "number");
+  });
+
+  test("an utterance that is the agent's own voice is not transcribed, not answered, and the call goes on listening", async () => {
+    const h = harness({ echoGuard: true, transcripts: ["we open at nine every weekday"] });
+    await h.session.start();
+    const echo = fakeEcho({ span: true });
+    h.session.echo = echo;
+    h.hear({ type: "start" }, { type: "utterance", samples: new Float32Array(16000), durationMs: 1000, startSample: 8000, endSample: 24000 });
+    await h.settle();
+    assert.deepEqual(echo.spans, [[8000, 24000]], "judged over exactly where the detector says it lay");
+    assert.equal(h.calls.length, 0, "no brain call");
+    assert.equal(h.recorded.turns.length, 0);
+    const dropped = h.recorded.events.filter((e) => e.type === "utterance.echo_dropped");
+    assert.equal(dropped.length, 1);
+    assert.equal(h.session.echoDropped, 1);
+    assert.notEqual(h.session.state, CALL_STATES.THINKING);
+  });
+
+  test("an utterance the guard does not recognise is answered as usual", async () => {
+    const h = harness({
+      echoGuard: true,
+      transcripts: ["What are your hours?"],
+      replies: [streams("We open at nine.")],
+    });
+    await h.session.start();
+    h.session.echo = fakeEcho({ span: false });
+    h.advance(5000);
+    h.hear({ type: "start" }, { type: "utterance", samples: new Float32Array(16000), durationMs: 1000, startSample: 8000, endSample: 24000 });
+    await h.settle();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.recorded.turns.length, 1);
+    assert.ok(!h.recorded.events.some((e) => e.type === "utterance.echo_dropped"));
+  });
+
+  test("FAIL OPEN: an utterance whose place in the stream is unknown is never dropped", async () => {
+    const h = harness({ echoGuard: true, transcripts: ["What are your hours?"], replies: [streams("We open at nine.")] });
+    await h.session.start();
+    const echo = fakeEcho({ span: true }); // would say "echo" if it were asked
+    h.session.echo = echo;
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance); // the shared fixture has no startSample/endSample
+    await h.settle();
+    assert.equal(echo.spans.length, 0, "not asked");
+    assert.equal(h.calls.length, 1);
+  });
+
+  test("the end-of-call log says how often the guard acted", async () => {
+    const { h, release } = await talkingAgent({ echoGuard: true });
+    h.session.echo = fakeEcho({ own: true });
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 10 });
+    release();
+    await h.settle();
+    await h.session.hangup();
+    const ended = h.recorded.events.find((e) => e.type === "call.ended");
+    assert.equal(ended.data.echoSuppressed, 1);
+    assert.equal(ended.data.echoDropped, 0);
   });
 });

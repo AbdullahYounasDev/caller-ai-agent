@@ -146,6 +146,8 @@ scripts/
   voice-gaps.mjs               # `npm run voice:gaps` — silence at every join inside a spoken reply, real voices, before vs now, ZERO quota (§6.24)
   voice-levels.mjs             # `npm run voice:levels` — re-measures how loud each English voice is and names the entries of SPEECH_LEVEL_DB that drifted, ZERO quota (§6.24 fast start)
   voice-listen.mjs             # `npm run voice:listen` — renders replies "natural voice" vs "fast start" into ONE wav each (./listen, gitignored) to judge by ear, ZERO quota (§6.24)
+  voice-echo.mjs               # `npm run voice:echo` — the echo guard against a simulated room: real voices, the real detector, false interruptions with and without the guard, ZERO quota (§6.24)
+  prompt-probe.mjs             # `npm run prompt:probe` — the REAL prompt against the REAL chat model, N samples per question, judged by prompt-judges.mjs: invented business description, over-refusal, the "First," opener. Spends chat quota (§6.24)
   twilio-smoke.mjs             # `npm run twilio:smoke` — a fake Twilio calls the REAL app + gateway: signature refusals, an answered call, μ-law audio both ways, the call record (§6.30)
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
@@ -235,6 +237,8 @@ src/lib/
     transports/twilio.js       # a PHONE call over Twilio Media Streams: μ-law frames, barge-in clear, ordered transfer (§6.30)
     protocol.js                # message types shared by gateway and browser
     config.js                  # every tunable: VAD silence, barge-in, filler, limits
+    echo-guard.js              # ★ is what the microphone hears just the agent's own voice coming back? Pure; learns the echo path, fails open (§6.24 "The echo guard")
+    refusal-line.js            # a phone call the gateway refuses AFTER its stream opened is told a fixed line out loud before the close, pure of sockets (§6.30)
     closing.js                 # when a call ends by itself (goodbye, "no thanks" after "anything else?", the agent's farewell) + the per-agent switch and delay — pure (§6.26)
     greeting.js                # each agent's call greeting: built-in text (AI notice; recording notice only while recording is on), the owner's own text, the console's warnings — pure (§6.24)
     sentences.js · intent.js · spoken-language.js · vocabulary.js · ticket.js · audio.js · serial.js   # pure, unit-tested
@@ -1924,8 +1928,72 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
      the check-in is sent to the brain or stored as a message, so the next real question follows straight
      on from the exchange before the pause — the model's memory of it is not broken by "are you still
      there? / yes". Logged as turns with intent `hold` / `presence`.
-  **Not done:** echo of the agent's own voice through speakers (4–13 "interruptions" per call without
-  headphones) needs an echo guard tested on real audio.
+- **The echo guard — the agent's own voice, coming back through the caller's speaker, is not the caller**
+  (`voice/echo-guard.js`, `config.js ECHO_GUARD`, on unless `VOICE_ECHO_GUARD` is 0/false/off/no). Without headphones the
+  agent's voice re-enters the microphone: the browser's echo cancellation (requested in `useVoiceCall.js`) removes most of it,
+  a phone's far end often none. The detector heard the rest as a person, so the agent was "interrupted" by itself 4–13 times a
+  call, and the tail of its own last words came back as a question nobody asked. The gateway knows what it played and when, so
+  it asks one question with no model: **does the loudness pattern of the microphone follow the loudness pattern of the agent's
+  audio some milliseconds earlier?** A reply's syllables rise and fall in a pattern no other voice repeats — a person talking
+  over the agent does not match however loud, an echo matches through any room, level or delay. It is NOT an echo canceller:
+  it removes nothing, it only refuses to mistake the agent for the caller. Rules that must not drift:
+  - **FAIL OPEN.** Every doubt answers "not an echo" (no path learned, nothing played at that delay, a flat signal, a short
+    window, a weak match, a sound louder than the echo explains, a guard that throws): the agent is then interrupted exactly as
+    before. A wrongly kept barge-in is today's behaviour; a wrongly suppressed one makes the agent deaf to a person.
+    **Headphones cost nothing**: with no echo path no delay ever matches and every question is answered "not an echo".
+  - **Two steps, because one step was measured too weak.** (1) LEARN THE PATH over a long stretch of the agent's speech
+    (a window of 60–250 frames of 10 ms, in which the agent was audible for ≥ 100 frames at the delay tried), searching every
+    delay −60…+900 ms; the best must reach 0.85 AND a second attempt ≥ 300 ms later must find the same delay (± 3 frames) — a
+    real echo path holds still, a chance match wanders. The path is re-confirmed while the agent speaks (the guard learns on its own, not only when asked) and
+    forgotten after 20 s without confirmation. (2) ASK AT THAT DELAY ONLY: over the last 600 ms the correlation must be ≥ 0.55,
+    the fitted echo size no more than 2.5× the learned size (+8 dB; the loss between speaker and microphone does not jump),
+    and the microphone must not hold more than the echo explains. With one wide search over a 600 ms window, random unrelated
+    audio reached 0.78–0.80 and real echoes 0.76–0.79: no threshold separated them; with the delay known there is nothing to
+    search and a modest match is strong evidence.
+  - **Compare the patterns only while the agent is audible.** Counting the quiet frames let a shared silence and a shared
+    onset ("both go from quiet to loud at about the same time") fake a 0.85+ match: an unrelated voice that began a few
+    hundred ms after a quiet lead made the guard learn a path in **25%** of synthetic calls (74/300; found by measuring the
+    false-path rate, not by any test). Three changes took it down, each measured: comparing only while the agent is audible
+    (→ 7%), requiring ≥ 100 audible frames to learn from (→ 0/400 six-second calls), and requiring two agreeing attempts
+    (→ **0/300** fourteen-second calls). tests/voice-echo-guard pins the first and the last.
+  - **Waiting, not guessing, where the guard cannot know yet.** `bargeCheck` gives a sound `undecidedGraceMs` (400 ms) when the
+    path is known but the agent is between two sentences or just starting one (nothing to compare with), and `coldGraceMs`
+    (1500 ms) before the guard has had enough of the agent's audio to look for a path at all (the first second of the call's
+    first words). Every DECISIVE "not an echo" interrupts at once. A quiet, motionless microphone while the agent plays means
+    nobody is talking (the detector only stays "detected" while it waits out its silence window): not an interruption.
+  - **An utterance is dropped as the agent's own voice only if EVERY 1.5 s window of it is an echo** (`assessSpan`). Judged
+    whole, a 14 s detector segment of echo with a person speaking at its end was called "echo" and the person was not answered
+    (found by the experiment). The drop is `utterance.echo_dropped` on the timeline; no transcription, no brain call, the call
+    goes on listening. An utterance whose place in the stream is unknown (`startSample`/`endSample`, added to the VAD's event)
+    is never dropped.
+  - **Wiring** (`session.js`): the caller's audio and the agent's audio (placed where the caller hears it, `sendAudio`'s start
+    time) are fed to the guard; a barge-in cuts the reference (`cutReference`); `isOwnVoice` is asked at every ongoing-speech
+    report past the barge-in length while the agent is AUDIBLE (not while it is only thinking), so a person who starts talking
+    over an echo is caught the moment their voice stops matching it; events `echo.suppressed` (once per stretch of speech) and
+    `call.ended` carries `echoSuppressed` / `echoDropped`.
+  **Measured (`npm run voice:echo`, 2026-11-12; 3 seeds × 30 random rooms = 90 per row; real Kokoro/Piper voices for the
+  agent and for the person, the real Silero detector, a synthetic room: delay 40–700 ms, loss 6–30 dB, reverb 0.1–0.5 s, room
+  noise −52…−44 dBFS; each trial is a greeting, a pause, then a reply):**
+  | | without the guard | with it |
+  | --- | --- | --- |
+  | echo only — the GREETING falsely interrupted (cold start) | 73/90 (81%) | 44/90 (49%) |
+  | echo only — a REPLY falsely interrupted | 69/90 (77%) | 9/90 (10%) |
+  | echo only — echo sent to the recogniser as a question | 143 | 0 |
+  | a person talks over a reply: their speech reaches the recogniser | 90/90 | 90/90 |
+  | …interrupted at or after the moment they began (the rest were cut earlier by the echo alone, i.e. falsely) | 23/90 | 80/90 |
+  | headphones (no echo), a person talks over a reply: interrupted | 90/90, ~660 ms | 90/90, the same ~660 ms |
+  | headphones: a false echo path learned | — | 0/90 |
+  **Honest limits.** The room is SYNTHETIC: it has the properties that matter to the guard (delay, loss, smearing, noise) and
+  none of a real speakerphone's distortion, moving path or clipping — real calls are what confirm the thresholds. The greeting is
+  still cut in about half the rooms (the path cannot be known before the agent has spoken for ~1.5 s). An echo 24 dB or more
+  below the agent is too weak to learn a path from, and a person speaking more quietly than the echo cannot interrupt until
+  the agent stops (the physical limit of any method without a canceller). The "residual" test (more energy than the echo
+  explains) is defence in depth: no case I could build isolates it from the other rules. The delay from the person's first word
+  is not comparable between the two columns (with the guard it includes catching up with a detector segment the echo had
+  already started). Tests: tests/voice-echo-guard (19; of seven mutations of its rules, six are caught — the residual test is
+  the one that survives) and the wiring in tests/voice-session (11; six mutations of it caught).
+  **Still not done:** an echo CANCELLER (subtracting the echo from the microphone, which would also help the recogniser — the
+  guard only decides who is speaking); tuning on a real speakerphone call.
 - **Limits** (`config.js`): 15 min per call, 3 concurrent calls per
   tenant, 6 per gateway (a CPU budget for this machine, not a business rule), 20 s max utterance.
 - **Wire protocol** (`protocol.js`, imported by both sides): binary frames are PCM16 audio, text
@@ -1989,9 +2057,16 @@ machine was ON BATTERY (69–79 %, 1.8 GHz, Balanced plan, 2.6 GB RAM free), so 
      obeyed it for a single fact: **6 of 18** grounded answers (5 of 6 on the delivery question), now **0 of 18**.
   Honest limits of that evidence: one model (Groq gpt-oss-120b), 6 samples per question, judged by regexes calibrated by
   reading the samples (the first version of the judges mis-scored both ways and was corrected before the numbers above
-  were taken); no other provider and no real caller was used. **Still seen, not fixed:** 1 of 30 Urdu samples held one
-  stray Devanagari letter inside a word ("چلाते") — a rare model glitch, probably harmless to the Urdu voice (Hindi and
-  Urdu sound alike) but unconfirmed.
+  were taken); no other provider and no real caller was used. **Seen and FIXED the same week:** 1 of 30 Urdu samples held
+  one stray Devanagari letter inside a word ("چلाتے"). It was first guessed harmless (Hindi and Urdu sound alike) — and
+  MEASURED not to be: the Urdu voice's phonemizer treats the letter as another language and says its name. The same four
+  sentences clean and with one stray letter, spoken by `kokoro:hf_alpha` and heard by Groq Whisper: "چلاتے" came back as
+  "چے لام ہندیا کارتے بارئیے", "وقت" as "ہندی ورک آفتے" (the word "Hindi" in the middle of a price), with 0.5–1.9 s of
+  extra audio; 4 of 4 sentences. Now `voice/urdu-script.js` writes every Devanagari letter as the Urdu-script sound it
+  stands for (a fixed table; "بتा" → "بتا", a whole Hindi word comes out close, not perfect) and `speech/tts.js` applies it
+  to Urdu voices only — what is SPOKEN changes, the stored reply does not; the call timeline says `tts.script_repaired`.
+  Re-measured the same way: all four glitched sentences produce the same audio length and the same recognised words as
+  their clean versions. Tests: tests/voice-urdu-script (11). What it does not do: stop the model writing the letter.
 - **Re-run ON MAINS POWER after the fixes (2026-11-12, five real calls; the zero-quota `voice:smoke` first):** the machine
   now matches the numbers above — Kokoro 0.53× real time (Urdu 0.40–0.48×), Piper 0.14×, STT 499 ms average, models
   load in 7 s (15 s on battery). Real calls: Groq first token 610–1147 ms (median 717); Whisper 472–992 ms English,
@@ -2118,7 +2193,7 @@ taken. Backend responsibilities that are stood in for are in
   - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
     noted and the team confirms it and the total; prices and totals only from the reference material.
 
-**Verified:** `npm test` (539 unit tests when this was built — 807 today, §10 — incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests when this was built — 866 today, §10 — incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -2479,8 +2554,21 @@ is assumed; per-business subaccounts would make these per-tenant values the back
   "trouble taking your call"; every line taken → `voiceLine("busy")` ("all of our lines are busy… try again in a few
   minutes"); this business at its own concurrent-call limit (`tenantAvailable: false` — one boolean per asked tenant, never a
   per-tenant list, the endpoint is unauthenticated) → the same busy line; no answer → "trouble". No ticket is issued and no
-  stream opened. It is a snapshot courtesy, not the guard: the gateway still enforces every limit when the stream opens (a call
-  that slips in between is closed silently, as before). Said in English by Twilio's voice (it has no Urdu).
+  stream opened. It is a snapshot courtesy, not the guard: the gateway still enforces every limit when the stream opens. Said in
+  English by Twilio's voice (it has no Urdu).
+- **A call that slips in after that check is told too** (`voice/refusal-line.js`, called from the gateway's phone branch). The
+  stream is already open in both directions when the gateway refuses (full, this business at its limit, the business suspended
+  in between), so it says the same fixed line itself and then closes (code 4001): `busy` for the two limits, `not_in_service` for
+  a business that cannot be served. Rules: ONLY a call with a valid ticket is spoken to (a bad ticket gets a plain close — nothing
+  said, nothing learned); the line is `prompt.js voiceLine` (no model), in the agent's reply language when its config can be read
+  (English otherwise) and in that agent's voice, synthesised once and then served from the cache (`cache: true`; the busy line in
+  both languages is made 20 s after start-up if the gateway is idle, because speech synthesis is one job at a time); at most 20
+  refusals are voiced at once (the rest are closed silently, as before), the wait is capped at 12 s and ends when the caller
+  hangs up, and any failure (no stream id yet, a voice missing, a synthesis error) is the old plain close. A refused call is never
+  added to the session list. Verified: tests/voice-refusal-line (13, six mutations of it caught) and `twilio:smoke` — it takes four
+  tickets, holds three streams open and shows the fourth hears ~5 s of audio and is closed 4001. NOT verified through Twilio's
+  network: that its audio queue plays a line that is followed at once by a close (the gateway waits for the line's length plus
+  600 ms before closing, which is the assumption).
 - **The VAD gives back the start of the first word** (`speech/vad.js`, `config.js VAD.prerollMs` = 300). The detector reports an
   utterance only after it has heard enough speech to believe it, so its segment starts ~200 ms after the caller began when the
   caller was already talking at the first sample ("What are your opening hours?" reached the recogniser as "your opening
@@ -2510,8 +2598,7 @@ is assumed; per-business subaccounts would make these per-tenant values the back
   for jurisdictions that need all-party consent, region of storage. The greeting already says "recorded" exactly while the
   switch is on.
 - **Not built / not decided:** DTMF; `mark` events for exact playback (the estimate is used); VAD, barge-in and pre-roll values
-  tuned on REAL phone audio; capacity refusals that happen AFTER the stream opened (a race with the check above) are still
-  silent closes; a recording retention job.
+  tuned on REAL phone audio; a recording retention job.
 
 **Verified:** `npm test` (the signature against Twilio's published example, tokens, TwiML escaping, every refusal, the transfer chain,
 the REST call, the verified-request reader, the transport's wire format and transfer, the session's ordered transfer), and
@@ -2591,7 +2678,7 @@ right language, with history persisted per tenant.
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
-| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Phone calls through Twilio are built (§6.30), verified against a fake Twilio only. The first piece of an English reply in a matching fast voice is built but OFF until somebody has listened to it (`VOICE_FAST_FIRST_CHUNK`, §6.24) |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Phone calls through Twilio are built (§6.30), verified against a fake Twilio only. The first piece of an English reply in a matching fast voice is built but OFF until somebody has listened to it (`VOICE_FAST_FIRST_CHUNK`, §6.24). Its own voice heard back through a speaker no longer interrupts it or comes back as a question (the echo guard, ON by default): in a SIMULATED room 77% of replies were falsely interrupted, now 10%, a person talking over it is still heard in 90 of 90 trials, headphones unchanged (§6.24) — not yet tried on a real speakerphone. A stray Devanagari letter in an Urdu reply no longer makes the voice say "Hindi" (§6.24) |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -2659,7 +2746,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 807 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 866 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2772,7 +2859,10 @@ right language, with history persisted per tenant.
    (b) the round trips: a fresh query embedding
    ~0.85 s and recognition ~0.9 s; (c) the first-turn fix has only been judged by unit tests and real calls — fold
    it into the next `eval:real` run when quota allows (it changes nothing for chat or for a caller's second
-   question, but the evals are the gate, §6.3); (d) Urdu answers in 1 of 30 samples had a stray Devanagari letter.
+   question, but the evals are the gate, §6.3). DONE since: the echo guard (§6.24 "The echo guard", `VOICE_ECHO_GUARD`, on
+   by default; its numbers are from a SIMULATED room — the first real speakerphone call is what confirms them), the stray
+   Devanagari letter in Urdu speech (§6.24, fixed), the audible refusal of a call that slips past the gateway's capacity
+   check (§6.30) and the prompt probe harness (`npm run prompt:probe`).
 7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
    (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
    included. Record a handful of real calls before promising it.
@@ -2847,11 +2937,13 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 807 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off). No DB, no Gemini, no speech models (§11)
+npm test                 # 866 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off), the echo guard (learning the path, the cold-start and between-sentence waits, windowed utterances, headphones untouched, the session wiring), the spoken refusal of a late phone call, Devanagari repair for the Urdu voice, and the prompt probe judges. No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 npm run voice:levels     # how loud each English voice is, against SPEECH_LEVEL_DB — names what drifted and prints the table to paste. ZERO quota (§6.24 fast start); -- --tolerance=dB
 npm run voice:listen     # renders replies "natural voice, 1.5 s silence, fast start" into ONE wav each in ./listen (gitignored) to judge by ear. ZERO quota (§6.24 fast start); -- --voice=ID --out=DIR
+npm run voice:echo       # the echo guard against a SIMULATED room: real voices and detector, a greeting then a reply per trial; false interruptions with and without the guard, whether a person still gets through, headphones unchanged. ZERO quota (§6.24 echo guard); -- --rooms=30 --seed=N --kinds=echo,talk-over,headphones --verbose [--trace [--slot0]]
+npm run prompt:probe     # the REAL prompt against the REAL chat model, N samples per question, judged by scripts/prompt-judges.mjs (invented description / over-refusal / "First," opener). SPENDS CHAT QUOTA; pins the provider, no fallback (§6.24); -- --case=urdu,english,first,purpose --n=6 --demo-tenant=ID --ko-tenant=ID --ko-agent=ID
 #   -- --call [--tenant=ID] [--agent=ID] [--gateway=localhost:3002] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding.
 #      Without --agent the tenant's DEFAULT agent answers, and it cannot see a document limited to another agent (§6.28): name the agent that owns the knowledge.
 npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set; a fresh fake number each run, so runs may follow each other at once): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)
@@ -2922,7 +3014,8 @@ stale.
   (signs session tickets — both processes must share it; falls back to `INTERNAL_API_KEY`),
   `VOICE_MODELS_DIR`, `VOICE_STT_THREADS` (2) / `VOICE_TTS_THREADS` (every logical core),
   `VOICE_STT_PROVIDER` (`auto` | `local` | `groq`), `VOICE_TTS_PROVIDER` (only `local`), `VOICE_FAST_FIRST_CHUNK`
-  (`1`/`true`/`on` = the first piece of an English reply in the matching fast voice; OFF by default, nobody has listened to it yet — §6.24).
+  (`1`/`true`/`on` = the first piece of an English reply in the matching fast voice; OFF by default, nobody has listened to it yet — §6.24),
+  `VOICE_ECHO_GUARD` (ON unless `0`/`false`/`off`/`no`: the agent's own voice heard back through a speaker is not the caller — §6.24).
 - Script-only knobs (not read by the app): `APP_URL` (where the eval and OpenRouter
   scripts find the running app, default `http://localhost:3000`), `EVAL_TENANT`,
   `TEST_TENANT`, `FAKE_PORT`, `EMBED_VARIANTS_CACHE`.

@@ -2,6 +2,7 @@ import { createSerialQueue } from "../serial";
 import { TTS } from "../config";
 import { getVoice, voiceFor } from "./voices";
 import { engineKeyFor } from "./engine";
+import { repairUrduScript } from "../urdu-script";
 import { applyGainDb, trimSilence, withTrailingSilence } from "../audio";
 
 /**
@@ -110,9 +111,16 @@ function localTextToSpeech(engine) {
      *   pauseMs: silence after the piece — the pause its JOIN needs (default: a sentence's)
      *   gainDb: the piece this many dB louder (negative: quieter) — the fast start matches levels (voices.js)
      */
-    async synthesize({ text, voiceId, language, cache: cacheable = false, pauseMs = TTS.sentencePauseMs, gainDb = 0 }) {
+    async synthesize({ text: asked, voiceId, language, cache: cacheable = false, pauseMs = TTS.sentencePauseMs, gainDb = 0 }) {
       const voice = resolve(voiceId, language);
-      if (!cacheable) return synthesizeNow(voice, text, pauseMs, gainDb);
+      // A stray Devanagari letter in an Urdu reply makes the Urdu voice say the word "Hindi" (urdu-script.js): it is
+      // spoken as the Urdu-script sound it stands for. Only what is SPOKEN changes; the reply as stored is untouched.
+      const text = voice.language === "ur" ? repairUrduScript(asked) : asked;
+      const repaired = text !== asked;
+      if (!cacheable) {
+        const audio = await synthesizeNow(voice, text, pauseMs, gainDb);
+        return repaired ? { ...audio, repaired } : audio;
+      }
 
       const key = `${voice.id}\u0000${pauseMs}\u0000${gainDb}\u0000${text}`;
       const started = performance.now();
@@ -131,7 +139,7 @@ function localTextToSpeech(engine) {
       const audio = await cache.get(key);
       // `ms` is what THIS request waited: the full synthesis for the request that created
       // the entry, ~0 for a hit (or the remainder, if it joined one still in progress).
-      return { ...audio, ms: created ? audio.ms : Math.round(performance.now() - started), cached: !created };
+      return { ...audio, ms: created ? audio.ms : Math.round(performance.now() - started), cached: !created, ...(repaired ? { repaired } : {}) };
     },
   };
 }

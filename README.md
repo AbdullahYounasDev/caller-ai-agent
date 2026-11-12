@@ -21,7 +21,8 @@ failures behind each rule, what works and what does not, and the measured number
   vector + keyword search with a measured relevance threshold.
 - **Voice calls from the browser** through a separate voice gateway: local speech recognition and synthesis (Groq
   Whisper for Urdu), barge-in, full call logging. A sentence cut by a pause is answered as one message, "hold on"
-  gets a longer wait, and the agent's own sentences have no long silences in the middle.
+  gets a longer wait, and the agent's own sentences have no long silences in the middle. Its own voice coming back
+  through a caller's speaker is told from the caller (the echo guard), so it does not interrupt itself.
 - **Taking requests** (appointments, call-backs, and restaurant orders from the owner's own menu — pickup or delivery,
   the address only for delivery) with a deterministic checklist engine — the AI never books, never says an order is
   placed, and never quotes a price it was not given.
@@ -39,7 +40,7 @@ failures behind each rule, what works and what does not, and the measured number
 - **Phone numbers:** the lookup "this number was dialled → which business, which agent" is built and tested.
 - **Phone calls through Twilio:** the webhook (it checks the request really came from Twilio), the phone transport and passing
   a caller to a person are built and proven against a simulated Twilio (`npm run twilio:smoke`). A transfer nobody answers
-  comes back to the agent (a call-back can be taken); a full gateway is told to the caller out loud; the caller's first words
+  comes back to the agent (a call-back can be taken); a full gateway is told to the caller out loud (before the stream opens and, for a call that slips in after, by the gateway itself); the caller's first words
   are no longer clipped; calls are recorded (stereo WAV, played from the console's call history) while the agent's recording
   switch is on. Not yet tried through Twilio's real network. See `CLAUDE.md` §6.30 and `.env.example`.
 - **Not built yet:** the backend's half (stood in here), including the real storage, retention and consent rules for recordings.
@@ -91,6 +92,8 @@ testing; see CLAUDE.md §8.
 | `npm run i18n:check` | English / Urdu translation key and placeholder parity |
 | `npm run voice:smoke` | speech benchmark (no quota); `-- --call` places a real call with a synthetic caller |
 | `npm run voice:gaps` | silence at every join inside a spoken reply, with the real voices (no quota) |
+| `npm run voice:echo` | the echo guard against a simulated room: real voices and detector, false interruptions with and without it (no quota) |
+| `npm run prompt:probe` | the real prompt against the real chat model, several samples per question, judged by rule — run it before and after any prompt wording change (spends chat quota) |
 | `npm run voice:listen` | renders replies with and without the fast start into wav files to judge by ear (no quota); `voice:levels` re-measures the voices' loudness |
 | `npm run eval:real` | the retrieval gate: real pipeline, `test-docs/` corpus, compared with a saved baseline |
 | `npm run reembed:dry` / `reembed` | count / run a resumable re-embed of existing documents |

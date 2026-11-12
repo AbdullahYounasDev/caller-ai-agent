@@ -4,7 +4,8 @@ import { chooseSpokenLanguage } from "./spoken-language";
 import { classifyTurn, INTENTS, OUTCOMES } from "./intent";
 import { median } from "./recorder";
 import { CallAudioRecorder } from "./call-audio";
-import { BARGE_IN, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } from "./config";
+import { BARGE_IN, CONTINUATION, ECHO_GUARD, FILLER, LIMITS, SAMPLE_RATE, SILENCE, TTS, UNHEARD, VAD } from "./config";
+import { EchoGuard } from "./echo-guard";
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { decideCallEnd } from "./closing";
@@ -83,9 +84,12 @@ export class CallSession {
    * @param {boolean} [args.fastFirstChunk] speak the FIRST piece of an English reply with the fast (Piper) voice
    *   that matches the agent's, the rest with the voice the owner chose (voices.js "THE FAST START",
    *   config.js fastFirstChunkEnabled). Off unless the gateway says so.
+   * @param {boolean} [args.echoGuard] tell the agent's own voice, coming back through the caller's speaker, from the
+   *   caller (echo-guard.js, config.js echoGuardEnabled): such "speech" does not interrupt the agent and is not
+   *   answered as a question. Off unless the gateway says so.
    * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
    */
-  constructor({ tenantId, agentId = null, line = null, resume = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, saveRecording = null, fastFirstChunk = false, clock = {} }) {
+  constructor({ tenantId, agentId = null, line = null, resume = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, saveRecording = null, fastFirstChunk = false, echoGuard = false, clock = {} }) {
     this.tenantId = tenantId;
     this.agentId = agentId;
     this.line = line;
@@ -100,6 +104,11 @@ export class CallSession {
     this.openRecorder = openRecorder;
     this.saveRecording = saveRecording;
     this.fastFirstChunk = fastFirstChunk;
+    /** Compares the microphone with what the agent played (voice/echo-guard.js); null when switched off. */
+    this.echo = echoGuard ? new EchoGuard() : null;
+    this.echoSuppressed = 0; // barge-ins the guard refused, this call
+    this.echoDropped = 0; // utterances the guard recognised as the agent's own voice
+    this.echoLoggedThisSpeech = false;
     /** { voiceId, gainDb } while this call opens its English replies with the fast voice; null otherwise (decided in start()). */
     this.fastStart = null;
     /** The call's audio while it is being recorded (voice/call-audio.js); null when this call is not recorded. */
@@ -286,7 +295,12 @@ export class CallSession {
     this.vad?.reset();
 
     this.setState(CALL_STATES.ENDED);
-    this.log("call.ended", { reason, turns: this.turnIndex, interruptions: this.interruptions });
+    this.log("call.ended", {
+      reason,
+      turns: this.turnIndex,
+      interruptions: this.interruptions,
+      ...(this.echo ? { echoSuppressed: this.echoSuppressed, echoDropped: this.echoDropped } : {}),
+    });
     this.transport.notify(SERVER.ENDED, { reason });
     this.transport.close(reason);
 
@@ -349,6 +363,7 @@ export class CallSession {
   onAudio(samples) {
     if (this.ended || !this.vad) return;
     this.audio?.caller(samples);
+    this.echo?.pushCaller(samples, this.now());
     let events;
     try {
       events = this.vad.push(samples);
@@ -360,6 +375,8 @@ export class CallSession {
     for (const event of events) {
       if (event.type === "start") {
         this.bargedThisSpeech = false;
+        this.echoLoggedThisSpeech = false;
+        this.echo?.speechStarted();
         this.lastSpeechStartedAt = this.now();
         this.armIdleTimer();
         this.log("speech.started");
@@ -375,14 +392,59 @@ export class CallSession {
         }
         if (!this.agentBusy()) this.setState(CALL_STATES.HEARING);
       } else if (event.type === "ongoing") {
-        if (!this.bargedThisSpeech && this.agentBusy() && event.speechMs >= BARGE_IN.minSpeechMs) {
+        if (!this.bargedThisSpeech && this.agentBusy() && event.speechMs >= BARGE_IN.minSpeechMs && !this.isOwnVoice(event.speechMs)) {
           this.bargedThisSpeech = true;
           this.bargeIn(event.speechMs);
         }
       } else if (event.type === "utterance") {
-        this.onUtterance(event.samples, event.durationMs);
+        this.onUtterance(event.samples, event.durationMs, event);
       }
     }
+  }
+
+  /**
+   * Is the sound that would interrupt the agent just the agent's own voice, coming back through the caller's
+   * speaker and microphone (echo-guard.js)? Asked every time the detector reports ongoing speech past the barge-in
+   * length, over the latest ECHO_GUARD.bargeWindowMs, so a person who starts talking OVER an echo is let through
+   * the moment their voice stops matching it. Every doubt answers false: the agent is then interrupted as before.
+   */
+  isOwnVoice(speechMs) {
+    if (!this.echo || !this.agentAudible()) return false;
+    const to = this.echo.position;
+    let own;
+    let verdict;
+    try {
+      ({ own, verdict } = this.echo.bargeCheck(to - Math.round((ECHO_GUARD.bargeWindowMs / 1000) * SAMPLE_RATE), to, this.now()));
+    } catch (err) {
+      console.error("[voice] echo guard failed:", err);
+      return false;
+    }
+    if (!own) return false;
+    if (!this.echoLoggedThisSpeech) {
+      this.echoLoggedThisSpeech = true;
+      this.echoSuppressed++;
+      this.log("echo.suppressed", { speechMs, ...verdict });
+    }
+    return true;
+  }
+
+  /**
+   * An utterance whose whole span the agent's own audio explains is the agent talking to itself, not a question:
+   * it is not transcribed and not answered. Needs to know where the utterance lies in the stream (the detector says).
+   */
+  isOwnVoiceUtterance(span, durationMs) {
+    if (!this.echo || span?.startSample == null || span?.endSample == null) return false;
+    let verdict;
+    try {
+      verdict = this.echo.assessSpan(span.startSample, span.endSample);
+    } catch (err) {
+      console.error("[voice] echo guard failed:", err);
+      return false;
+    }
+    if (!verdict.echo) return false;
+    this.echoDropped++;
+    this.log("utterance.echo_dropped", { durationMs, ...verdict });
+    return true;
   }
 
   /**
@@ -397,11 +459,18 @@ export class CallSession {
 
   // ── turns ────────────────────────────────────────────────────────────────
 
-  onUtterance(samples, durationMs) {
+  onUtterance(samples, durationMs, span = null) {
     const speechEndedAt = this.now();
-    this.lastUtteranceAt = speechEndedAt;
     this.log("speech.ended", { durationMs });
     this.armIdleTimer();
+    // The agent's own voice, heard back: not a caller, so nothing below happens (no turn, no merge, no "late
+    // merge" of a withdrawn turn) and the call goes on as if the microphone had been quiet.
+    if (this.isOwnVoiceUtterance(span, durationMs)) {
+      this.settleState();
+      this.armClosing();
+      return;
+    }
+    this.lastUtteranceAt = speechEndedAt;
     // The previous half of a sentence is waiting for more: this IS the rest of it.
     if (this.holding) return this.holding.deliver({ samples, durationMs, speechEndedAt });
     // The caller carried on soon after a pause and has not heard a word of the answer yet: the
@@ -1054,6 +1123,9 @@ export class CallSession {
       this.log("tts.failed", { turn: turn.index, message: String(err?.message ?? err).slice(0, 200) });
       return;
     }
+    // A stray Devanagari letter in an Urdu sentence was written in Urdu script for the voice (urdu-script.js): the model's
+    // glitch is on the timeline, because the transcript still shows the sentence as the model wrote it.
+    if (audio.repaired) this.log("tts.script_repaired", { turn: turn.index, language: lang });
     // Interrupted while this sentence was being synthesised: it is never sent.
     if (turn.cancelled || this.ended) return;
     // The fast voice is quick on ANY machine, so its piece says nothing about how fast the natural voice —
@@ -1135,6 +1207,7 @@ export class CallSession {
     this.clientPlaying = false;
     this.audioPlaysUntil = null;
     this.audio?.cut();
+    this.echo?.cutReference(this.now());
     this.transport.clear();
     this.log("playback.interrupted", { turn: turn?.index ?? null, afterSpeechMs: speechMs, spokenSentences: turn?.spoken.length ?? 0 });
     this.setState(CALL_STATES.HEARING);
@@ -1164,6 +1237,7 @@ export class CallSession {
     const startsAt = Math.max(this.now(), this.audioPlaysUntil ?? 0);
     this.audioPlaysUntil = startsAt + durationMs;
     this.audio?.agent(audio.samples, audio.sampleRate);
+    this.echo?.pushReference(audio.samples, audio.sampleRate, startsAt);
     this.transport.audio(audio.samples, audio.sampleRate);
 
     this.clearTimer(this.timers.settle);

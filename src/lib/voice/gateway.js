@@ -14,12 +14,13 @@ import { CallRecorder } from "./recorder";
 import { createBrowserTransport, decodeClientFrame } from "./transports/browser";
 import { createTwilioTransport, decodeTwilioMessage } from "./transports/twilio";
 import { createTicketVerifier, ticketSecret } from "./ticket";
-import { LIMITS, fastFirstChunkEnabled, gatewayPort } from "./config";
+import { LIMITS, echoGuardEnabled, fastFirstChunkEnabled, gatewayPort } from "./config";
 import { CLOSE_REFUSED, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { FAST_START_VOICE_IDS, getVoice, PREVIEW_TEXT } from "./speech/voices";
 import { encodeWav } from "./audio";
 import { hit } from "@/lib/security/rate-limit";
 import { saveRecording } from "@/lib/standins/recordings";
+import { prewarmRefusalLines, speakRefusal } from "./refusal-line";
 
 /** Voice previews per client per minute — plenty for someone clicking through the list. */
 const PREVIEW_LIMIT = { limit: 30, windowMs: 60_000 };
@@ -142,13 +143,15 @@ export async function startVoiceGateway({ env = process.env } = {}) {
    * call. Returns the reason it must be refused, or null.
    */
   async function refusalFor(verdict) {
+    // `line` names the fixed line a PHONE caller is told before the close (refusal-line.js); none = closed without a word.
+    // Only a call with a valid ticket ever gets one.
     if (!speech) return { code: ERROR_CODES.NOT_READY, message: "voice models are still loading" };
     if (!verdict.ok) return { code: ERROR_CODES.BAD_TICKET, message: verdict.reason };
     const serviceable = await assertTenantServiceable(verdict.tenantId);
-    if (!serviceable.ok) return { code: ERROR_CODES.BAD_TICKET, message: "tenant cannot be served" };
-    if (sessions.size >= LIMITS.maxConcurrentCalls) return { code: ERROR_CODES.BUSY, message: "gateway at capacity" };
+    if (!serviceable.ok) return { code: ERROR_CODES.BAD_TICKET, message: "tenant cannot be served", line: "not_in_service" };
+    if (sessions.size >= LIMITS.maxConcurrentCalls) return { code: ERROR_CODES.BUSY, message: "gateway at capacity", line: "busy" };
     const tenantCalls = [...sessions].filter((s) => s.tenantId === verdict.tenantId).length;
-    if (tenantCalls >= LIMITS.maxConcurrentCallsPerTenant) return { code: ERROR_CODES.TENANT_BUSY, message: "too many calls for this tenant" };
+    if (tenantCalls >= LIMITS.maxConcurrentCallsPerTenant) return { code: ERROR_CODES.TENANT_BUSY, message: "too many calls for this tenant", line: "busy" };
     return null;
   }
 
@@ -172,6 +175,8 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       saveRecording: (args) => saveRecording({ ...args, env }),
       // The first piece of an English reply in the fast voice (VOICE_FAST_FIRST_CHUNK, config.js) — OFF by default.
       fastFirstChunk: fastFirstChunkEnabled(env),
+      // The agent's own voice coming back through the caller's speaker is not the caller (VOICE_ECHO_GUARD, config.js) — ON by default.
+      echoGuard: echoGuardEnabled(env),
     });
   }
 
@@ -262,7 +267,23 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       const refusal = await refusalFor(verdict);
       if (refusal) {
         console.warn(`[voice] phone call refused: ${refusal.code} (${refusal.message})`);
-        return ws.close(CLOSE_REFUSED, refusal.code);
+        // The stream is open both ways, so the caller can be TOLD instead of hearing the line go dead (refusal-line.js).
+        // Any failure there is the old behaviour: a plain close.
+        let told = { spoken: false };
+        if (refusal.line && speech) {
+          transport.bind({ streamSid: message.streamSid, callSid: message.callSid });
+          told = await speakRefusal({
+            refusal,
+            verdict,
+            transport,
+            tts: speech.tts,
+            getAgentConfig,
+            isOpen: () => ws.readyState === ws.OPEN,
+          }).catch((err) => ({ spoken: false, reason: String(err?.message ?? err) }));
+          console.log(`[voice] refused phone call ${told.spoken ? `told "${refusal.line}" in ${told.language}` : `closed silently (${told.reason})`}`);
+        }
+        if (ws.readyState === ws.OPEN) ws.close(CLOSE_REFUSED, refusal.code);
+        return;
       }
       if (ws.readyState !== ws.OPEN) return;
 
@@ -312,6 +333,12 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       engineInfo: { ...engine.info, sttRouting: stt.describe(), llm: describeChatProvider() },
     };
     console.log(`[voice] models ready in ${Math.round(performance.now() - loadStarted)} ms — ${engine.info.runtime}`);
+    console.log(`[voice] echo guard ${echoGuardEnabled(env) ? "ON" : "OFF (VOICE_ECHO_GUARD)"}`);
+    // The line a refused phone caller hears is made while the gateway is idle (refusal-line.js): speech synthesis is
+    // one job at a time, so this waits a little and gives way to a call that has already started.
+    setTimeout(() => {
+      if (sessions.size === 0 && speech) void prewarmRefusalLines(speech.tts);
+    }, 20_000).unref();
     if (fastFirstChunkEnabled(env)) {
       // The fast voices are otherwise loaded the first time a call needs one — a second of dead air on the
       // very reply this feature exists to speed up. Only the ones really installed (tts.isInstalled).

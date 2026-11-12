@@ -409,7 +409,9 @@ API. We revisit this only if a concrete need appears (for example businesses bri
   and speech models; **not yet through Twilio's real network.**
   Before handing a call over, the webhook asks the voice gateway for room (`GET /health?tenant=`): a full or stopped gateway,
   or a business at its own concurrent-call limit, gets a spoken "all of our lines are busy / trouble taking your call" and a
-  hang-up instead of a silent drop.
+  hang-up instead of a silent drop. A call that slips in between that check and the stream opening is refused by the
+  gateway itself, which says the same fixed line (in the agent's reply language) over the open stream before it closes —
+  never a dead line.
 - **What you set up, per number, in Twilio:** open the number → "A call comes in" → Webhook, HTTP POST →
   `<engine's public https address>/api/telephony/twilio/voice`. The console's Numbers tab (and
   `GET /api/telephony/twilio/setup`) shows the exact address and which environment settings are still missing. Buying a
@@ -508,7 +510,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 807, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 866, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.

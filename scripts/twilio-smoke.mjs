@@ -244,19 +244,45 @@ try {
   }
 
   // ── a business at its call limit is told so, out loud ────────────────────
-  const held = [];
-  for (let i = 0; i < 3; i++) {
+  // Four tickets are taken while there is still room (the webhook issues one per answered call), then three streams are
+  // opened, so the fourth ticket arrives at a gateway that is full for this business: the race the webhook's check
+  // cannot close (a call that slips in between that check and the stream opening).
+  const tickets = [];
+  for (let i = 0; i < 4; i++) {
     const answeredAgain = await (await postWebhook(path, { ...params, CallSid: `CA${String(i).repeat(32)}` })).text();
     const t = /name="ticket" value="([^"]+)"/.exec(answeredAgain)?.[1];
     if (!t) break;
+    tickets.push(t);
+  }
+  const held = [];
+  for (let i = 0; i < Math.min(3, tickets.length); i++) {
     const sock = new WebSocket(url);
     await new Promise((resolve, reject) => (sock.on("open", resolve), sock.on("error", reject)));
-    sock.send(JSON.stringify({ event: "start", start: { streamSid: `MZheld${i}`, callSid: `CA${String(i).repeat(32)}`, customParameters: { ticket: t }, mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } } }));
+    sock.send(JSON.stringify({ event: "start", start: { streamSid: `MZheld${i}`, callSid: `CA${String(i).repeat(32)}`, customParameters: { ticket: tickets[i] }, mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } } }));
     held.push(sock);
   }
   await sleep(2_000);
   const busy = await (await postWebhook(path, { ...params, CallSid: `CA${"9".repeat(32)}` })).text();
   check(held.length === 3 && /lines are busy/.test(busy) && !busy.includes("<Connect>"), "with the business's calls all taken, a new caller hears 'all of our lines are busy' and no stream is opened");
+
+  // …and the call that slipped through: the gateway refuses it after the stream opened, and says so out loud.
+  if (tickets.length === 4) {
+    const late = new WebSocket(url);
+    await new Promise((resolve, reject) => (late.on("open", resolve), late.on("error", reject)));
+    const lateFrames = [];
+    const closed = new Promise((resolve) => late.on("close", (code) => resolve(code)));
+    late.on("message", (data) => {
+      const m = JSON.parse(data.toString());
+      if (m.event === "media") lateFrames.push(Buffer.from(m.media.payload, "base64"));
+    });
+    late.send(JSON.stringify({ event: "start", start: { streamSid: "MZlate", callSid: `CA${"3".repeat(32)}`, customParameters: { ticket: tickets[3] }, mediaFormat: { encoding: "audio/x-mulaw", sampleRate: 8000, channels: 1 } } }));
+    const code = await Promise.race([closed, sleep(20_000).then(() => "timeout")]);
+    const bytes = lateFrames.reduce((n, f) => n + f.length, 0);
+    check(lateFrames.length > 0 && bytes > 8000, `a call refused AFTER its stream opened hears a spoken line first (${lateFrames.length} frames, ${(bytes / 8000).toFixed(1)} s of audio)`);
+    check(code === 4001, `…and is then closed as refused (close code ${code})`);
+  } else {
+    check(false, "could not take four tickets to test the late refusal");
+  }
   for (const sock of held) sock.close();
   await sleep(1_500);
 } catch (err) {

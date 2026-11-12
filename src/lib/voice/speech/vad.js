@@ -132,6 +132,10 @@ export class VoiceActivity {
           // The speech itself: the pre-roll is context for the recogniser, not speech the caller said.
           durationMs: Math.round((body.length / SAMPLE_RATE) * 1000),
           prerollMs: Math.round((preroll.length / SAMPLE_RATE) * 1000),
+          // Where it lies in the stream, in samples since the call began (the echo guard asks about exactly this span).
+          // null when the detector did not say where the segment started.
+          startSample: begin === null ? null : begin - preroll.length,
+          endSample: begin === null ? null : begin + body.length,
         });
       }
     }
