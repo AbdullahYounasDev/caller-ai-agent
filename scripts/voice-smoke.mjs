@@ -10,7 +10,7 @@
  *     carries, §9.2) → accuracy and the time each stage took. Then the VAD is run over
  *     the audio padded with silence, to check it finds exactly one utterance.
  *
- *   npm run voice:smoke -- --call [--tenant=test-tenant] [--say="What are your opening hours?"] [--lang=en|ur]
+ *   npm run voice:smoke -- --call [--tenant=test-tenant] [--agent=AGENT_ID] [--say="What are your opening hours?"] [--lang=en|ur]
  *     A REAL call through the running app + gateway (`npm run dev` and `npm run voice`),
  *     with a synthesised caller: gets a ticket, dials, waits out the greeting, "speaks"
  *     the question in real time, and reports the transcript, the reply, the turn's intent
@@ -136,7 +136,10 @@ async function realCall() {
   const say = args.say || (args.lang === "ur" ? "آپ کے اوقاتِ کار کیا ہیں؟" : "What are your opening hours?");
   const language = args.lang === "ur" ? "ur" : "en";
 
-  const res = await fetch(`${appUrl}/api/voice/session?tenantId=${encodeURIComponent(tenantId)}`, {
+  // Without --agent the tenant's DEFAULT agent answers — which cannot see documents limited to another
+  // agent (§6.28), so a tenant whose knowledge belongs to one named agent needs --agent=<id>.
+  const agentQuery = typeof args.agent === "string" ? `&agentId=${encodeURIComponent(args.agent)}` : "";
+  const res = await fetch(`${appUrl}/api/voice/session?tenantId=${encodeURIComponent(tenantId)}${agentQuery}`, {
     method: "POST",
     headers: process.env.INTERNAL_API_KEY ? { "x-internal-key": process.env.INTERNAL_API_KEY } : {},
   });

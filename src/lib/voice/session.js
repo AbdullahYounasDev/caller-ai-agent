@@ -50,7 +50,7 @@ const PLAYBACK_SLACK_MS = 250;
  *     transport.notify(type, payload)                       live UI/telemetry (SERVER.*)
  *     transport.close(reason)                               hang up the connection
  * and is driven by it through onAudio(16 kHz float32), onPlayback(playing) and hangup().
- * The browser test console is one transport; Twilio will be another (§9.2).
+ * The browser test console is one transport; the Twilio phone call is another (transports/twilio.js, §6.30).
  *
  * Every dependency is injected (speech engines, the brain, the recorder) so the whole
  * flow — barge-in, sentence pipelining, failures — is tested without models, a database

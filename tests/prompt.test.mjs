@@ -478,3 +478,84 @@ describe("the request plan: saved first, read back after", () => {
     assert.match(buildCollectionInstruction({ state: "update_failed", language: "en", typeLabel: "Appointment" }, { channel: "chat" }), /do not claim it was changed/);
   });
 });
+
+// A BUSINESS THAT WAS NEVER TOLD WHAT IT DOES (measured 2026-11-12, Groq gpt-oss-120b, name-only profile "Nyron
+// Software", English and Urdu): a profile with no description left a hole the model filled — "we provide software
+// solutions and technology services" in 15 of 24 samples. With the facts below it was 0 of 24, and an agent that WAS
+// told what it does still described itself in all 18 samples. These tests pin the wording that does it.
+describe("a business whose owner never said what it does (§6.20)", () => {
+  const NOT_PROVIDED = /Not provided to you: what this business does, sells or offers\. You do not know it, and its name does not tell you\./;
+  const noPurpose = { purpose: "", hours: null };
+
+  test("the profile SAYS it is not known — a missing line is a hole the model fills", () => {
+    assert.match(build(noPurpose), NOT_PROVIDED);
+    assert.match(build({ ...noPurpose, businessName: "Nyron Software Solutions" }, { channel: "voice" }), NOT_PROVIDED);
+  });
+
+  test("…only when nothing describes the business: a purpose or an approved summary removes it", () => {
+    assert.doesNotMatch(build(), NOT_PROVIDED, "purpose written");
+    assert.doesNotMatch(build({ purpose: "", profileSummary: "Acme is a dental clinic in Karachi." }), NOT_PROVIDED, "summary approved");
+    assert.doesNotMatch(build({ purpose: "  ", profileSummary: "  " }), /We run a family/, "blank is blank");
+    assert.match(build({ purpose: "  ", profileSummary: "  ", hours: null }), NOT_PROVIDED);
+  });
+
+  test("hours alone are not a description: a hours-only profile says so too, and no profile at all adds nothing", () => {
+    assert.match(build({ businessName: PLACEHOLDER_BUSINESS_NAME, purpose: "", hours: "Mon-Fri 9-5" }), NOT_PROVIDED);
+    assert.doesNotMatch(build({ businessName: PLACEHOLDER_BUSINESS_NAME, purpose: "", hours: null }), NOT_PROVIDED, "no block, so nothing to annotate");
+  });
+
+  test("the exception names the trap: a word in the business's name is not a description", () => {
+    const p = build(noPurpose);
+    assert.match(p, /do not guess one from the business's name/);
+    assert.match(p, /a word in a name \('Software', 'Dental', 'Foods'\) is not a description/);
+  });
+
+  const asOpener = (over, chunks = []) => buildSystemInstruction({ config: config(over), channel: "voice", chunks, opener: { kind: "about" } });
+
+  test("'who are you?' with nothing to describe the business from is TOLD what to say, not asked to say 2–3 sentences", () => {
+    const p = asOpener(noPurpose);
+    assert.match(p, /THIS MESSAGE is a general question about the business, but you have NOT been told what it does and no passage above describes it\./);
+    assert.match(p, /the AI assistant for Acme Dental/);
+    assert.match(p, /you don't have the details of what the business does to hand/);
+    assert.match(p, /not from its name either/);
+    assert.doesNotMatch(p, /Answer it in two or three short sentences/, "that instruction is what pushed the model to invent");
+  });
+
+  test("…but only then: with a purpose, a summary or a retrieved passage the normal instruction stays, plus a way out", () => {
+    for (const p of [asOpener({}), asOpener({ purpose: "", profileSummary: "Acme is a dental clinic." }), asOpener(noPurpose, [chunk(1)])]) {
+      assert.match(p, /Answer it in two or three short sentences from ABOUT THIS BUSINESS and from any passage above/);
+      assert.match(p, /If neither says what the business does, say you don't have that to hand instead of describing it\./);
+      assert.doesNotMatch(p, /you have NOT been told what it does/);
+    }
+  });
+
+  test("'are you a robot?' is unaffected", () => {
+    const p = buildSystemInstruction({ config: config(noPurpose), channel: "voice", opener: { kind: "aiCheck" } });
+    assert.match(p, /THIS MESSAGE asks whether you are a person or a machine/);
+    assert.doesNotMatch(p, /you have NOT been told/);
+  });
+
+  test("a placeholder name says 'this business' in the special line, never the placeholder", () => {
+    const p = buildSystemInstruction({ config: config({ businessName: PLACEHOLDER_BUSINESS_NAME, purpose: "", hours: "Mon-Fri 9-5" }), channel: "voice", opener: { kind: "about" } });
+    assert.match(p, /the AI assistant for this business\)/);
+  });
+});
+
+// "First, … then …" (measured 2026-11-12): the voice style used to say "Say 'first… then…' instead of listing", and the
+// model obeyed it for a single fact — 6 of 18 grounded answers (5 of 6 on the delivery question) opened "First, our
+// average delivery takes about forty-five minutes. Then on Friday…". Now 0 of 18.
+describe("spoken answers do not open with 'First,' (§6.24)", () => {
+  test("the voice style no longer teaches 'first… then…' as the way to list", () => {
+    const p = build({}, { channel: "voice" });
+    assert.doesNotMatch(p, /Say 'first… then…' instead of listing/);
+    assert.match(p, /Never read out a list: put the items in one flowing sentence\./);
+    assert.match(p, /Start with the answer itself, and use 'first… then…' only when you are really giving steps in a set order\./);
+  });
+
+  test("the rest of the voice rules are untouched, and chat never had this line", () => {
+    const p = build({}, { channel: "voice" });
+    assert.match(p, /Never output markdown, asterisks, bullet points, numbered lists, emoji or URLs/);
+    assert.match(p, /Open with a short first sentence/);
+    assert.doesNotMatch(build({}, { channel: "chat" }), /first… then…/);
+  });
+});

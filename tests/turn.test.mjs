@@ -278,3 +278,81 @@ describe("the rest of the flow is unchanged", () => {
     assert.equal(retrieve.calls[0].keywordQuery, "or");
   });
 });
+
+// THE FIRST QUESTION OF A CALL (found on real calls, 2026-11-12). A call stores the agent's greeting as an
+// assistant message before the caller speaks, so "no earlier turns" was never true there: the first question
+// reached the follow-up logic, and any "it" in it ("how long does it usually take?") paid for a rewrite — 2028 ms of
+// retrieval instead of ~900, and the query lost its wording ("delivery time and availability"). Only an earlier turn
+// BY THE CUSTOMER can make a message a follow-up.
+describe("the first question of a call", () => {
+  const GREETING_ONLY = [{ role: "assistant", content: "Hello, thanks for calling KO Restaurant. How can I help you today?" }];
+  const QUESTION_WITH_IT = "Do you deliver, and how long does it usually take?";
+
+  test("a pronoun in the first question after the greeting is not a follow-up: no rewrite, searched as spoken", async () => {
+    start();
+    const retrieve = makeRetrieve({ ms: 400 });
+    const rewrite = makeRewrite({ ms: 700, result: rewritten("delivery time and availability") });
+    const r = run({ message: QUESTION_WITH_IT, history: GREETING_ONLY, deps: { retrieve, rewrite } });
+    await r.elapse();
+    assert.equal(rewrite.calls.length, 0, "no model call was spent");
+    assert.deepEqual(retrieve.calls.map((c) => c.query), [QUESTION_WITH_IT], "the words the caller said are what is searched");
+    assert.equal(r.value.trigger, null);
+    assert.equal(r.value.searchQuery, QUESTION_WITH_IT);
+    assert.equal(r.at, 400, "one search, no rewrite in front of it");
+  });
+
+  test("every other trigger is off too on a first question: an opening 'and…', a short message", async () => {
+    start();
+    for (const message of ["And the Pro one?", "what about Sundays", "How long does it take?"]) {
+      const retrieve = makeRetrieve({ ms: 1 });
+      const rewrite = makeRewrite({ ms: 1, result: rewritten("something else") });
+      const r = run({ message, history: GREETING_ONLY, deps: { retrieve, rewrite } });
+      await r.elapse();
+      assert.equal(rewrite.calls.length, 0, message);
+      assert.deepEqual(retrieve.calls.map((c) => c.query), [message], message);
+    }
+  });
+
+  test("…and so is the empty-first-search net: a first question that finds nothing is answered 'no', not rewritten", async () => {
+    start();
+    const retrieve = makeRetrieve({ ms: 5, empty: () => true });
+    const rewrite = makeRewrite({ ms: 5, result: rewritten("anything") });
+    const r = run({ message: "Do you sell car insurance?", history: GREETING_ONLY, deps: { retrieve, rewrite } });
+    await r.elapse();
+    assert.equal(rewrite.calls.length, 0);
+    assert.equal(retrieve.calls.length, 1);
+    assert.deepEqual(r.value.chunks, []);
+  });
+
+  test("a chat's first message behaves as before (no history at all)", async () => {
+    start();
+    const rewrite = makeRewrite({ ms: 1, result: rewritten("x") });
+    const r = run({ message: QUESTION_WITH_IT, history: [], deps: { retrieve: makeRetrieve({ ms: 1 }), rewrite } });
+    await r.elapse();
+    assert.equal(rewrite.calls.length, 0);
+  });
+
+  test("from the caller's SECOND question on, a pronoun still triggers the rewrite — a real follow-up is not lost", async () => {
+    start();
+    const history = [
+      ...GREETING_ONLY,
+      { role: "user", content: "Do you deliver?" },
+      { role: "assistant", content: "Yes, within eight kilometres of Gulberg." },
+    ];
+    const retrieve = makeRetrieve({ ms: 400 });
+    const rewrite = makeRewrite({ ms: 700, result: rewritten("delivery time Gulberg") });
+    const r = run({ message: "How long does it take?", history, deps: { retrieve, rewrite } });
+    await r.elapse();
+    assert.equal(rewrite.calls.length, 1);
+    assert.equal(r.value.trigger, "heuristic");
+    assert.deepEqual(retrieve.calls.map((c) => c.query), ["delivery time Gulberg"]);
+  });
+
+  test("a blank customer turn is not an earlier turn", async () => {
+    start();
+    const rewrite = makeRewrite({ ms: 1, result: rewritten("x") });
+    const r = run({ message: QUESTION_WITH_IT, history: [...GREETING_ONLY, { role: "user", content: "   " }], deps: { retrieve: makeRetrieve({ ms: 1 }), rewrite } });
+    await r.elapse();
+    assert.equal(rewrite.calls.length, 0);
+  });
+});

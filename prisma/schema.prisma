@@ -182,8 +182,8 @@ model KnowledgeChunk {
   /// NULL = unknown, never reusable. See the migration for why it is stored, not derived.
   embedHash String? @map("embed_hash")
 
-  /// Text-search config this chunk's keyword index uses — "english" | "italian" |
-  /// "simple" — chosen per DOCUMENT at ingest (src/lib/agent/language.js).
+  /// Text-search config this chunk's keyword index uses — "english" | "simple" (Urdu
+  /// script) — chosen per DOCUMENT at ingest (src/lib/agent/language.js).
   /// regconfig, not text: a generated column needs an IMMUTABLE expression.
   searchConfig Unsupported("regconfig") @default(dbgenerated("'english'::regconfig")) @map("search_config")
 
@@ -232,8 +232,8 @@ model KnowledgeSourceAgent {
   @@schema("ai_engine")
 }
 
-/// ONE CALL — today a voice session from the test console, later a phone call. Written
-/// only by the voice gateway (src/lib/voice/calls.js). What was SAID lives in `messages`
+/// ONE CALL — a voice session from the test console, or a phone call through Twilio
+/// (§6.30). Written only by the voice gateway (src/lib/voice/recorder.js). What was SAID lives in `messages`
 /// under `conversationId`, exactly like a chat (one brain, one transcript store, §1);
 /// this row and its turns/events are what a call adds on top: how it went, how fast it
 /// was, and why it ended.
@@ -247,27 +247,28 @@ model CallLog {
   agentId        String? @map("agent_id")
   conversationId String? @map("conversation_id")
 
-  /// "browser" (test console) | "twilio" (later). The call session is identical for
+  /// "browser" (test console) | "twilio" (a phone call). The call session is identical for
   /// both; only the transport adapter in src/lib/voice/transports/ differs.
   transport String @default("browser")
 
   /// "active" | "completed" | "failed"
   status String @default("active")
 
-  /// caller_hangup | idle_timeout | max_duration | disconnected | server_shutdown |
-  /// setup_failed | error — END_REASONS in src/lib/voice/protocol.js
+  /// caller_hangup | idle_timeout | agent_goodbye | transferred | max_duration | disconnected |
+  /// server_shutdown | setup_failed | error — END_REASONS in src/lib/voice/protocol.js
   endReason String? @map("end_reason")
 
-  /// E.164 numbers once telephony exists. Null for browser sessions — except a console call
-  /// placed "as if dialling" one of the tenant's numbers, which records the number it simulated.
+  /// E.164 numbers of a phone call (the caller's only when it is a real number — "anonymous" is not
+  /// recorded). Null for browser sessions — except a console call placed "as if dialling" one of
+  /// the tenant's numbers, which records the number it simulated.
   fromNumber    String? @map("from_number")
   toNumber      String? @map("to_number")
   /// The phone number the call came in on (phone_numbers.id), for per-number reporting (§6.29).
   /// Kept as a plain id: a released number keeps its call history.
   phoneNumberId String? @map("phone_number_id")
 
-  /// The models that served this call — { vad, stt, tts: {en, it}, llm } — so a
-  /// latency or quality regression can be traced to a model change.
+  /// The models that served this call — { vad, stt, sttRouting, tts: {natural, fast}, voices: {en, ur},
+  /// llm, runtime } — so a latency or quality regression can be traced to a model change.
   engine Json?
 
   turnCount     Int @default(0) @map("turn_count")
@@ -280,7 +281,7 @@ model CallLog {
 
   endedAt      DateTime? @map("ended_at")
   durationSec  Int?      @map("duration_sec")
-  recordingUrl String?   @map("recording_url") // raw audio → object storage, only the URL lives here
+  recordingUrl String?   @map("recording_url") // a pointer to the audio, never the audio: "file:<tenant>/<call>.wav" in the stand-in store (§6.30), the backend's URL once it owns storage (B11c)
   createdAt    DateTime  @default(now()) @map("created_at")
 
   turns  CallTurn[]
@@ -312,12 +313,12 @@ model CallTurn {
   spokenText  String? @map("spoken_text")
   interrupted Boolean @default(false)
 
-  /// The language the reply was SPOKEN in — "en" | "it".
+  /// The language the reply was SPOKEN in — "en" | "ur".
   language String?
 
   /// Rule-based, from src/lib/voice/intent.js — never a model call:
-  ///   intent  question | followup | greeting | acknowledgement | goodbye | human_request
-  ///   outcome answered | no_knowledge | conversational | handoff_requested | failed
+  ///   intent  question | followup | greeting | acknowledgement | goodbye | human_request | hold | presence
+  ///   outcome answered | profile | no_knowledge | conversational | handoff_requested | failed
   intent  String
   outcome String
   /// The document the answer was grounded in (humanised title), when there was one.
@@ -439,7 +440,8 @@ model AgentConfig {
 
   // --- free-form structured settings ---
   // hours:      { mon: [["09:00","17:00"]], ... } — opening hours in `timezone`
-  // escalation: { email, phone, whenUserAsks, whenAgentUnsure }
+  // escalation: call forwarding to a person — { enabled, contacts: [{id, role, name, phone}],
+  //             whenCallerAsks, afterMisses, topics[], outsideHours, announce } (src/lib/handoff/config.js)
   hours      Json?
   escalation Json?
 
@@ -464,8 +466,8 @@ model AgentConfig {
   /// A language left out (or empty) uses the built-in greeting, which says the caller is speaking
   /// with an AI assistant — and, only while recordCalls is on, that the call is recorded.
   greeting    Json    @default("{}")
-  /// The owner switched call recording on. Drives the built-in greeting's recording sentence today;
-  /// the phone transport will record by it when telephony exists (§9.2).
+  /// The owner switched call recording on. Drives the built-in greeting's recording sentence AND the
+  /// recording itself: a PHONE call of this agent is saved as a stereo WAV, a browser call never is (§6.30).
   recordCalls Boolean @default(false) @map("record_calls")
 
   // --- the end of a call (src/lib/voice/closing.js) ---
@@ -593,14 +595,14 @@ model Customer {
   @@schema("ai_engine")
 }
 
-/// One request a customer confirmed: an appointment or a callback. Always saved as
-/// "requested" — only a person confirms it (CLAUDE.md §6.11).
+/// One request the agent took from a customer: an appointment, a callback or an order. Always
+/// saved as "requested" — only a person confirms it (CLAUDE.md §6.11).
 model Record {
   id             String    @id @default(uuid())
   tenantId       String    @map("tenant_id")
-  /// What a customer is told and a business searches by: AP-4K7Q2, CB-9XM3T.
+  /// What a customer is told and a business searches by: AP-4K7Q2, CB-9XM3T, OR-…
   reference      String
-  /// appointment | callback (src/lib/collect/catalog.js)
+  /// appointment | callback | order (src/lib/collect/catalog.js)
   type           String
   /// requested | confirmed | done | cancelled
   status         String    @default("requested")

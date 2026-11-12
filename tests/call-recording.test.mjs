@@ -117,7 +117,10 @@ describe("the stand-in recording storage", () => {
       assert.equal(ref, "file:clinic-1/call-abc-123.wav");
       const file = path.join(dir, "clinic-1", "call-abc-123.wav");
       assert.deepEqual(await readFile(file), wav);
-      assert.equal((await stat(file)).mode & 0o077, 0, "not readable by other users");
+      // POSIX permission bits only mean something on POSIX: Windows has none and reports 0o666 for every
+      // file, so there the 0o600 that recordings.js asks for cannot be observed (the folder's ACL is what
+      // protects the files — CLAUDE.md §6.30).
+      if (process.platform !== "win32") assert.equal((await stat(file)).mode & 0o077, 0, "not readable by other users");
       assert.deepEqual(await readRecording({ tenantId: "clinic-1", callId: "call-abc-123", env }), wav);
       assert.equal(await deleteRecording({ tenantId: "clinic-1", callId: "call-abc-123", env }), true);
       assert.equal(await readRecording({ tenantId: "clinic-1", callId: "call-abc-123", env }), null);

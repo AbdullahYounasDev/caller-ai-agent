@@ -142,7 +142,7 @@ export async function generateReply({ systemInstruction, history, model }) {
  * stuck. It matters far more on a CALL: voice cannot start speaking until it has
  * text, so streaming is what keeps first-audio latency survivable. That is why
  * the test chat streams too — the path stays exercised rather than being
- * rebuilt when telephony lands.
+ * rebuilt for the phone channel.
  *
  * RETRY BEHAVIOUR IS DELIBERATELY NARROWER HERE. Only opening the stream is
  * retried. Once the first token has reached the customer we cannot retry —

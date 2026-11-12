@@ -55,7 +55,8 @@ const CHANNEL_STYLE = {
   voice:
     "You are on a LIVE PHONE CALL and every word you produce is read aloud. " +
     "Never output markdown, asterisks, bullet points, numbered lists, emoji or URLs — " +
-    "they are unspeakable. Say 'first… then…' instead of listing. Use short sentences. " +
+    "they are unspeakable. Never read out a list: put the items in one flowing sentence. Start with the " +
+    "answer itself, and use 'first… then…' only when you are really giving steps in a set order. Use short sentences. " +
     "Spell out abbreviations. Keep each turn under about three sentences: the caller " +
     "cannot skim, and they will interrupt a monologue. Open with a short first sentence — " +
     "the caller hears it while the rest is still being prepared. Say times, dates and " +
@@ -223,6 +224,15 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
         `Use these when the customer asks when you're open, and never offer a time outside them.`
     );
   }
+  // WHEN THE OWNER NEVER SAID WHAT THE BUSINESS DOES (no purpose, no approved summary), the profile
+  // says so as a FACT. A line that is simply missing leaves a hole the model fills: measured with
+  // Groq gpt-oss-120b on a name-only profile ("Nyron Software"), it invented "software solutions and
+  // technology services" in 15 of 24 samples, in English and in Urdu — a clause buried in the
+  // grounding rule ("do not guess one from the name") did not stop it (§6.20).
+  const describesBusiness = Boolean(purpose || summary);
+  if (profile.length > 0 && !describesBusiness) {
+    profile.push("Not provided to you: what this business does, sells or offers. You do not know it, and its name does not tell you.");
+  }
   const hasProfile = profile.length > 0;
   if (hasProfile) sections.push(`ABOUT THIS BUSINESS:\n${profile.join("\n")}`);
 
@@ -347,7 +357,8 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
         "does and, if given, when it is open. Restate only what it says: never turn it into " +
         "specific products, services, prices, features, locations or claims it does not " +
         "name. If it gives no description of what the business does, do not guess one from " +
-        "the business's name. If the customer wants more detail than it gives — what exactly is sold, what " +
+        "the business's name — a word in a name ('Software', 'Dental', 'Foods') is not a description: " +
+        "say you don't have that to hand instead. If the customer wants more detail than it gives — what exactly is sold, what " +
         "it costs — that comes from the reference material only, and if that does not " +
         "have it, say you don't have it."
     );
@@ -362,11 +373,23 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
       "THIS MESSAGE asks whether you are a person or a machine. Say plainly, in one sentence, that you are the AI " +
         `assistant for ${hasName ? config.businessName : "this business"}, then ask how you can help.`
     );
+  } else if (opener && !describesBusiness && !chunks.length) {
+    // Nothing to describe the business FROM: no purpose, no approved summary, no passage found. The
+    // normal instruction below ("answer in two or three short sentences") pushes the model to say
+    // something, and with nothing to say it makes something up — so this case is told what to say.
+    sections.push(
+      "THIS MESSAGE is a general question about the business, but you have NOT been told what it does and no " +
+        `passage above describes it. Say who you are (the AI assistant for ${hasName ? config.businessName : "this business"}), say ` +
+        "plainly, in one short sentence, that you don't have the details of what the business does to hand, and ask " +
+        "what they would like help with. Do not describe the business, guess what it does or suggest what it sells — " +
+        "not from its name either."
+    );
   } else if (opener) {
     sections.push(
       "THIS MESSAGE is a general question about the business — who you are, what it does or what it offers. " +
         "Answer it in two or three short sentences from ABOUT THIS BUSINESS and from any passage above that " +
         "describes the business as a whole. Mention kinds of products or services only if they are named there. " +
+        "If neither says what the business does, say you don't have that to hand instead of describing it. " +
         "Then ask what they would like help with."
     );
   }

@@ -508,7 +508,7 @@ stand-in interfaces above; the shapes in §3 are my proposal and yours to correc
 
 ## 5. My side (engine) — done and to do
 
-**Done and working** (tests: `npm test` 765, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
+**Done and working** (tests: `npm test` 781, `npm run test:collect`, `npm run test:agents`, `npm run test:numbers`, `db:check`, lint, build all green):
 - English + Urdu everywhere (UI, replies, voices, speech recognition); agent understands both, answers in the chosen one.
 - RAG: extraction (PDF/DOCX/TXT/MD/CSV, OCR), chunking, Gemini embeddings, hybrid search, replace-not-append,
   background jobs, cancellation, retry.

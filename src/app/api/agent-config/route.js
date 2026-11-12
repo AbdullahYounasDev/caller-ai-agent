@@ -34,8 +34,8 @@ import { translator, SUPPORTED_LOCALES, REPLY_LANGUAGES } from "@/lib/i18n";
  *
  * Server-to-server only — the dashboard's BACKEND calls this with the shared
  * x-internal-key header. It must never be called from a browser (see
- * lib/auth/internal.js). Every caller today is internal; when telephony lands
- * its webhook authenticates by provider signature, not through this route.
+ * lib/auth/internal.js). Every caller of this route is internal; the Twilio webhooks
+ * (/api/telephony/twilio/*) authenticate by provider signature instead, never through it.
  */
 
 const TONES = ["professional", "friendly", "concise", "formal"];

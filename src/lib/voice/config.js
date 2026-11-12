@@ -9,7 +9,7 @@
 
 /** Every audio buffer inside the gateway is 16 kHz mono float32: what Silero VAD and
  *  Parakeet were trained on. Transports convert at the edge (the browser sends 16 kHz
- *  PCM16 already; Twilio will send 8 kHz μ-law). */
+ *  PCM16 already; Twilio sends 8 kHz μ-law). */
 export const SAMPLE_RATE = 16_000;
 
 /** Silero's analysis window at 16 kHz. Fixed by the model. */

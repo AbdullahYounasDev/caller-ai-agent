@@ -168,6 +168,18 @@ export function needsContext(message) {
   return words.length <= SHORT_MESSAGE_WORDS && !isSelfContainedShort(text);
 }
 
+/**
+ * Has the CUSTOMER already said something in this conversation? Only then can the next message be a
+ * follow-up. Turns by the agent do not count: the greeting of a call is stored as an assistant message
+ * before the caller speaks, and a message with nothing before it from the customer has nothing to
+ * point back at.
+ *
+ * @param {Array<{role: string, content: string}>} history turns BEFORE the current message
+ */
+export function hasEarlierCustomerTurn(history) {
+  return history.some((m) => m.role === "user" && String(m.content ?? "").trim() !== "");
+}
+
 /** The customer's most recent previous question, or null. */
 function lastCustomerTurn(history) {
   for (let i = history.length - 1; i >= 0; i--) {
@@ -262,9 +274,14 @@ export async function rewriteQuery({ history, message, timeoutMs = REWRITE_TIMEO
  * Retrieve for one customer turn.
  *
  * TRIGGER RULE for spending a model call (strategy `rewrite`), in order:
- *   1. No earlier turns            → search the message as typed. A first
+ *   1. No earlier turn BY THE CUSTOMER → search the message as typed. A first
  *      message cannot be a follow-up, and most calls begin with a complete
- *      question.
+ *      question. The agent's own greeting does not count: a call stores it as
+ *      an assistant message before the caller says anything, so "no earlier
+ *      turns" was never true on a call — the caller's first question paid for a
+ *      rewrite whenever it held an "it" ("how long does it take?") and lost its
+ *      wording to it (measured 2026-11-12: 2028 ms instead of ~900, and the query
+ *      became "delivery time and availability"). See hasEarlierCustomerTurn.
  *   2. needsContext(message)       → rewrite BEFORE searching (short, opens with
  *      "and/but/what about", or points back with "that/it/the Pro one").
  *   3. Otherwise search as typed, and ONLY IF that returns nothing and the
@@ -331,7 +348,7 @@ export async function retrieveForTurn({
     return { chunks: await retrieve(anchored), ...resolved, searchQuery: anchored, trigger: "overview", opener };
   }
 
-  if (strategy === "raw" || !history.length) {
+  if (strategy === "raw" || !hasEarlierCustomerTurn(history)) {
     return { chunks: await retrieve(message), ...resolved };
   }
 

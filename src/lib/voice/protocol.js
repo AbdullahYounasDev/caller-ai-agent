@@ -11,8 +11,8 @@
  *     recent AUDIO_FORMAT message (Piper voices speak at 22.05 kHz).
  *   - TEXT frames are JSON control messages: { type, ...payload }.
  *
- * A phone call (Twilio, later) does NOT speak this protocol — it has its own transport
- * adapter. Everything behind the transport (the call session) is shared.
+ * A phone call (Twilio, §6.30) does NOT speak this protocol — it has its own transport
+ * adapter (transports/twilio.js). Everything behind the transport (the call session) is shared.
  */
 
 /** Browser → gateway. */

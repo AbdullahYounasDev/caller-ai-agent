@@ -144,6 +144,7 @@ scripts/
   voice-models.mjs             # `npm run voice:models` — resumable download of the speech models
   voice-smoke.mjs              # `npm run voice:smoke` — speech benchmark, ZERO quota; `-- --call` = a real call with a synthetic caller
   voice-gaps.mjs               # `npm run voice:gaps` — silence at every join inside a spoken reply, real voices, before vs now, ZERO quota (§6.24)
+  twilio-smoke.mjs             # `npm run twilio:smoke` — a fake Twilio calls the REAL app + gateway: signature refusals, an answered call, μ-law audio both ways, the call record (§6.30)
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
   eval-retrieval.mjs           # fast fixture-only smoke check — not the hybrid pipeline (§6.3)
@@ -1168,8 +1169,9 @@ downstream. It must also keep the customer's language — Urdu stays Urdu;
 prompt text is in `prompt.js`.)
 
 **When a model call is spent (`retrieveForTurn` in `query.js`), in order:**
-1. No earlier turns → search the message as typed. A first message can't be a
-   follow-up.
+1. No earlier turn BY THE CUSTOMER → search the message as typed. A first message can't be a
+   follow-up. (The agent's own turns do not count: a call stores its greeting as an assistant message, and
+   until 2026-11-12 that made "no earlier turns" false on every call — see §6.24 "Found on those calls".)
 2. `needsContext(message)` → rewrite BEFORE searching: it opens with
    "and/but/what about/e/ma/anche…", or points back with "that/it/them/the Pro
    one/quello…", or is four words or fewer and not obviously complete (a short
@@ -1347,6 +1349,15 @@ from the profile; hours → "closed Saturdays", "open Monday 09:00–18:00" as
 configured. One leak found and closed: with a name and NO purpose the model
 said "we provide software solutions", inferred from "Nyron Software
 **Solutions**" — hence the "don't guess from the name" clause.
+**That clause alone did not hold** (measured 2026-11-12 on Groq gpt-oss-120b, English and Urdu: the invention came
+back in 15 of 24 samples). What holds is making the absence a FACT: when the owner wrote no purpose and approved no
+summary, the profile carries "Not provided to you: what this business does, sells or offers. You do not know it, and
+its name does not tell you.", and a "who are you" opener with nothing to describe the business from (no purpose, no
+summary, no passage found) gets its own instruction — say who you are, say you don't have the details to hand, ask
+what they need; do not describe, guess or suggest — instead of "answer in two or three short sentences". 0 of 24
+invented afterwards, 18 of 18 agents WITH a purpose still described themselves (`tests/prompt.test.mjs` pins the
+wording). The consequence for an owner is real and should be shown in the dashboard: an agent with no purpose and no
+summary will say it does not know what the business does.
 
 **BUILT — the business summary: written by the AI from documents the owner CHOSE, approved by the owner, always
 in the profile** (`lib/agent/profile-summary.js`, `summary-rules.js` pure; per agent: `agent_configs.profile_summary`
@@ -1810,7 +1821,9 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
 - **Spoken style** (`CHANNEL_STYLE.voice`): times and prices as people say them ("nine in the
   morning", never "09:00" or "zero nine hundred"), no document names or dates unless documents
   disagree, Urdu in Urdu script (never Roman Urdu — the voice could not read it). Gemini Flash-Lite
-  does not always obey the document-name rule.
+  does not always obey the document-name rule. A list is spoken as one flowing sentence; "first… then…" is only for
+  steps in a set order — the style used to TEACH "say 'first… then…' instead of listing", and the model then opened
+  single-fact answers with "First," (6 of 18 answers, §6.24 "Found on those calls"); don't put that wording back.
 - **Barge-in:** caller speech while the agent is thinking or audible, sustained for
   `BARGE_IN.minSpeechMs` (350 ms, so "mm-hm" does not cut the agent off) → `audio_clear` to the
   client, the rest of the reply is never synthesised, the turn is logged `interrupted` with
@@ -1906,6 +1919,55 @@ with the machine otherwise idle: on battery, with Chrome and the dev server busy
 conversation items of the eval set, outputs correct; gpt-oss-20b was only ~0.15 s faster and
 translated three English follow-ups into another language, so it is NOT a rewrite model. Benchmark the
 speech stages on mains power; the dedicated speech server (§9.2) is the real fix for CPU contention.
+
+**Measured 2026-11-12 — six real calls through the app, gateway and Groq (`LLM_PROVIDER=groq`, Gemini fallback, Whisper STT;
+`voice:smoke -- --call`, a synthetic caller, `test-tenant`'s KO restaurant agent and the Urdu `voice-demo` agent).** The
+machine was ON BATTERY (69–79 %, 1.8 GHz, Balanced plan, 2.6 GB RAM free), so the stages split in two:
+- **Network-bound — representative, they do not depend on the CPU:** Groq `gpt-oss-120b` first token **501–643 ms** (six
+  calls, English and Urdu); Groq Whisper **554–585 ms** for a 2–3 s English utterance (1027 ms on the first call of the
+  session) and 913–1320 ms for the Urdu ones;
+  a fresh Gemini query embedding **863–882 ms** (88 ms when the exact text was embedded before — the cache works); the
+  follow-up rewrite 472 and 768 ms. The LLM is not the bottleneck any more.
+- **CPU-bound — the battery reading, NOT representative (the mains re-run is below):** Kokoro first audio 1.4–5.0 s;
+  silent gaps mid-reply of 0.3–3.7 s in 5 of 6 calls (the gateway logged `tts.slow`, ratio 1.09 — speech made slower
+  than it plays, which no chunking can hide, see above); end-of-speech → first audio 3.9–9.6 s. The zero-quota
+  `voice:smoke` read Kokoro at 1.2–1.8× real time and Piper at 0.36×.
+- **Urdu:** both Urdu questions were transcribed correctly (one lost a leading "کیا"; the meaning survived), and an Urdu
+  question about delivery was answered from the ENGLISH documents (cross-language retrieval worked). The Urdu agent's
+  reply was grammatical Urdu script.
+- **Found on those calls, then FIXED and retested the same day.** Each fix has tests that fail without it
+  (`tests/turn.test.mjs`, `tests/prompt.test.mjs`) and was measured before and after.
+  1. *The first question of every call paid for a needless rewrite* (§6.19 rule 1). The test for "no earlier turns" was
+     `!history.length`, but a call stores the greeting as an assistant message, so the caller's first question saw
+     history — and any message with an "it" in it ("how long does it take") tripped `needsContext`. Measured: retrieval
+     2028 ms instead of ~900, and "Do you deliver, and how long does it usually take?" was searched as "delivery time
+     and availability". Now only an earlier turn BY THE CUSTOMER counts (`hasEarlierCustomerTurn`). Same question on a
+     real call after the fix: intent `question` (was `followup`), no rewrite, searched as spoken, retrieval 1234 ms
+     (one search incl. a fresh embedding), no "one moment" filler. A caller's SECOND question still gets the rewrite.
+  2. *A business never told what it does had it invented* (§6.20): a name-only profile ("Nyron Software") made Groq
+     gpt-oss-120b say "software solutions and technology services" in **15 of 24** samples (English and Urdu, 6 samples
+     × 4 questions). Now the profile states "Not provided to you: what this business does…" and the "who are you"
+     instruction tells the model what to say instead of asking for 2–3 sentences: **0 of 24**, and an agent that WAS told
+     what it does still described itself in all **18 of 18** (no over-refusal). Confirmed on a real Urdu call: "I'm
+     Nyron Software's AI assistant, and we don't have the details of what the business does."
+  3. *Answers opened "First, … then …"* — our own voice style said "Say 'first… then…' instead of listing" and the model
+     obeyed it for a single fact: **6 of 18** grounded answers (5 of 6 on the delivery question), now **0 of 18**.
+  Honest limits of that evidence: one model (Groq gpt-oss-120b), 6 samples per question, judged by regexes calibrated by
+  reading the samples (the first version of the judges mis-scored both ways and was corrected before the numbers above
+  were taken); no other provider and no real caller was used. **Still seen, not fixed:** 1 of 30 Urdu samples held one
+  stray Devanagari letter inside a word ("چلाते") — a rare model glitch, probably harmless to the Urdu voice (Hindi and
+  Urdu sound alike) but unconfirmed.
+- **Re-run ON MAINS POWER after the fixes (2026-11-12, five real calls; the zero-quota `voice:smoke` first):** the machine
+  now matches the numbers above — Kokoro 0.53× real time (Urdu 0.40–0.48×), Piper 0.14×, STT 499 ms average, models
+  load in 7 s (15 s on battery). Real calls: Groq first token 610–1147 ms (median 717); Whisper 472–992 ms English,
+  878–1124 ms Urdu; retrieval incl. a fresh embedding 732–1234 ms (median 849); Kokoro first audio 1.0–2.0 s (was
+  1.4–5.0 s); **end-of-speech → first audio 3.5–5.5 s, median 3.7 s** as the gateway measures it, i.e. AFTER the VAD's
+  ~0.5 s silence window (was 3.9–9.6 s); what the caller feels, last word → first audio, **3.7–5.6 s, median 4.0 s**;
+  **0 mid-reply gaps in 5 of 5 calls** (was 5 of 6), no "one moment" filler (was 2 of 6), one `tts.slow` at ratio 0.92
+  on the Urdu call — the Urdu voice is the closest to the limit. The ~800 ms target is NOT met. The median call's
+  3.7 s is ~0.9 s recognising the speech, ~0.85 s searching (an embedding round trip), ~0.7 s to the first token and
+  ~1.3 s synthesising the first chunk. The levers left, biggest first: the fast voice tier for the first chunk (Piper
+  makes a sentence in ~0.4 s), then recognition and the embedding round trip (both network).
 
 **Measured on this repo's dev machine (i7-1185G7, 4 cores / 8 threads, CPU only)** —
 `npm run voice:smoke`, zero quota, synthetic speech (cleaner than a human — real accuracy will be
@@ -2021,7 +2083,7 @@ taken. Backend responsibilities that are stood in for are in
   - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
     noted and the team confirms it and the total; prices and totals only from the reference material.
 
-**Verified:** `npm test` (539 unit tests, incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests when this was built — 781 today, §10 — incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -2120,7 +2182,7 @@ removes a marker ANYWHERE in the reply, whatever the stream chunking (a lone "["
 marker), tolerates `[START x]`, and the prompt spells a real code per request type (`[[START appointment]]`), never a
 placeholder. An unknown code starts nothing (`respond()` checks it against the request types the business has).
 
-**Verified:** `npm test` (539), `npm run test:collect` (handoff end to end on the real DB: asked, rephrase→handoff, topics,
+**Verified:** `npm test` (539 at the time), `npm run test:collect` (handoff end to end on the real DB: asked, rephrase→handoff, topics,
 reset in a row, unheard, closed hours, failed reply restores state, the mid-reply marker). **Not verified:** a real phone
 transfer through a real Twilio account (§6.30 is verified against a fake one); the real model's wording of the handoff announcement in Urdu; how often the
 "nothing in the documents" signal fires on real BUSINESS documents (a business with thin knowledge will hand off more —
@@ -2183,7 +2245,7 @@ shared by every agent or limited to some** (§6.28).
 picked agent; switching agents starts a new chat conversation and hangs up a live call. Knowledge is one library, each
 document shared or limited to some agents (§6.28).
 
-**Verified:** `npm test` (543 — incl. tickets carry the agent and cannot be re-signed, a call uses its agent for config,
+**Verified:** `npm test` (543 at the time — incl. tickets carry the agent and cannot be re-signed, a call uses its agent for config,
 call record and every turn, the default resolved at pick-up, an archived agent does not answer), `npm run test:agents`
 (the rules above against the real DB, with the real `respond()` and a faked model), `test:collect` unchanged, the HTTP
 routes by hand on a dev server, and the console driven in a browser (create → copy → edit → switch) in English and Urdu.
@@ -2241,7 +2303,7 @@ Errors: `validation:knowledge.agentsInvalid|agentsEmpty|agentsTooMany|agentsUnkn
 "Show: All documents | Documents <agent> uses"; each row says "All agents" or "Only: Dublin, London" with a Change
 editor; a document the picked agent does not use is dimmed and says so. "Select all" only selects what is on screen.
 
-**Verified:** `npm test` (554 — the rule, the input, the SQL shape, and that every search of a turn carries the agent),
+**Verified:** `npm test` (554 at the time — the rule, the input, the SQL shape, and that every search of a turn carries the agent),
 `npm run test:agents` (71 against the real DB: the filter for an agent / the default / no agent / the debug path,
 availability at create / replace / alone without re-embedding, cascade, copy, cross-tenant ids, and `respond()` giving
 Dublin's page to Dublin and never to London asked the same words), the HTTP routes by hand, and the Knowledge tab
@@ -2300,7 +2362,7 @@ and nothing else does. Its callers: the console's "call as if dialling" (`POST /
 refusal is a 200 answer). Errors `validation:numbers.*` and `numbers.route.*` (en + ur). Kinds: `purchased` and
 `forwarding` (the hidden number a business forwards its own line to) route the same.
 
-**Verified:** `npm test` (567 — E.164, every routing decision, the cache, the signed line, the not-in-service line, the
+**Verified:** `npm test` (567 at the time — E.164, every routing decision, the cache, the signed line, the not-in-service line, the
 call recording its number), `npm run test:numbers` (32 against the real DB: storage format, every refusal, re-link
 effective for the next caller despite the cache, one business per active number, release and re-adding elsewhere,
 isolation, the archive guard, a suspended business, a call's number and per-number counts), the HTTP routes by hand, and
@@ -2404,7 +2466,7 @@ is assumed; per-business subaccounts would make these per-tenant values the back
   storage and the call's `recording_url` is set (`CallRecorder.close({ recordingUrl })`); events `recording.started` /
   `recording.finished`. A storage failure is logged and leaves the call without a recording — never a failed hang-up. A call that
   was transferred is recorded only until the hand-off; a resumed call is a new `call_logs` row with its own recording. The
-  stand-in store keeps `<RECORDINGS_DIR>/<tenantId>/<callId>.wav` (default `./recordings`, gitignored, files 0600) and
+  stand-in store keeps `<RECORDINGS_DIR>/<tenantId>/<callId>.wav` (default `./recordings`, gitignored; files 0600 and folders 0700 on Linux/macOS — Windows has no such bits, so there the folder's own ACL is the only protection) and
   `recording_url` = `file:<tenantId>/<callId>.wav`; paths come only from a validated tenant id and call id. It works only while the
   gateway and the app share a folder (one machine). API: `GET /api/voice/calls/:id/recording?tenantId=` (audio/wav) and
   `DELETE` (file + pointer) — internal-key guarded, scoped by tenant AND call id, DELETE not blocked by a suspension;
@@ -2562,7 +2624,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 765 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 781 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2663,10 +2725,16 @@ right language, with history persisted per tenant.
    deduplication, resumable imports.
 5. **Tool execution** (§6.11) — then flip `TOOL_EXECUTION_AVAILABLE`.
 6. **Voice latency** — DIAGNOSED (§6.24): free-tier Gemini queueing, 3.5–10 s to first token,
-   not thinking and not prompt size. Next: add `GROQ_API_KEY`, set `LLM_PROVIDER=groq`
-   (`LLM_FALLBACK_PROVIDER=gemini`), run `voice:smoke -- --call` and record the numbers; check
-   Groq's answer quality in Urdu; then the follow-up rewrite on voice (§6.19) and
-   whether the fast voice tier should be the default for latency-sensitive businesses.
+   not thinking and not prompt size. Groq is now in use and MEASURED on mains power (2026-11-12, §6.24): first token
+   610–1147 ms, Whisper ~0.5–1.1 s, median end-of-speech → first audio 3.7 s, no mid-reply gaps — the LLM is no
+   longer the bottleneck, and the ~800 ms target is still far. DONE the same day (§6.24 "Found on those calls"): the
+   first-turn rewrite, the invented business description and the "First," opener. Next, in order: (a) the fast voice
+   tier for the FIRST chunk of a reply (Piper ~0.4 s a sentence against Kokoro's ~1.3 s) — decide whether it should be
+   the default for latency-sensitive businesses, and check how it sounds in Urdu (there is no Piper Urdu voice, so
+   Urdu's first chunk stays Kokoro, the voice closest to its limit); (b) the round trips: a fresh query embedding
+   ~0.85 s and recognition ~0.9 s; (c) the first-turn fix has only been judged by unit tests and real calls — fold
+   it into the next `eval:real` run when quota allows (it changes nothing for chat or for a caller's second
+   question, but the evals are the gate, §6.3); (d) Urdu answers in 1 of 30 samples had a stray Devanagari letter.
 7. **Urdu with real callers** — the voice and the reply are verified; Urdu speech RECOGNITION
    (Groq Whisper) has not been tried with real Pakistani speech, code-switched Urdu/English
    included. Record a handful of real calls before promising it.
@@ -2741,10 +2809,11 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 765 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow, breaker, keyword-query, prompt, crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 781 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
-#   -- --call [--tenant=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding
+#   -- --call [--tenant=ID] [--agent=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding.
+#      Without --agent the tenant's DEFAULT agent answers, and it cannot see a document limited to another agent (§6.28): name the agent that owns the knowledge.
 npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)
 npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
 npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent (greeting and recording switch included), against the real DB, faked models — spends no quota (§6.27, §6.28)
