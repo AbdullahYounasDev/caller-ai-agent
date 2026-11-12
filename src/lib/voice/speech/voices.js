@@ -144,3 +144,73 @@ export function voiceSelectionProblems(voices) {
   }
   return problems;
 }
+
+// ── THE FAST START: the first piece of a reply in a fast voice (CLAUDE.md §6.24) ─────────────────
+//
+// The natural voice needs ~40 ms per character, so a 45-character first chunk takes 1.5–2.2 s to make
+// before the caller hears anything; Piper makes it in 0.3–0.55 s (measured 2026-11-12, warm, mains
+// power). With VOICE_FAST_FIRST_CHUNK on, the first piece of an English reply is spoken by the Piper
+// voice that matches the agent's voice, and the rest by the voice the owner chose. Two engines in one
+// reply are only acceptable if they do not jump, so the match is chosen on what can be measured:
+//   - GENDER (the agent's gender is its voice's, and the prompt says so): a female Kokoro voice gets the
+//     female Piper voice. Pitch measured: 189 vs 190 Hz (female), 114 vs 130 Hz (male).
+//   - LOUDNESS: Piper is not at the same level as every Kokoro voice, and Kokoro's own voices differ by
+//     up to 6 dB, so a gain is worked out PER PAIR from the table below.
+// Urdu has no fast voice, so an Urdu reply is untouched.
+
+/**
+ * Median speech level of each English voice, dBFS (RMS of 30 ms frames above the noise floor, mean of the
+ * medians over five different sentences). MEASURED on 2026-11-12 with `npm run voice:levels`; measure it
+ * again when a voice or a model changes. A voice missing here simply gets no gain correction.
+ */
+export const SPEECH_LEVEL_DB = {
+  "kokoro:af_heart": -23.7,
+  "kokoro:af_bella": -23.5,
+  "kokoro:af_nicole": -23.8,
+  "kokoro:af_aoede": -19.4,
+  "kokoro:af_kore": -20.1,
+  "kokoro:af_sarah": -22.1,
+  "kokoro:am_michael": -25.4,
+  "kokoro:am_fenrir": -21.0,
+  "kokoro:am_puck": -21.1,
+  "kokoro:am_echo": -23.4,
+  "kokoro:bf_emma": -22.1,
+  "kokoro:bf_isabella": -21.0,
+  "kokoro:bm_george": -21.4,
+  "kokoro:bm_fable": -25.0,
+  "piper:en_US-lessac-medium": -22.0,
+  "piper:en_US-ryan-medium": -21.0,
+};
+
+/** The most a level correction may move a voice — a wrong entry must not turn a piece into a shout. */
+const MAX_FAST_START_GAIN_DB = 6;
+
+/**
+ * The fast voice that speaks the first piece of a reply for a NATURAL English voice: the Piper voice of
+ * the same gender. null when there is none — an Urdu voice, a voice that is already fast, an unknown id.
+ *
+ * @param {Voice|null|undefined} voice the voice the owner chose for English
+ * @returns {Voice|null}
+ */
+export function fastStartVoiceFor(voice) {
+  if (!voice || voice.engine !== "kokoro" || voice.language !== "en") return null;
+  return VOICES.find((v) => v.engine === "piper" && v.language === "en" && v.gender === voice.gender) ?? null;
+}
+
+/** Every voice that can be a fast start, so the gateway can load them before the first call. */
+export const FAST_START_VOICE_IDS = VOICES.filter((v) => v.engine === "piper" && v.language === "en").map((v) => v.id);
+
+/**
+ * The gain, in dB, that brings the fast voice to the level of the natural voice it opens for. 0 when
+ * either level is unknown; never more than ±6 dB.
+ *
+ * @param {Voice} natural
+ * @param {Voice} fast
+ */
+export function fastStartGainDb(natural, fast) {
+  const to = SPEECH_LEVEL_DB[natural?.id];
+  const from = SPEECH_LEVEL_DB[fast?.id];
+  if (!Number.isFinite(to) || !Number.isFinite(from)) return 0;
+  const gain = Math.round((to - from) * 10) / 10;
+  return Math.max(-MAX_FAST_START_GAIN_DB, Math.min(MAX_FAST_START_GAIN_DB, gain));
+}

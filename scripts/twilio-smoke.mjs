@@ -55,7 +55,11 @@ const { ticketSecret } = await import("@/lib/voice/ticket");
 const internalHeaders = process.env.INTERNAL_API_KEY ? { "x-internal-key": process.env.INTERNAL_API_KEY } : {};
 
 const TENANT = "__twilio_smoke__";
-const NUMBER = "+442079460000";
+// A DIFFERENT number every run (020 7946 0xxx is the range Ofcom reserves for drama, never a real line). The app caches
+// "dialled number → agent" for ~30 s in ITS process (CLAUDE.md §6.29) and this script changes numbers in its own, so a
+// second run within 30 s used to be routed to the PREVIOUS run's agent — already deleted by its cleanup — and every
+// check failed with "Unknown agent". A number that was never used before cannot be in that cache.
+const NUMBER = `+442079460${String(Math.floor(Math.random() * 1000)).padStart(3, "0")}`;
 const FROM = "+923001234567";
 const CALL_SID = `CA${"d".repeat(32)}`;
 const say = args.say || "What are your opening hours?";
@@ -140,7 +144,10 @@ try {
   const startWait = performance.now();
   while (!outbound.length && performance.now() - startWait < 20_000) await sleep(100);
   check(outbound.length > 0, "the agent greets the caller (μ-law frames arrive)");
-  while (lastFrameAt && performance.now() - lastFrameAt < 1_500) await sleep(100);
+  // 3 s of quiet, not 1.5: the greeting is several pieces, and on a COLD start (the app compiling its first route,
+  // the speech models still warming) the next piece can take longer than 1.5 s to be made. Declared over too early, the
+  // simulated caller spoke into the rest of the greeting, which is barge-in — and no turn was taken (seen once).
+  while (lastFrameAt && performance.now() - lastFrameAt < 3_000) await sleep(100);
   const greetingBytes = outbound.reduce((n, b) => n + b.length, 0);
   check(outbound.every((b) => b.length <= 160), "every outbound frame is at most 20 ms (160 bytes)");
   log(`greeting: ${(greetingBytes / 8000).toFixed(1)} s of audio`);

@@ -8,7 +8,7 @@ import { BARGE_IN, CONTINUATION, FILLER, LIMITS, SILENCE, TTS, UNHEARD, VAD } fr
 import { collapseRepeats, looksUnfinished } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { decideCallEnd } from "./closing";
-import { SPOKEN_LANGUAGES, voiceFor } from "./speech/voices";
+import { SPOKEN_LANGUAGES, fastStartGainDb, fastStartVoiceFor, getVoice, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
 import { detectPause } from "@/lib/phrases";
 import { nextContactLine } from "@/lib/handoff/announce";
@@ -80,9 +80,12 @@ export class CallSession {
    * @param {(args: {tenantId: string, callId: string, wav: Buffer}) => Promise<string|null>} [args.saveRecording]
    *   keeps a finished call's audio and returns the reference to store on the call (standins/recordings.js).
    *   Without it nothing is recorded. Used only for a PHONE call whose agent has recording switched on (§6.30).
+   * @param {boolean} [args.fastFirstChunk] speak the FIRST piece of an English reply with the fast (Piper) voice
+   *   that matches the agent's, the rest with the voice the owner chose (voices.js "THE FAST START",
+   *   config.js fastFirstChunkEnabled). Off unless the gateway says so.
    * @param {{now?: () => number, setTimeout?: Function, clearTimeout?: Function}} [args.clock]
    */
-  constructor({ tenantId, agentId = null, line = null, resume = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, saveRecording = null, clock = {} }) {
+  constructor({ tenantId, agentId = null, line = null, resume = null, transportName, transport, stt, tts, createVad, engineInfo, brain, openRecorder, saveRecording = null, fastFirstChunk = false, clock = {} }) {
     this.tenantId = tenantId;
     this.agentId = agentId;
     this.line = line;
@@ -96,6 +99,9 @@ export class CallSession {
     this.brain = brain;
     this.openRecorder = openRecorder;
     this.saveRecording = saveRecording;
+    this.fastFirstChunk = fastFirstChunk;
+    /** { voiceId, gainDb } while this call opens its English replies with the fast voice; null otherwise (decided in start()). */
+    this.fastStart = null;
     /** The call's audio while it is being recorded (voice/call-audio.js); null when this call is not recorded. */
     this.audio = null;
     this.now = clock.now ?? (() => performance.now());
@@ -167,7 +173,8 @@ export class CallSession {
       // never heard it (vocabulary.js).
       this.transcriber = this.stt.forCall({ vocabulary: callVocabulary(this.config) });
       this.voices = Object.fromEntries(SPOKEN_LANGUAGES.map((lang) => [lang, voiceFor(this.config.voices, lang).id]));
-      this.callEngine = { ...this.engineInfo, stt: this.transcriber.id, voices: this.voices };
+      this.fastStart = this.planFastStart();
+      this.callEngine = { ...this.engineInfo, stt: this.transcriber.id, voices: this.voices, ...(this.fastStart ? { fastStart: this.fastStart.voiceId } : {}) };
 
       this.recorder = await this.openRecorder({
         tenantId: this.tenantId,
@@ -218,7 +225,7 @@ export class CallSession {
     // background while the greeting plays.
     const greeting = this.resume ? await this.resumeLine() : buildVoiceGreeting(this.config);
     await this.tts.prepare([this.voices[greeting.language]]).catch(() => {});
-    void this.tts.prepare(Object.values(this.voices)).catch(() => {});
+    void this.tts.prepare([...Object.values(this.voices), ...(this.fastStart ? [this.fastStart.voiceId] : [])]).catch(() => {});
     this.recorder.agentLine(greeting.text);
     this.lastLanguage = greeting.language;
     const turn = this.newTurn(0);
@@ -978,6 +985,23 @@ export class CallSession {
   }
 
   /**
+   * THE FAST START, decided once per call. The first piece of an English reply is made by the Piper voice
+   * of the agent's gender (about a second sooner than the natural voice can make it — voices.js says by how
+   * much and what was matched). Only when the gateway turned it on, the English voice is a natural one that
+   * has such a partner, and the partner is really installed: a missing voice must never be answered with a
+   * different one behind the owner's back (tts.isInstalled).
+   *
+   * @returns {{voiceId: string, gainDb: number}|null}
+   */
+  planFastStart() {
+    if (!this.fastFirstChunk) return null;
+    const natural = getVoice(this.voices.en);
+    const fast = fastStartVoiceFor(natural);
+    if (!fast || !this.tts.isInstalled?.(fast.id)) return null;
+    return { voiceId: fast.id, gainDb: fastStartGainDb(natural, fast) };
+  }
+
+  /**
    * Keep a running measure of how fast speech is being made on this call. Past TTS.slowRatio the
    * pieces of a reply cannot all be ready in time, whatever the chunking (sentences.js says what
    * was tried): logged once per call (`tts.slow`), so the call's timeline says WHY it had gaps.
@@ -1010,9 +1034,21 @@ export class CallSession {
     const ending = chunkEnding(sentence);
     const pauseMs = ending === "joined" ? TTS.joinPauseMs : ending === "comma" ? TTS.commaPauseMs : TTS.sentencePauseMs;
 
+    // THE FAST START: the first piece of a reply the model wrote (not the greeting or another fixed
+    // line — those are cached and already ready) is spoken by the fast voice, English only. Every later
+    // piece uses the voice the owner chose. The caller hears the reply start about a second sooner.
+    const fast = this.fastStart && !cache && turn.index > 0 && lang === "en" && turn.spoken.length === 0 ? this.fastStart : null;
+
     let audio;
     try {
-      audio = await this.tts.synthesize({ text: sentence, voiceId: this.voices[lang], language: lang, cache, pauseMs });
+      audio = await this.tts.synthesize({
+        text: sentence,
+        voiceId: fast ? fast.voiceId : this.voices[lang],
+        language: lang,
+        cache,
+        pauseMs,
+        ...(fast ? { gainDb: fast.gainDb } : {}),
+      });
     } catch (err) {
       console.error("[voice] TTS failed:", err);
       this.log("tts.failed", { turn: turn.index, message: String(err?.message ?? err).slice(0, 200) });
@@ -1020,7 +1056,10 @@ export class CallSession {
     }
     // Interrupted while this sentence was being synthesised: it is never sent.
     if (turn.cancelled || this.ended) return;
-    this.noteSynthesisSpeed(audio);
+    // The fast voice is quick on ANY machine, so its piece says nothing about how fast the natural voice —
+    // the one that has to keep up with playback — is being made here: it must not lower the running
+    // ratio that decides `tts.slow`.
+    if (!fast) this.noteSynthesisSpeed(audio);
 
     // A GAP the caller hears: the previous piece of this reply finished playing before this one
     // was ready. Logged with where it fell — inside a sentence is the one that sounds like the
@@ -1042,6 +1081,9 @@ export class CallSession {
           turn: turn.index,
           synthMs: audio.ms,
           responseMs: Math.round(turn.firstAudioAt - turn.speechEndedAt),
+          // Which voice made the first sound: the fast start (and its level correction) or the owner's own.
+          voice: audio.voiceId,
+          ...(fast ? { fastStart: true, gainDb: fast.gainDb } : {}),
         });
       }
     }

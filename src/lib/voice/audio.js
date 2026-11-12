@@ -121,6 +121,28 @@ export function withTrailingSilence(samples, sampleRate, ms) {
   return out;
 }
 
+/**
+ * `samples` made `db` decibels louder (negative = quieter), as a NEW array — never the engine's own
+ * buffer, which a cache may still hold. A sample that would pass full scale is held at it, so a boost
+ * can never wrap into noise. 0 dB (or not a number) returns the input untouched.
+ *
+ * Used to put the fast voice's first piece at the level of the natural voice that continues it
+ * (voices.js fastStartGainDb).
+ *
+ * @param {Float32Array} samples
+ * @param {number} db
+ */
+export function applyGainDb(samples, db) {
+  if (!Number.isFinite(db) || db === 0) return samples;
+  const gain = 10 ** (db / 20);
+  const out = new Float32Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i] * gain;
+    out[i] = v > 1 ? 1 : v < -1 ? -1 : v;
+  }
+  return out;
+}
+
 // ── the phone edge: G.711 μ-law and 8 kHz ⇄ 16 kHz (CLAUDE.md §6.24, transports/twilio.js) ──────────
 
 const MULAW_BIAS = 0x84;

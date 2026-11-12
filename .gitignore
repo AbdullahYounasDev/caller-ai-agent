@@ -52,3 +52,5 @@ urd.traineddata
 
 # call recordings kept by the stand-in storage (src/lib/standins/recordings.js) — real calls, never commit
 /recordings/
+# listening samples written by `npm run voice:listen` — generated audio, a few MB, never commit
+/listen/

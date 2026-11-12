@@ -91,6 +91,7 @@ testing; see CLAUDE.md §8.
 | `npm run i18n:check` | English / Urdu translation key and placeholder parity |
 | `npm run voice:smoke` | speech benchmark (no quota); `-- --call` places a real call with a synthetic caller |
 | `npm run voice:gaps` | silence at every join inside a spoken reply, with the real voices (no quota) |
+| `npm run voice:listen` | renders replies with and without the fast start into wav files to judge by ear (no quota); `voice:levels` re-measures the voices' loudness |
 | `npm run eval:real` | the retrieval gate: real pipeline, `test-docs/` corpus, compared with a saved baseline |
 | `npm run reembed:dry` / `reembed` | count / run a resumable re-embed of existing documents |
 

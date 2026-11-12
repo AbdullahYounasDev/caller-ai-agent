@@ -14,7 +14,7 @@ const CLOSING_DELAY_MS = END_DELAY_SECONDS.default * 1000;
  * "caller does X → the call does Y".
  */
 
-function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, resume, transportName = "browser", saveRecording, synthDelayMs = 0, synthMs = 7, speechMs } = {}) {
+function harness({ replies = [], transcripts = [], config = {}, transfer, transferInOrder, noteUnheard, agentId, line, resume, transportName = "browser", saveRecording, synthDelayMs = 0, synthMs = 7, speechMs, fastFirstChunk = false, installedVoices = null, synthMsFor = null } = {}) {
   let now = 0;
   const timers = [];
   const clock = {
@@ -60,6 +60,8 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, transf
   const prepared = [];
   const tts = {
     prepare: async (ids) => prepared.push(...ids),
+    // Which voices exist on this fake machine (null = all of them).
+    isInstalled: (id) => (installedVoices ? installedVoices.includes(id) : true),
     synthesize: async (args) => {
       const { text, language, voiceId, cache } = args;
       // Fixed lines (greeting, fillers) are synthesised with cache: true; a reply never is.
@@ -67,7 +69,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, transf
       synthArgs.push(args);
       // A slow machine: the piece is ready only after `synthDelayMs` of (fake) time.
       if (synthDelayMs && !cache) await new Promise((resolve) => clock.setTimeout(resolve, synthDelayMs));
-      return { samples: new Float32Array(22050), sampleRate: 22050, ms: synthMs, voiceId, ...(speechMs ? { speechMs } : {}) };
+      return { samples: new Float32Array(22050), sampleRate: 22050, ms: synthMsFor ? synthMsFor(args) : synthMs, voiceId, ...(speechMs ? { speechMs } : {}) };
     },
   };
 
@@ -129,6 +131,7 @@ function harness({ replies = [], transcripts = [], config = {}, transfer, transf
     resume,
     transportName,
     saveRecording,
+    fastFirstChunk,
     transport,
     stt,
     tts,
@@ -1353,5 +1356,159 @@ describe("CallSession", () => {
     h.hear({ type: "start" }, utterance);
     await h.settle();
     assert.ok(!h.recorded.events.some((e) => e.type === "tts.slow"));
+  });
+});
+
+// THE FAST START (CLAUDE.md §6.24, voices.js): with it on, the first piece of an English reply is made by the Piper voice
+// that matches the agent's, so the caller hears the answer start about a second sooner (measured: a 45-character first
+// chunk takes Kokoro 1.5–2.2 s and Piper 0.3–0.55 s); everything after it is the owner's own voice. Off unless the gateway
+// turns it on — nobody has listened to two engines in one reply yet.
+describe("the fast start: the first piece of a reply in the fast voice", () => {
+  const REPLY = "The Pro plan is 149 euro a month. Anything else?";
+  const askOnce = async (h) => {
+    await h.session.start();
+    h.advance(5000); // the greeting has finished playing
+    h.hear({ type: "start" }, utterance);
+    h.advance(1);
+    await h.settle();
+  };
+  /** What the reply's own pieces were spoken with (the greeting and the holding lines are cached). */
+  const replyVoices = (h) => h.synthArgs.filter((a) => !a.cache);
+
+  test("OFF (the default): every piece of the reply is the owner's voice, and nothing asks for a level change", async () => {
+    const h = harness({ transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    assert.deepEqual(replyVoices(h).map((a) => a.voiceId), ["kokoro:af_heart", "kokoro:af_heart"]);
+    assert.ok(replyVoices(h).every((a) => a.gainDb === undefined));
+    assert.ok(!h.prepared.includes("piper:en_US-lessac-medium"), "the fast voice is not even loaded");
+    assert.equal(h.recorderOpens[0].engine.fastStart, undefined);
+  });
+
+  test("ON: the first piece is the female fast voice at the level of the voice it opens for; the second piece is the owner's", async () => {
+    const h = harness({ fastFirstChunk: true, config: { voices: { en: "kokoro:af_heart" } }, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    const [first, second] = replyVoices(h);
+    assert.equal(first.text, "The Pro plan is 149 euro a month.");
+    assert.equal(first.voiceId, "piper:en_US-lessac-medium");
+    assert.equal(first.gainDb, -1.7, "Piper Lessac measured -22.0 dB, Kokoro Heart -23.7 dB: brought down 1.7 dB");
+    assert.equal(second.text, "Anything else?");
+    assert.equal(second.voiceId, "kokoro:af_heart");
+    assert.equal(second.gainDb, undefined);
+  });
+
+  test("ON: a male voice gets the male fast voice, each with its own gain; the UK voice is matched by gender, not accent", async () => {
+    const h = harness({ fastFirstChunk: true, config: { voices: { en: "kokoro:bm_fable" } }, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    const [first, second] = replyVoices(h);
+    assert.equal(first.voiceId, "piper:en_US-ryan-medium");
+    assert.equal(first.gainDb, -4, "Ryan -21.0 dB against Fable -25.0 dB");
+    assert.equal(second.voiceId, "kokoro:bm_fable");
+  });
+
+  test("ON: the greeting and the holding lines are never the fast voice — they are cached and already ready", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    const cached = h.synthArgs.filter((a) => a.cache);
+    assert.ok(cached.length >= 6, "the greeting's pieces and the pre-warmed fillers");
+    assert.ok(cached.every((a) => a.voiceId === "kokoro:af_heart" && a.gainDb === undefined));
+  });
+
+  test("ON: EVERY reply opens with the fast voice, not just the first of the call", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: ["How much is Pro?", "And Lite?"], replies: [streams(REPLY), streams("Lite is 59 euro a month. Anything else?")] });
+    await h.session.start();
+    for (let i = 0; i < 2; i++) {
+      h.advance(5000);
+      h.hear({ type: "start" }, utterance);
+      h.advance(1);
+      await h.settle();
+    }
+    const voices = replyVoices(h).map((a) => a.voiceId);
+    assert.deepEqual(voices, ["piper:en_US-lessac-medium", "kokoro:af_heart", "piper:en_US-lessac-medium", "kokoro:af_heart"]);
+  });
+
+  test("ON: a reply in Urdu is untouched — there is no fast Urdu voice", async () => {
+    const h = harness({
+      fastFirstChunk: true,
+      config: { replyLanguage: "ur" },
+      transcripts: ["آپ کے اوقات کیا ہیں؟"],
+      replies: [streams("ہمارے اوقات صبح نو بجے سے شام چھ بجے تک ہیں۔ کیا مزید کچھ پوچھنا ہے؟")],
+    });
+    await askOnce(h);
+    const used = replyVoices(h).map((a) => a.voiceId);
+    assert.ok(used.length >= 2);
+    assert.ok(used.every((id) => id === "kokoro:hf_alpha"), used.join(", "));
+  });
+
+  test("ON: an owner who already chose a fast voice gets it for the whole reply — there is nothing to switch from", async () => {
+    const h = harness({ fastFirstChunk: true, config: { voices: { en: "piper:en_US-ryan-medium" } }, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    assert.deepEqual(replyVoices(h).map((a) => a.voiceId), ["piper:en_US-ryan-medium", "piper:en_US-ryan-medium"]);
+    assert.ok(replyVoices(h).every((a) => a.gainDb === undefined));
+  });
+
+  test("ON, but the fast voice is not installed: the whole reply is the owner's voice, never a stand-in", async () => {
+    const h = harness({ fastFirstChunk: true, installedVoices: ["kokoro:af_heart", "kokoro:hf_alpha"], transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    assert.deepEqual(replyVoices(h).map((a) => a.voiceId), ["kokoro:af_heart", "kokoro:af_heart"]);
+    assert.equal(h.recorderOpens[0].engine.fastStart, undefined);
+  });
+
+  test("the fast voice is loaded in the background with the others, and the call's record says it is in use", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: [], replies: [] });
+    await h.session.start();
+    assert.ok(h.prepared.includes("piper:en_US-lessac-medium"));
+    assert.equal(h.recorderOpens[0].engine.fastStart, "piper:en_US-lessac-medium");
+  });
+
+  test("the timeline names the voice that made the first sound, so a call can be judged afterwards", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    await askOnce(h);
+    const first = h.recorded.events.find((e) => e.type === "tts.first_audio");
+    assert.equal(first.data.voice, "piper:en_US-lessac-medium");
+    assert.equal(first.data.fastStart, true);
+    assert.equal(first.data.gainDb, -1.7);
+  });
+
+  test("the fast piece cannot hide a slow machine: its quick synthesis stays out of the speed that decides tts.slow", async () => {
+    // The fast voice takes 0.1 s per second of speech on ANY machine; the natural voice takes 1.3 s — slower than it
+    // plays. The running ratio is what tells the timeline "this machine cannot keep up": counting the fast piece
+    // in would drag it down (1.3 → ~1.13 after this reply) and a slow machine would look better than it is.
+    const h = harness({
+      fastFirstChunk: true,
+      transcripts: ["When are you open?"],
+      replies: [streams("Our clinic is open from nine in the morning until six in the evening, Monday to Saturday. We also open on Sunday.")],
+      speechMs: 1000,
+      synthMsFor: (a) => (a.voiceId.startsWith("piper:") ? 100 : 1300),
+    });
+    await askOnce(h);
+    assert.deepEqual(replyVoices(h).map((a) => a.voiceId), ["piper:en_US-lessac-medium", "kokoro:af_heart", "kokoro:af_heart"]);
+    assert.equal(h.recorded.events.filter((e) => e.type === "tts.slow").length, 1, "and it is still reported, once");
+    assert.ok(Math.abs(h.session.ttsRatio - 1.3) < 1e-9, `the ratio is the natural voice's alone, not ${h.session.ttsRatio}`);
+  });
+
+  test("a fixed line (cached) is never the fast voice, whichever turn it is spoken in", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: [], replies: [] });
+    await h.session.start();
+    const before = h.synthArgs.length;
+    await h.session.speak(h.session.newTurn(5), "Please hold on a moment.", { language: "en", cache: true });
+    const [spoken] = h.synthArgs.slice(before);
+    assert.equal(spoken.voiceId, "kokoro:af_heart");
+    assert.equal(spoken.gainDb, undefined);
+  });
+
+  test("a failed fast piece does not end the reply: the next piece is simply the first one that got through", async () => {
+    const h = harness({ fastFirstChunk: true, transcripts: ["How much is Pro?"], replies: [streams(REPLY)] });
+    const realSynth = h.session.tts.synthesize;
+    let failed = false;
+    h.session.tts.synthesize = async (args) => {
+      if (!failed && args.voiceId?.startsWith("piper:")) {
+        failed = true;
+        throw new Error("piper broke");
+      }
+      return realSynth(args);
+    };
+    await askOnce(h);
+    assert.ok(h.recorded.events.some((e) => e.type === "tts.failed"));
+    assert.equal(h.sent.audio.length > 3, true, "the second piece was still spoken after the greeting");
   });
 });

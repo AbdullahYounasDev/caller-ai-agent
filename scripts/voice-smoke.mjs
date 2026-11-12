@@ -10,7 +10,7 @@
  *     carries, §9.2) → accuracy and the time each stage took. Then the VAD is run over
  *     the audio padded with silence, to check it finds exactly one utterance.
  *
- *   npm run voice:smoke -- --call [--tenant=test-tenant] [--agent=AGENT_ID] [--say="What are your opening hours?"] [--lang=en|ur]
+ *   npm run voice:smoke -- --call [--tenant=test-tenant] [--agent=AGENT_ID] [--gateway=localhost:3002] [--say="What are your opening hours?"] [--lang=en|ur]
  *     A REAL call through the running app + gateway (`npm run dev` and `npm run voice`),
  *     with a synthesised caller: gets a ticket, dials, waits out the greeting, "speaks"
  *     the question in real time, and reports the transcript, the reply, the turn's intent
@@ -149,7 +149,10 @@ async function realCall() {
   const question = await tts.synthesize({ text: say, language });
   const pcm = resample(question.samples, question.sampleRate, 16_000);
 
-  const ws = new WebSocket(session.url);
+  // --gateway=localhost:3002 dials another gateway than the one the app names (same ticket secret): two gateways
+  // running side by side, one call to each in turn, is how two settings are compared without network drift.
+  const url = typeof args.gateway === "string" ? session.url.replace(/^(wss?:\/\/)[^/]+/, `$1${args.gateway}`) : session.url;
+  const ws = new WebSocket(url);
   const log = (...a) => console.log(`+${((performance.now() - t0) / 1000).toFixed(2)}s`, ...a);
   const t0 = performance.now();
   let audioRate = 22_050;

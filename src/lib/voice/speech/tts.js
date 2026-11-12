@@ -2,7 +2,7 @@ import { createSerialQueue } from "../serial";
 import { TTS } from "../config";
 import { getVoice, voiceFor } from "./voices";
 import { engineKeyFor } from "./engine";
-import { trimSilence, withTrailingSilence } from "../audio";
+import { applyGainDb, trimSilence, withTrailingSilence } from "../audio";
 
 /**
  * ███ THE TEXT-TO-SPEECH SEAM ███
@@ -27,8 +27,9 @@ import { trimSilence, withTrailingSilence } from "../audio";
  * comma, none between two pieces of one sentence.
  *
  * @typedef {{
- *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"ur", cache?: boolean, pauseMs?: number}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string, speechMs: number}>,
+ *   synthesize(args: {text: string, voiceId?: string, language?: "en"|"ur", cache?: boolean, pauseMs?: number, gainDb?: number}): Promise<{samples: Float32Array, sampleRate: number, ms: number, voiceId: string, speechMs: number}>,
  *   prepare(voiceIds: string[]): Promise<void>,
+ *   isInstalled(voiceId: string): boolean,
  * }} TextToSpeech
  */
 
@@ -69,7 +70,7 @@ function localTextToSpeech(engine) {
   // Bounded LRU: a few dozen businesses × a handful of lines each.
   const cache = new Map();
 
-  async function synthesizeNow(voice, text, pauseMs) {
+  async function synthesizeNow(voice, text, pauseMs, gainDb = 0) {
     const key = engineKeyFor(voice);
     const tts = await engine.ttsEngine(key);
     return queueFor(key)(async () => {
@@ -78,7 +79,7 @@ function localTextToSpeech(engine) {
       const ms = Math.round(performance.now() - started);
       const spoken = TTS.trim ? trimSilence(audio.samples, audio.sampleRate, TTS.trim).samples : audio.samples;
       return {
-        samples: withTrailingSilence(spoken, audio.sampleRate, pauseMs),
+        samples: withTrailingSilence(applyGainDb(spoken, gainDb), audio.sampleRate, pauseMs),
         sampleRate: audio.sampleRate,
         ms,
         voiceId: voice.id,
@@ -90,23 +91,34 @@ function localTextToSpeech(engine) {
   }
 
   return {
+    /**
+     * Is this exact voice installed? The session asks before it plans to use a voice for the first piece
+     * of a reply: resolve() above would otherwise answer a missing voice with the language default — a
+     * DIFFERENT voice, silently.
+     */
+    isInstalled(voiceId) {
+      const voice = getVoice(voiceId);
+      return Boolean(voice && engine.installedVoices.includes(voice.id));
+    },
+
     async prepare(voiceIds) {
       await Promise.all(voiceIds.map((id) => engine.ttsEngine(engineKeyFor(resolve(id)))));
     },
 
     /**
-     * @param {{text: string, voiceId?: string, language?: string, cache?: boolean, pauseMs?: number}} args
+     * @param {{text: string, voiceId?: string, language?: string, cache?: boolean, pauseMs?: number, gainDb?: number}} args
      *   pauseMs: silence after the piece — the pause its JOIN needs (default: a sentence's)
+     *   gainDb: the piece this many dB louder (negative: quieter) — the fast start matches levels (voices.js)
      */
-    async synthesize({ text, voiceId, language, cache: cacheable = false, pauseMs = TTS.sentencePauseMs }) {
+    async synthesize({ text, voiceId, language, cache: cacheable = false, pauseMs = TTS.sentencePauseMs, gainDb = 0 }) {
       const voice = resolve(voiceId, language);
-      if (!cacheable) return synthesizeNow(voice, text, pauseMs);
+      if (!cacheable) return synthesizeNow(voice, text, pauseMs, gainDb);
 
-      const key = `${voice.id}\u0000${pauseMs}\u0000${text}`;
+      const key = `${voice.id}\u0000${pauseMs}\u0000${gainDb}\u0000${text}`;
       const started = performance.now();
       const created = !cache.has(key);
       if (created) {
-        const pending = synthesizeNow(voice, text, pauseMs);
+        const pending = synthesizeNow(voice, text, pauseMs, gainDb);
         cache.set(key, pending);
         pending.catch(() => cache.delete(key));
         if (cache.size > CACHE_ENTRIES) cache.delete(cache.keys().next().value);

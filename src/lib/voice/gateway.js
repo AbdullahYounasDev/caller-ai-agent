@@ -14,9 +14,9 @@ import { CallRecorder } from "./recorder";
 import { createBrowserTransport, decodeClientFrame } from "./transports/browser";
 import { createTwilioTransport, decodeTwilioMessage } from "./transports/twilio";
 import { createTicketVerifier, ticketSecret } from "./ticket";
-import { LIMITS, gatewayPort } from "./config";
+import { LIMITS, fastFirstChunkEnabled, gatewayPort } from "./config";
 import { CLOSE_REFUSED, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
-import { getVoice, PREVIEW_TEXT } from "./speech/voices";
+import { FAST_START_VOICE_IDS, getVoice, PREVIEW_TEXT } from "./speech/voices";
 import { encodeWav } from "./audio";
 import { hit } from "@/lib/security/rate-limit";
 import { saveRecording } from "@/lib/standins/recordings";
@@ -170,6 +170,8 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       // Phone calls of an agent with recording switched on are kept (standins/recordings.js stands in for the
       // backend's storage); the session decides which calls — see CallSession.shouldRecordAudio.
       saveRecording: (args) => saveRecording({ ...args, env }),
+      // The first piece of an English reply in the fast voice (VOICE_FAST_FIRST_CHUNK, config.js) — OFF by default.
+      fastFirstChunk: fastFirstChunkEnabled(env),
     });
   }
 
@@ -310,6 +312,13 @@ export async function startVoiceGateway({ env = process.env } = {}) {
       engineInfo: { ...engine.info, sttRouting: stt.describe(), llm: describeChatProvider() },
     };
     console.log(`[voice] models ready in ${Math.round(performance.now() - loadStarted)} ms — ${engine.info.runtime}`);
+    if (fastFirstChunkEnabled(env)) {
+      // The fast voices are otherwise loaded the first time a call needs one — a second of dead air on the
+      // very reply this feature exists to speed up. Only the ones really installed (tts.isInstalled).
+      const installed = FAST_START_VOICE_IDS.filter((id) => speech.tts.isInstalled(id));
+      await speech.tts.prepare(installed).catch((err) => console.error("[voice] could not load the fast start voices:", err));
+      console.log(`[voice] fast first chunk ON — fast voices ready: ${installed.join(", ") || "none installed"}`);
+    }
   } catch (err) {
     loadError = err;
     console.error(`[voice] could not load speech models:\n${err.message}`);

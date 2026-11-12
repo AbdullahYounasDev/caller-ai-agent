@@ -144,6 +144,8 @@ scripts/
   voice-models.mjs             # `npm run voice:models` — resumable download of the speech models
   voice-smoke.mjs              # `npm run voice:smoke` — speech benchmark, ZERO quota; `-- --call` = a real call with a synthetic caller
   voice-gaps.mjs               # `npm run voice:gaps` — silence at every join inside a spoken reply, real voices, before vs now, ZERO quota (§6.24)
+  voice-levels.mjs             # `npm run voice:levels` — re-measures how loud each English voice is and names the entries of SPEECH_LEVEL_DB that drifted, ZERO quota (§6.24 fast start)
+  voice-listen.mjs             # `npm run voice:listen` — renders replies "natural voice" vs "fast start" into ONE wav each (./listen, gitignored) to judge by ear, ZERO quota (§6.24)
   twilio-smoke.mjs             # `npm run twilio:smoke` — a fake Twilio calls the REAL app + gateway: signature refusals, an answered call, μ-law audio both ways, the call record (§6.30)
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
@@ -226,7 +228,7 @@ src/lib/
     session.js                 # ★ CallSession — one live call: greet, VAD → STT → respond() → TTS, barge-in
     recorder.js                # every DB write of a call: call_logs, call_turns, call_events (batched, off the hot path); can continue an existing conversation (resume, §6.30)
     call-audio.js              # a phone call's audio on one timeline → stereo 8 kHz WAV (caller left, agent right), pure (§6.30)
-    speech/                    # models.js (manifest) · voices.js (THE voice catalog, pure) · engine.js (loads once)
+    speech/                    # models.js (manifest) · voices.js (THE voice catalog, pure; also the fast start's pairing + level table) · engine.js (loads once)
                                #   · vad.js · stt.js ★ SEAM (Parakeet / Groq Whisper, routed per call) · tts.js ★ SEAM (Kokoro / Piper, cache)
     gateway-url.js             # where the browser reaches the gateway — shared by the session and gateway routes
     transports/browser.js      # the console's WebSocket protocol
@@ -1771,6 +1773,39 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
 - **The agent's gender is the voice's gender.** On the voice channel the prompt states it
   (`voiceGenderInstruction`), so Urdu self-references agree with what the caller hears
   ("میں کر سکتی ہوں" for a female voice); the Urdu greeting picks سکتی / سکتا the same way.
+- **The fast start — the FIRST piece of an English reply in the fast voice (built, OFF: `VOICE_FAST_FIRST_CHUNK=1`).** The natural
+  voice needs ~40 ms per character, so a 45-character first chunk takes 1.5–2.2 s to make before the caller hears anything;
+  Piper makes it in 0.3–0.55 s (measured 2026-11-12, warm, mains power). A shorter first chunk for the natural voice does not get
+  there: 23 characters still took 1.0–1.3 s, and cut a phrase in two. With the switch on, the first piece of each English reply
+  is spoken by the Piper voice that matches the agent's voice and the rest by the voice the owner chose (`voices.js
+  fastStartVoiceFor`; `session.js planFastStart` and `speak`). Rules that must not drift:
+  - **Gender, not accent, picks the partner** (female → Lessac, male → Ryan; the agent's gender is its voice's and the prompt says
+    so). Pitch measured: 189 vs 190 Hz (female), 114 vs 130 Hz (male). A UK Kokoro voice gets a US Piper voice.
+  - **The level is matched PER PAIR** (`SPEECH_LEVEL_DB`, `fastStartGainDb`, `tts.synthesize({ gainDb })`, `audio.js applyGainDb`).
+    Kokoro's own English voices span ~6 dB (−25.4 … −19.4 dB), more than Piper differs from most of them, so one constant per
+    gender would leave some voices 2–3 dB off. The step at the switch averaged **0.8 dB with the correction against 3.4 dB
+    without** (`npm run voice:listen`, six reply/voice combinations). Re-measure with `npm run voice:levels` whenever a voice or a
+    model changes — it names the entries that drifted and prints the table to paste.
+  - **Only the first piece of a reply the model wrote.** Never the greeting or another cached fixed line, never Urdu (there is no
+    fast Urdu voice), never when the owner already chose a fast voice (nothing to switch from), and never when the fast voice is
+    not installed (`tts.isInstalled`: `resolve()` would answer a missing voice with a DIFFERENT one, silently).
+  - **Its quick synthesis stays out of the running ratio behind `tts.slow`** — it is quick on any machine and would hide a slow one.
+  - **Two sample rates in one reply (Kokoro 24 kHz, Piper 22.05 kHz) are fine on every transport:** the browser is told the rate
+    before each piece (`pcm-player.js`), the phone path resamples every piece from its own rate, the recording takes each piece's.
+  - The call's `engine` JSON records `fastStart`, and the `tts.first_audio` event names the voice (and `gainDb`).
+  **Why it is OFF.** Nobody has LISTENED to two engines in one reply, and the switch lands inside the first couple of seconds —
+  mid-sentence whenever the first sentence is longer than the first chunk, and a short answer ("Two thousand seven hundred
+  Pakistani rupees.") is ENTIRELY the fast voice. The same rule as `TTS.speed`: do not change it without listening to a call.
+  `npm run voice:listen` renders three replies in two voices, each file "natural, 1.5 s of silence, fast start". If it is adopted:
+  set the variable, and consider using the fast voice only for a first piece that ends mid-sentence (the reply certainly continues),
+  which keeps short answers in one voice at the cost of their speed-up.
+  **Measured (2026-11-12, 12 real calls each way, the KO agent: UK male voice → Ryan, −4 dB):** the TTS stage (making the first
+  chunk) **1174 ms → 336 ms, −838 ms at the median, and the two ranges do not overlap (868–1387 vs 115–453)**. The stages ADD
+  UP — end of speech → first audio = STT + retrieval + first token + TTS, residual median 46 ms (off) / 49 ms (on) — so the
+  saving carries to the caller. The raw end-to-end medians came out equal (2656 vs 2650 ms) only because the network stages
+  were slower in the second session (STT +148 ms, first token +122 ms, three 7.7–8.8 s spikes); a PAIRED test (two gateways
+  side by side, `voice:smoke -- --call --gateway=`) did not fit in memory with other programs open and was NOT run. No mid-reply gaps
+  were added (1 call in 12 each way). The phone path was run with it on (`twilio:smoke`, two runs back to back: all checks).
 - **Turn flow:** VAD finds the utterance (after `VAD.minSilenceSeconds` = 0.5 s of silence — the
   biggest fixed latency, paid on every turn) → STT → `respond()` streams → `SentenceChunker` →
   each chunk is synthesised and sent while the next one is still being generated. Turns are
@@ -1983,8 +2018,8 @@ STT (Parakeet) 0.2–0.5 s per utterance. Model load ~10 s at gateway start (thr
 Real calls with the natural voice on the free Gemini tier: STT 0.2–0.4 s, retrieval 0.9–1.1 s
 (0.05 s when cached), LLM first token 0.6–1.5 s on lucky calls, first chunk 1.2–1.6 s →
 **~3.1–3.8 s end-of-speech → first word**, no mid-reply gaps. Remaining levers, in order: a fast
-LLM (Groq), Kokoro at 8 threads (now the default), the fast voice tier for latency-critical lines,
-the 0.5 s VAD window.
+LLM (Groq — done), Kokoro at 8 threads (now the default), the fast voice for the first piece of a reply (built, OFF —
+"The fast start" above), the 0.5 s VAD window.
 
 **Not built:** Twilio `mark` events for exact playback (§6.30); a local Urdu recogniser; consent capture and
 retention rules for recordings (the backend's, §6.30). (The Twilio transport, webhook and phone call recording are
@@ -2083,7 +2118,7 @@ taken. Backend responsibilities that are stood in for are in
   - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
     noted and the team confirms it and the total; prices and totals only from the reference material.
 
-**Verified:** `npm test` (539 unit tests when this was built — 781 today, §10 — incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests when this was built — 807 today, §10 — incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -2556,7 +2591,7 @@ right language, with history persisted per tenant.
 | Multi-tenant vector search | ⚠️ one shared HNSW index filters by tenant AFTER the graph walk; guarded with per-transaction iterative scans, asserted by `db:check`; the guard has a ceiling (§6.1) |
 | Embedding scheme & re-embed | ⚠️ the machinery is built and tested (`embed-scheme.js`, `npm run reembed`, batching, role/`taskType` plumbing — §6.2), but **no new scheme is adopted**: measuring one needs ~800 embedding texts and the free quota has not allowed it (§8 limitation 4) |
 | **Follow-up questions** | ✅ "and the Pro one?" is rewritten into a standalone query before retrieval — 31% → 100% hit@1 on 16 follow-ups, off-topic still rejected (§6.19). ⚠️ costs ~1–1.5s per triggered turn, too slow for the voice budget (§9.2); precise trigger + circuit breaker + optional faster model built, NOT yet measured (§6.19) |
-| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Phone calls through Twilio are built (§6.30), verified against a fake Twilio only |
+| **Voice calls (browser)** | ✅ Call button in the console → greeting → speak → grounded spoken answer; barge-in, failure apology; every call/turn/event stored and shown back (§6.24). Natural (Kokoro) and fast (Piper) voices, male and female, US/UK English and **Urdu**, chosen per business in the console with ▶ preview. Progressive chunking; the silence inside a sentence is down from ~300 ms to ~100–135 ms at each join (engine quiet trimmed, no pause between pieces of one sentence, no cut after "about/the/two" — measured with `voice:gaps`); a slow machine still has gaps and logs `tts.slow`. Pauses: a sentence cut by a pause is answered as one message (also when the first half sounded finished), "hold on" gets a longer wait, and pause talk never enters the conversation. ⚠️ ~3.1–3.8 s end-of-speech → first word with the natural voice on lucky free-tier Gemini calls — the free tier's 3.5–10 s first token is the main problem; Groq provider built, NOT yet measured (no key). Urdu callers are understood only with `GROQ_API_KEY` (recognition no longer depends on the reply language, §6.24). Phone calls through Twilio are built (§6.30), verified against a fake Twilio only. The first piece of an English reply in a matching fast voice is built but OFF until somebody has listened to it (`VOICE_FAST_FIRST_CHUNK`, §6.24) |
 | Heading-aware chunking | ✅ verified on tables and multi-section documents; label/value & URL lines no longer misdetected as headings (§6.4) |
 | Relevance threshold | ✅ measured at 0.43; off-topic questions return nothing |
 | Multi-file upload | ✅ one job per file; bad files rejected individually |
@@ -2624,7 +2659,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 781 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 807 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2728,10 +2763,13 @@ right language, with history persisted per tenant.
    not thinking and not prompt size. Groq is now in use and MEASURED on mains power (2026-11-12, §6.24): first token
    610–1147 ms, Whisper ~0.5–1.1 s, median end-of-speech → first audio 3.7 s, no mid-reply gaps — the LLM is no
    longer the bottleneck, and the ~800 ms target is still far. DONE the same day (§6.24 "Found on those calls"): the
-   first-turn rewrite, the invented business description and the "First," opener. Next, in order: (a) the fast voice
-   tier for the FIRST chunk of a reply (Piper ~0.4 s a sentence against Kokoro's ~1.3 s) — decide whether it should be
-   the default for latency-sensitive businesses, and check how it sounds in Urdu (there is no Piper Urdu voice, so
-   Urdu's first chunk stays Kokoro, the voice closest to its limit); (b) the round trips: a fresh query embedding
+   first-turn rewrite, the invented business description and the "First," opener. BUILT the same week: the fast voice for
+   the first piece of an English reply (§6.24 "The fast start", `VOICE_FAST_FIRST_CHUNK`) — the first chunk is made in
+   ~0.34 s instead of ~1.17 s, OFF until somebody has listened (`npm run voice:listen`). Next, in order: (a) LISTEN to it,
+   then decide whether it becomes the default and whether it should apply only to a first piece that ends mid-sentence;
+   Urdu cannot use it (there is no Piper Urdu voice), so Urdu's first chunk stays Kokoro, the voice closest to its
+   limit — a fast Urdu voice would need a licence-clean model, which does not exist today (MMS is non-commercial);
+   (b) the round trips: a fresh query embedding
    ~0.85 s and recognition ~0.9 s; (c) the first-turn fix has only been judged by unit tests and real calls — fold
    it into the next `eval:real` run when quota allows (it changes nothing for chat or for a caller's second
    question, but the evals are the gate, §6.3); (d) Urdu answers in 1 of 30 samples had a stray Devanagari letter.
@@ -2809,12 +2847,14 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 781 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format). No DB, no Gemini, no speech models (§11)
+npm test                 # 807 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
-#   -- --call [--tenant=ID] [--agent=ID] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding.
+npm run voice:levels     # how loud each English voice is, against SPEECH_LEVEL_DB — names what drifted and prints the table to paste. ZERO quota (§6.24 fast start); -- --tolerance=dB
+npm run voice:listen     # renders replies "natural voice, 1.5 s silence, fast start" into ONE wav each in ./listen (gitignored) to judge by ear. ZERO quota (§6.24 fast start); -- --voice=ID --out=DIR
+#   -- --call [--tenant=ID] [--agent=ID] [--gateway=localhost:3002] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding.
 #      Without --agent the tenant's DEFAULT agent answers, and it cannot see a document limited to another agent (§6.28): name the agent that owns the knowledge.
-npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)
+npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set; a fresh fake number each run, so runs may follow each other at once): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)
 npm run test:numbers     # the phone-number lookup against the real DB: every refusal, re-linking, release, isolation — no quota (§6.29)
 npm run test:agents      # several agents per tenant + knowledge per agent + every setting per agent (greeting and recording switch included), against the real DB, faked models — spends no quota (§6.27, §6.28)
 npm run test:collect     # request-taking end to end against the real DB (configure → converse → read-back → save → idempotent retry → status workflow → tenant isolation), faked models — spends no quota (§6.25)
@@ -2881,7 +2921,8 @@ stale.
   browser reaches the gateway somewhere other than this host on that port), `VOICE_SESSION_SECRET`
   (signs session tickets — both processes must share it; falls back to `INTERNAL_API_KEY`),
   `VOICE_MODELS_DIR`, `VOICE_STT_THREADS` (2) / `VOICE_TTS_THREADS` (every logical core),
-  `VOICE_STT_PROVIDER` (`auto` | `local` | `groq`), `VOICE_TTS_PROVIDER` (only `local`).
+  `VOICE_STT_PROVIDER` (`auto` | `local` | `groq`), `VOICE_TTS_PROVIDER` (only `local`), `VOICE_FAST_FIRST_CHUNK`
+  (`1`/`true`/`on` = the first piece of an English reply in the matching fast voice; OFF by default, nobody has listened to it yet — §6.24).
 - Script-only knobs (not read by the app): `APP_URL` (where the eval and OpenRouter
   scripts find the running app, default `http://localhost:3000`), `EVAL_TENANT`,
   `TEST_TENANT`, `FAKE_PORT`, `EMBED_VARIANTS_CACHE`.

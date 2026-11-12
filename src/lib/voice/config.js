@@ -187,6 +187,20 @@ export const TTS = {
   gapLogMs: 120,
 };
 
+/**
+ * THE FAST START (voices.js, session.js): the first piece of an English reply is made by the fast
+ * (Piper) voice that matches the agent's, and the rest by the voice the owner chose. It cuts the wait
+ * for the first sound by about a second, at the price of a second voice in the first couple of seconds
+ * of a reply — a trade nobody has LISTENED to yet (CLAUDE.md §6.24), so it is OFF unless
+ * VOICE_FAST_FIRST_CHUNK is 1, true or on. The same precedent as TTS.speed above: "do not change
+ * it without listening to a call".
+ *
+ * @param {Record<string, string|undefined>} [env]
+ */
+export function fastFirstChunkEnabled(env = process.env) {
+  return /^(1|true|on|yes)$/i.test(String(env.VOICE_FAST_FIRST_CHUNK ?? "").trim());
+}
+
 /** The gateway's own port. The browser connects to it directly (Next.js route
  *  handlers cannot hold a WebSocket open, §6.24). */
 export function gatewayPort(env = process.env) {
