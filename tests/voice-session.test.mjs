@@ -1741,3 +1741,274 @@ describe("the echo guard in the call: the agent's own voice is not the caller", 
     assert.equal(ended.data.echoDropped, 0);
   });
 });
+
+/**
+ * A TRANSFER THE CALLER NEVER HEARD ANNOUNCED, AND A CALL THAT WOULD NOT END (CLAUDE.md §6.26).
+ * Reproduced from three real console calls, where (1) a caller talking over the reply was transferred anyway, in silence,
+ * (2) "Goodbye." did not end the call because a "please rephrase" plan was mistaken for a transfer, and (3) a transcript in
+ * a script nobody speaks to this agent was answered as a question.
+ */
+describe("a transfer is only placed once the caller has heard who they are being put through to", () => {
+  const CONTACTS = [{ id: "c1", role: "Representative", name: "Adan", phone: "+923001234567" }];
+  const ANNOUNCEMENT = "I'm connecting you to Adan, our Representative. Please stay on the line.";
+  const handoffResult = (text) => ({ reply: text, sources: [], model: "t", timings: {}, handoff: { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "x", announcement: ANNOUNCEMENT } });
+
+  test("the caller talks over the reply before a word of it is heard: no transfer, the state is put back, and what they were saying is answered", async () => {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    const h = harness({
+      transcripts: ["Oui.", "Zero three four zero five two one six five four two."],
+      replies: [
+        async ({ onChunk }) => {
+          await gate; // the model is still thinking when the caller speaks
+          const text = `May I have your phone number, please? ${ANNOUNCEMENT}`;
+          onChunk(text);
+          return handoffResult(text);
+        },
+        streams("Thank you. I have your number."),
+      ],
+      transfer: async () => ({ connected: true, simulated: true }),
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 200 });
+    release();
+    await h.pump(8000);
+    await h.settle();
+
+    assert.equal(h.recorded.turns[0].interrupted, true);
+    assert.equal(h.sent.transfers.length, 0, "nobody is rung for a caller who never heard it announced");
+    assert.equal(h.sent.closed, null, "the call goes on");
+    const cancelled = h.recorded.events.find((e) => e.type === "handoff.cancelled");
+    assert.ok(cancelled, "logged");
+    assert.equal(cancelled.data.reason, "caller_spoke");
+    assert.ok(!h.recorded.events.some((e) => e.type === "handoff.started" || e.type === "handoff.completed"));
+    assert.deepEqual(h.handoffFailures, [{ tenantId: "t1", conversationId: "conv-1" }], "the conversation is not left marked 'passed on'");
+
+    // What the caller was saying is not lost: it is the next turn.
+    h.advance(1000);
+    h.hear(utterance);
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+    assert.ok(h.spoken.some((s) => !s.cache && s.text === "Thank you. I have your number."));
+    assert.equal(h.sent.closed, null);
+  });
+
+  test("the caller starts talking while the announcement is playing: the transfer is not placed either", async () => {
+    const h = harness({
+      transcripts: ["Do you do catering for big events?"],
+      replies: [async ({ onChunk }) => { onChunk(ANNOUNCEMENT); return handoffResult(ANNOUNCEMENT); }],
+      transfer: async () => ({ connected: true, simulated: true }),
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(300); // the announcement is sent and playing; the session waits for it to finish
+    assert.equal(h.sent.transfers.length, 0);
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 200 }); // the caller talks over it
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 0);
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.cancelled"));
+    assert.equal(h.handoffFailures.length, 1);
+  });
+
+  test("speech nobody could read ends in a transfer: the same rule — talk over the line that names who they are put through to, and nobody is rung", async () => {
+    const decisions = [{ kind: "rephrase" }, { kind: "handoff", reason: "not_understood", contacts: CONTACTS, summary: "x", announcement: ANNOUNCEMENT }];
+    const h = harness({ transcripts: ["", ""], noteUnheard: async () => decisions.shift(), transfer: async () => ({ connected: true }) });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(300);
+    h.hear({ type: "start" }, { type: "ongoing", speechMs: BARGE_IN.minSpeechMs + 200 });
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 0);
+    assert.equal(h.sent.closed, null);
+    assert.ok(h.recorded.events.some((e) => e.type === "handoff.cancelled"));
+  });
+
+  test("when nothing interrupts, the announcement plays and THEN the transfer is placed (unchanged)", async () => {
+    const h = harness({
+      transcripts: ["Do you do catering for big events?"],
+      replies: [async ({ onChunk }) => { onChunk(ANNOUNCEMENT); return handoffResult(ANNOUNCEMENT); }],
+      transfer: async () => ({ connected: true, simulated: true }),
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(300);
+    assert.equal(h.sent.transfers.length, 0, "not before the announcement has played");
+    await h.pump(8000);
+    await h.settle();
+    assert.equal(h.sent.transfers.length, 1);
+    assert.equal(h.sent.closed, END_REASONS.TRANSFERRED);
+    assert.ok(!h.recorded.events.some((e) => e.type === "handoff.cancelled"));
+  });
+});
+
+describe("a call that has said goodbye ends", () => {
+  const goodbye = (handoff) => async ({ onChunk }) => {
+    const text = "Thank you for calling KO Restaurants. Goodbye.";
+    onChunk(text);
+    return { reply: text, sources: [], handoff, model: "t", timings: {} };
+  };
+
+  test("a 'please rephrase' plan is not a transfer: the agent said goodbye, so the call ends by itself", async () => {
+    const h = harness({ transcripts: ["No, nothing."], replies: [goodbye({ kind: "rephrase", reason: null, callback: false })] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(15000);
+    await h.settle();
+    const closing = h.recorded.events.find((e) => e.type === "call.closing");
+    assert.equal(closing?.data.trigger, "agent_farewell");
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.check_in"), "never asked 'are you still there?' after goodbye");
+  });
+
+  test("neither does the offer of a call-back (the business is closed) hold a goodbye back", async () => {
+    const h = harness({ transcripts: ["No thanks."], replies: [goodbye({ kind: "unavailable", reason: "closed", callback: true })] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(15000);
+    await h.settle();
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+  });
+
+  test("a goodbye that the owner's switch does not end is never followed by 'Are you still there?' — the silent line just ends", async () => {
+    const h = harness({ config: { autoEndCalls: false }, transcripts: ["Thanks."], replies: [goodbye(undefined)] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(5000);
+    await h.settle();
+    assert.equal(h.sent.closed, null, "the switch is off: the call is not ended by the decision");
+    await h.pump(SILENCE.checkInAfterMs + 2000);
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.check_in"));
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.ending" && e.data?.afterFarewell === true));
+    assert.equal(h.sent.closed, END_REASONS.AGENT_GOODBYE);
+  });
+
+  test("silence after something that is NOT a goodbye still gets the check-in first (unchanged)", async () => {
+    const h = harness({ transcripts: ["What are your hours?"], replies: [streams("We open at nine. Anything else?")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(3000);
+    await h.settle();
+    await h.pump(SILENCE.checkInAfterMs + 2000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+    assert.equal(h.sent.closed, null, "it asked first");
+  });
+
+  test("a goodbye does not leave the check-in disabled for later: after a fixed line that is NOT a goodbye the agent asks as before", async () => {
+    // Goodbye (switch off, so the call stays), then the caller says something the recogniser cannot read → the agent asks them to repeat.
+    const h = harness({ config: { autoEndCalls: false }, transcripts: ["Thanks.", ""], replies: [goodbye(undefined)] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(3000);
+    await h.settle();
+    h.advance(1000);
+    h.hear({ type: "start" }, utterance); // empty transcript, long enough to be a person: "Sorry, I didn't catch that"
+    await h.pump(2000);
+    await h.settle();
+    assert.ok(h.recorded.events.some((e) => e.type === "speech.unheard"));
+    await h.pump(SILENCE.checkInAfterMs + 2000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"), "the agent's last words were a request to repeat, not a goodbye");
+  });
+
+  test("any other line the agent says after a goodbye makes the goodbye no longer its last word", async () => {
+    const h = harness({ config: { autoEndCalls: false }, transcripts: ["Thanks."], replies: [goodbye(undefined)] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(3000);
+    await h.settle();
+    await h.session.speakFixed("Sorry, I didn't catch that.", "en"); // e.g. a call-back line, a repeat request — anything that is not a goodbye
+    await h.pump(SILENCE.checkInAfterMs + 2000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"));
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.ending" && e.data?.afterFarewell === true));
+  });
+
+  test("a sound from the caller after the goodbye (a cough the recogniser could not read) restores the ordinary check-in", async () => {
+    const h = harness({ config: { autoEndCalls: false }, transcripts: ["Thanks.", ""], replies: [goodbye(undefined)] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.pump(3000);
+    await h.settle();
+    h.advance(1000);
+    h.hear({ type: "start" }, { type: "utterance", samples: new Float32Array(4000), durationMs: 300 }); // a blip: not unheard, nothing said
+    await h.settle();
+    await h.pump(SILENCE.checkInAfterMs + 2000);
+    assert.ok(h.recorded.events.some((e) => e.type === "silence.check_in"), "somebody is on the line: ask");
+    assert.ok(!h.recorded.events.some((e) => e.type === "silence.ending" && e.data?.afterFarewell === true));
+  });
+});
+
+describe("a transcript the agent cannot read is 'unheard', not a question", () => {
+  test("Cyrillic from a caller who spoke English or Urdu (the recogniser's language guess was wrong) is asked to repeat, with no brain call", async () => {
+    const h = harness({ transcripts: ["Нет, ничего."], noteUnheard: async () => null });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 0, "nothing sent to the brain");
+    assert.equal(h.recorded.turns.length, 0);
+    const empty = h.recorded.events.find((e) => e.type === "stt.empty");
+    assert.equal(empty.data.script, "Cyrillic");
+    assert.ok(h.recorded.events.some((e) => e.type === "speech.unheard"));
+    assert.ok(h.spoken.some((x) => x.text === "Sorry, I didn't catch that. Could you say it again, please?" || x.text === "I'm sorry, the line wasn't clear. Could you repeat that for me?"));
+  });
+
+  test("a short blip in that script is plain noise (not long enough to be a person we failed)", async () => {
+    const h = harness({ transcripts: ["Нет."], noteUnheard: async () => null });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, { type: "utterance", samples: new Float32Array(4000), durationMs: 300 });
+    await h.settle();
+    assert.equal(h.calls.length, 0);
+    assert.ok(!h.recorded.events.some((e) => e.type === "speech.unheard"));
+  });
+
+  test("Urdu script and English are still answered", async () => {
+    const h = harness({ transcripts: ["آپ کے اوقات کیا ہیں؟", "What are your hours?"], replies: [streams("Nine to six."), streams("Nine to six.")] });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.calls.length, 2);
+  });
+});
+
+describe("what the caller answered is not logged as a question the documents failed", () => {
+  test("a name given after the agent asked for one is 'conversational'; a real request nothing answered is still a gap", async () => {
+    const h = harness({
+      transcripts: ["I want to order something.", "My name is Ali Khan."],
+      replies: [streams("Of course. May I have your name, please?"), streams("Thank you, Ali.")],
+    });
+    await h.session.start();
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    h.advance(8000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.recorded.turns[1].outcome, "conversational");
+    assert.equal(h.recorded.turns[0].outcome, "no_knowledge");
+  });
+});

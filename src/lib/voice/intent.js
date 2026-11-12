@@ -80,9 +80,11 @@ const GREETING_ONLY = new RegExp(
  * @param {string|null} [turn.rewriteStatus]
  * @param {boolean} [turn.failed]
  * @param {string|null} [turn.requestState] what taking a request did this turn (respond().collection.state)
+ * @param {boolean} [turn.answersAgent] the caller ANSWERED the agent's question (a name, a number, "no thanks") —
+ *   there was nothing to look up, so it is not a question the documents failed to answer (lib/handoff/answers.js)
  * @returns {{intent: string, outcome: string, topic: string|null}}
  */
-export function classifyTurn({ callerText, sources = [], trigger = null, rewriteStatus = null, failed = false, requestState = null }) {
+export function classifyTurn({ callerText, sources = [], trigger = null, rewriteStatus = null, failed = false, requestState = null, answersAgent = false }) {
   const text = String(callerText ?? "").trim();
 
   let intent = INTENTS.QUESTION;
@@ -103,7 +105,7 @@ export function classifyTurn({ callerText, sources = [], trigger = null, rewrite
   else if (requestState && requestState !== "idle") outcome = OUTCOMES.CONVERSATIONAL;
   // A generic opener (lib/phrases) is answered from the business profile when no document matched.
   else if (trigger === "overview" || trigger === "ai_check") outcome = OUTCOMES.PROFILE;
-  else if ([INTENTS.GREETING, INTENTS.ACKNOWLEDGEMENT, INTENTS.GOODBYE].includes(intent)) {
+  else if ([INTENTS.GREETING, INTENTS.ACKNOWLEDGEMENT, INTENTS.GOODBYE].includes(intent) || answersAgent) {
     outcome = OUTCOMES.CONVERSATIONAL;
   } else outcome = OUTCOMES.NO_KNOWLEDGE;
 

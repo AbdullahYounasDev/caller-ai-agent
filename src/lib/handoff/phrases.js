@@ -106,14 +106,23 @@ const PROFILE_QUESTION = edged(
   ].join("|")
 );
 
+const isProfileClause = (text, businessName) => PROFILE_QUESTION.test(text) || detectOpener(text, { businessName }) !== null;
+
 /**
+ * @param {string} message
+ * @param {{businessName?: string}} [context] the business's name: "what does Pizza Roma do" is an opener
  * @returns {boolean} the question is one the business profile (name, purpose, hours) answers — the
  *   hours and address patterns above, or any generic opener ("tell me about your company",
  *   "aap kya karte hain", "are you a robot?" — the word lists in lib/phrases)
  */
-export function isProfileQuestion(message) {
+export function isProfileQuestion(message, { businessName = "" } = {}) {
   const text = String(message ?? "");
-  return PROFILE_QUESTION.test(text) || detectOpener(text) !== null;
+  if (isProfileClause(text, businessName)) return true;
+  // A stumbling start ("Hello, Cave restaurants. How… What… what you are and how you can help me") hides an opener from a
+  // matcher that wants every other word to be filler: ask clause by clause (seen on a real call, which then passed the
+  // caller to a person although the agent had answered who it was perfectly well).
+  const clauses = text.split(/[.!?…؟۔]+|\s(?:and|aur|اور)\s/iu).map((c) => c.trim()).filter(Boolean);
+  return clauses.length > 1 && clauses.some((clause) => isProfileClause(clause, businessName));
 }
 
 /**

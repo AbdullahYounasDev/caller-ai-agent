@@ -6,12 +6,13 @@ import { median } from "./recorder";
 import { CallAudioRecorder } from "./call-audio";
 import { BARGE_IN, CONTINUATION, ECHO_GUARD, FILLER, LIMITS, SAMPLE_RATE, SILENCE, TTS, UNHEARD, VAD } from "./config";
 import { EchoGuard } from "./echo-guard";
-import { collapseRepeats, looksUnfinished } from "./transcript-clean";
+import { collapseRepeats, looksUnfinished, unreadableScript } from "./transcript-clean";
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { decideCallEnd } from "./closing";
 import { SPOKEN_LANGUAGES, fastStartGainDb, fastStartVoiceFor, getVoice, voiceFor } from "./speech/voices";
 import { callVocabulary } from "./vocabulary";
-import { detectPause } from "@/lib/phrases";
+import { detectPause, saysFarewell } from "@/lib/phrases";
+import { answersAgentQuestion } from "@/lib/handoff/answers";
 import { nextContactLine } from "@/lib/handoff/announce";
 import { buildVoiceGreeting, voiceLine } from "@/lib/agent/prompt";
 
@@ -152,6 +153,9 @@ export class CallSession {
     this.reportedSlow = false;
     // What the agent last said (as heard): did it just ask "anything else?" (lib/voice/closing.js).
     this.lastAgentReply = null;
+    // The agent's LAST words were a goodbye and nothing has been said since (by either side): a silent line is then simply
+    // over — it is never asked "are you still there?" after "Goodbye." (onSilence).
+    this.farewellPending = false;
     // The conversation is over and the call is about to end by itself ({trigger, delayMs}); cleared
     // by anything real the caller says, kept (and re-armed) through a cough or a click.
     this.closing = null;
@@ -383,6 +387,7 @@ export class CallSession {
         // Someone is talking: a call that was winding down is not over, and a silence check-in is answered.
         this.clearTimer(this.timers.closing);
         this.silenceStage = 0;
+        this.farewellPending = false;
         // The caller is carrying on after a pause: wait for the rest instead of giving up on it.
         if (this.holding) {
           const hold = this.holding;
@@ -534,9 +539,13 @@ export class CallSession {
       }
       transcript = { text: "", ms: 0 };
     }
-    if (!this.isSpeech(transcript.text)) {
+    // The recogniser is not told the caller's language (stt.js), and on a short or clipped utterance it sometimes picks one
+    // nobody speaks to this agent ("No, nothing" written in Cyrillic — seen on a real call). Answering that as a question
+    // sent it to the documents and counted it as a failure to understand; it is speech we could not read.
+    const script = unreadableScript(transcript.text);
+    if (script || !this.isSpeech(transcript.text)) {
       if (!carry) {
-        this.log("stt.empty", { ms: transcript.ms, durationMs });
+        this.log("stt.empty", { ms: transcript.ms, durationMs, ...(script ? { script } : {}) });
         // A short blip is noise (a cough, a click): not a turn, nothing answered — and a call that
         // was ending carries on ending. But a caller who really spoke and was not understood must
         // not be met with silence.
@@ -703,6 +712,9 @@ export class CallSession {
       rewriteStatus: result?.rewriteStatus ?? null,
       failed: Boolean(error),
       requestState: result?.collection?.state ?? null,
+      // What the agent said before this (lastAgentReply is still that reply here): a name or "no thanks" in answer to it is
+      // not a question the documents failed to answer.
+      answersAgent: answersAgentQuestion({ message: text, previousReply: this.lastAgentReply }),
     });
     const responseMs = turn.firstAudioAt != null ? Math.round(turn.firstAudioAt - speechEndedAt) : null;
     if (responseMs != null) this.responseTimes.push(responseMs);
@@ -765,10 +777,13 @@ export class CallSession {
     // What the caller heard the agent say: the next turn reads "did it ask anything else?" from it.
     const previousReply = this.lastAgentReply;
     if (!error) this.lastAgentReply = turn.interrupted ? turn.spoken.join(" ") : (result?.reply ?? turn.sentences.join(" "));
+    this.farewellPending = !error && !turn.interrupted && saysFarewell(this.lastAgentReply ?? "");
 
     // The reply said the caller is being connected to a person: now do it.
     if (result?.handoff?.kind === "handoff" && !error) {
-      await this.performHandoff(result.handoff, { turn: index });
+      // A caller who talked over the reply cut the announcement off: they were never told who they are being put through
+      // to (performHandoff checks that again while the announcement plays).
+      await this.performHandoff(result.handoff, { turn: index, announcementCut: turn.interrupted });
       return;
     }
     // Has the conversation come to its end? Rules, and the owner's switch (lib/voice/closing.js).
@@ -780,7 +795,9 @@ export class CallSession {
       reply: this.lastAgentReply ?? "",
       requestOpen: this.requestOpen(result),
       onHold: this.patience === "hold",
-      handoff: Boolean(result?.handoff),
+      // Only a transfer blocks the end. The brain also returns a "please rephrase" or a "call-back" plan in the same field,
+      // and a call whose agent said Goodbye used to stay open because of one (it then asked "are you still there?").
+      handoff: result?.handoff?.kind === "handoff",
       failed: Boolean(error),
       interrupted: turn.interrupted,
     });
@@ -902,13 +919,29 @@ export class CallSession {
    * resolves `{ connected: boolean, reason?: string }`. Nobody answering is not an error: the
    * agent says so and the call carries on, so the caller is never left on a dead line.
    *
+   * It is placed only if the caller HEARD who they are being put through to. A caller who talks over the announcement
+   * (or over the thinking before it, `announcementCut`) has not been told; ringing a stranger for them while they are
+   * mid-sentence — as a real call did, in silence — is worse than carrying on: the transfer is cancelled, the
+   * conversation is put back as it was, and what they were saying is the next turn.
+   *
    * @param {{contacts: object[], summary?: string, reason?: string}} handoff
-   * @param {{turn: number}} context
+   * @param {{turn: number, announcementCut?: boolean}} context
    */
-  async performHandoff(handoff, { turn }) {
+  async performHandoff(handoff, { turn, announcementCut = false }) {
     if (this.ended) return;
+    const interruptionsBefore = this.interruptions;
     await this.untilAudioEnds();
     if (this.ended) return;
+    if (announcementCut || this.interruptions > interruptionsBefore) {
+      this.log("handoff.cancelled", { turn, reason: "caller_spoke", reasonForHandoff: handoff.reason ?? null });
+      try {
+        await this.brain.handoffFailed?.({ tenantId: this.tenantId, conversationId: this.recorder.conversationId });
+      } catch (err) {
+        console.error("[voice] could not put the handoff state back:", err);
+      }
+      this.settleState();
+      return;
+    }
     const contacts = handoff.contacts ?? [];
     this.log("handoff.started", { turn, reason: handoff.reason, contacts: contacts.map((c) => ({ id: c.id, role: c.role, name: c.name })) });
 
@@ -997,6 +1030,7 @@ export class CallSession {
       const audio = await this.tts.synthesize({ text: line, voiceId: this.voices[language], language, cache: true });
       if (this.ended) return;
       this.lastLanguage = language;
+      this.farewellPending = false;
       this.sendAudio(audio);
       this.transport.notify(SERVER.AGENT_TEXT, { turn: this.turnIndex, text: line, system: true });
       this.setState(CALL_STATES.SPEAKING);
@@ -1286,6 +1320,15 @@ export class CallSession {
     // Never act on someone mid-reply: the silence clock is about the CALLER.
     if (this.agentBusy()) return this.armIdleTimer();
     const language = this.lastLanguage ?? "en";
+
+    // The agent's last words were "Goodbye." and the caller has said nothing since: the call is over. Asking "are you still
+    // there?" after a goodbye contradicts it (seen on a real call, where the switch or a plan kept the call open).
+    if (this.silenceStage === 0 && this.farewellPending) {
+      this.log("silence.ending", { afterFarewell: true });
+      await this.untilAudioEnds();
+      this.end(END_REASONS.AGENT_GOODBYE);
+      return;
+    }
 
     if (this.silenceStage === 0) {
       this.silenceStage = 1;

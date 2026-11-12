@@ -20,7 +20,8 @@ import { asksForHuman, isProfileQuestion, matchedTopic, rankContacts, repeatsPre
  *   handoff while the business is closed ─────────────────▶ unavailable → offer a call-back
  *
  * "Fails to understand" is judged from signals that need no model call: a real question the
- * documents had nothing for (and the business profile does not cover), the caller saying they
+ * documents had nothing for (and the business profile does not cover — and which is not simply the caller answering
+ * what the agent asked, answers.js), the caller saying they
  * are not being understood, or saying the same thing again. The voice session adds the one only
  * it can see — speech it could not make out at all (session.js).
  *
@@ -53,6 +54,8 @@ export function readHandoffState(raw) {
  * @property {boolean} question      the message is a real question (not a greeting, thanks or goodbye)
  * @property {boolean} hasSources    retrieval found something to answer from
  * @property {boolean} collecting    a request (appointment…) is being taken this turn
+ * @property {boolean} [answersAgent] the message ANSWERS the agent (a name, a number, "no thanks", "okay") rather than
+ *   asking something — it can never match a document, so it is not a sign the agent failed (answers.js)
  */
 
 /**
@@ -99,7 +102,7 @@ export function decideHandoff({ config, agent, state: stored, message, previousM
     unheard ||
     complaint ||
     repeated ||
-    (turn.question && !turn.hasSources && !turn.collecting && !isProfileQuestion(message));
+    (turn.question && !turn.answersAgent && !turn.hasSources && !turn.collecting && !isProfileQuestion(message, { businessName: agent?.businessName }));
 
   if (!missed) return { state: { ...state, misses: 0 }, action: null };
 

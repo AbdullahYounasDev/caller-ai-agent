@@ -130,6 +130,11 @@ export const OPENERS = {
     "what is this place",
     "what is your name",
     "who is on the line",
+    // Said without the "do you": "tell me what you are", "I want to know who you are".
+    "what are you",
+    "what you are",
+    "who you are",
+    "who you guys are",
     "have i reached the right number/place",
     "is this the right number",
   ],

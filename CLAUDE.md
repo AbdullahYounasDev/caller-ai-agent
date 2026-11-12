@@ -249,7 +249,7 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
     order.js                   # an order read against the MENU: dishes + quantities, merging changes, display — pure
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
-    config.js / phrases.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · decideHandoff · what respond() gets back
+    config.js / phrases.js / answers.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · did the caller ANSWER or ask? · decideHandoff · what respond() gets back
   phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers, call recordings) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
@@ -1879,7 +1879,8 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
 - **Intent is rule-based, never a model call** (`intent.js`): question | followup (the rewrite
   actually changed the search) | greeting | acknowledgement | goodbye | human_request | hold ("hold
   on") | presence ("yes, I'm here"); outcome answered (has sources) | profile (a generic opener
-  answered from the business profile, §6.20) | no_knowledge | conversational | handoff_requested | failed. A model
+  answered from the business profile, §6.20) | no_knowledge | conversational (small talk, and the caller ANSWERING the
+  agent — a name, a number, "no thanks": lib/handoff/answers.js, §6.26) | handoff_requested | failed. A model
   classifier would spend the scarce chat quota (§8 limitation 3) on every turn for something no
   caller hears; a semantic taxonomy belongs in an offline job over `call_turns`.
 - **Logging never slows a turn:** `recorder.js` tracks every write and `close()` awaits them, but
@@ -2193,7 +2194,7 @@ taken. Backend responsibilities that are stood in for are in
   - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
     noted and the team confirms it and the total; prices and totals only from the reference material.
 
-**Verified:** `npm test` (539 unit tests when this was built — 866 today, §10 — incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests when this was built — 901 today, §10 — incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -2231,10 +2232,29 @@ engine's, behind three seams (a phone call is a transport swap — §6.30):
      (`topic`); 3. **not understanding, counted in a row**: first time → the agent says so honestly and asks the
      caller to rephrase (`rephrase`); the Nth time (N = `afterMisses`) → hand off (`not_understood`, or
      `frustrated` when the caller said they are not understood / repeated themselves). A good answer, a greeting, a
-     request being taken or a question the business PROFILE answers (hours, who are you) resets the count.
+     request being taken, a question the business PROFILE answers (hours, who are you) or the caller simply ANSWERING
+     the agent (below) resets the count.
   4. closed hours + `outsideHours: callback` → NO transfer is promised (`unavailable`): the agent offers a call-back.
   "Not understanding" means: speech the recogniser could not read (voice only, below), a real question with nothing in
   the documents, the caller saying so, or saying the same thing again — all rule-based, zero model calls.
+- **An ANSWER is not a question the documents failed on** (`handoff/answers.js answersAgentQuestion`, pure, no model;
+  tests/handoff-answers). `intent.js` labels everything that is not a greeting or a goodbye a "question", so a name, a
+  phone number or "no thanks" used to match no document and count as the agent failing to understand: found on three
+  real console calls (2026-11-12), where "My name is Abdullah Yunus" and then "Oui." (a mis-heard answer to "May I have
+  your phone number?") passed a caller to a person while they were still talking. Replayed over every stored call of
+  that agent: the old rule decided a transfer on a caller giving a phone number (`f22df5b7` t10), a name and an address;
+  the new one none of those. Rules that must not drift: a message is an ANSWER when it is a decline or acknowledgement
+  ("no thanks", "okay", "that's all", "نہیں شکریہ"), or states the caller's own details ("my name is…", "I live…", six or
+  more digits, digits said one by one), or — only when it is not a question — comes right after the agent asked for a
+  DETAIL (a name, a number, an address, a day, a choice: the last two sentences, with no question mark needed because a
+  reply the caller cut off has none). **A question is never an answer** (a question mark, a question word, "do you…",
+  "tell me…", "بتائیں"). **The agent asking to be told AGAIN is not asking for a detail** ("could you say it another
+  way?" — what comes back is a new attempt, which counts if it fails; the database suite caught the first version
+  of the rule getting this wrong). Everything it cannot place stays a question, so the rule errs toward COUNTING: a
+  missed failure costs patience, a wrongly-forgiven one never reaches a person. The same signal makes the call log say
+  `conversational`, not "no answer in your documents", for such a turn (`classifyTurn({ answersAgent })`). A profile
+  question ("who are you") is also judged clause by clause with the business name, so a stumbling start ("Hello, Cave
+  Restaurants. How… What… what you are and how you can help me") no longer hides it.
   State is `conversations.handoff_state` (migration `20261021120000_conversation_handoff_state`, hand-written, HNSW line
   removed), restored if the reply fails; a conversation already passed on is not forwarded twice (chat has no hang-up).
 - **What the caller hears before a transfer is the CODE's, never the model's** (`handoff/announce.js`, pure). A real call
@@ -2258,20 +2278,42 @@ engine's, behind three seams (a phone call is a transport swap — §6.30):
   browser transport only SIMULATES (`SERVER.TRANSFER` → the console shows who, no number). `summary` is a few plain
   English lines for the person who picks up (reason, last things said, details already collected) — a phone
   transport can say it to them before bridging. Events: `handoff.requested` / `handoff.unavailable` (engine events,
-  ids only) and, on the call timeline, `handoff.started/attempt/failed/completed/unavailable`.
+  ids only) and, on the call timeline, `handoff.started/attempt/failed/completed/unavailable/cancelled`.
+- **A transfer is placed only once the caller has HEARD who they are being put through to** (`performHandoff`,
+  tests/voice-session). A real console call (2026-11-12) was transferred while the caller was still talking: they had spoken
+  over the reply before a word of it was heard, the announcement was cut (and, as nothing was heard, not even shown in the
+  chat), and the call ended `transferred` — on a phone, a silent forward, with the caller's next sentence never processed.
+  Now, if the turn was interrupted, or a barge-in lands while the announcement plays (the unheard-speech path too), no one
+  is rung: `handoff.cancelled` (`reason: caller_spoke`) is logged, `brain.handoffFailed` puts the conversation back as it
+  was (it is not left marked "passed on", and the count of misses restarts), and what the caller was saying is simply the
+  next turn. A caller who coughs and says nothing real is left in silence by this (the ordinary check-in follows) rather than
+  re-announced — deliberate: re-announcing in a loop was judged worse; revisit with real calls.
 - **Speech nobody could read** (`CallSession.onUnheard`, `UNHEARD.minSpeechMs` 1 s): a caller who really spoke and got
   an empty transcript used to be met with silence. Now: "Sorry, I didn't catch that" (fixed line, Urdu without gendered
-  forms or Latin names), and a second time in a row `brain.noteUnheard` → hand off if the business set it up.
+  forms or Latin names), and a second time in a row `brain.noteUnheard` → hand off if the business set it up. **A
+  transcript in a script nobody speaks to this agent is the same thing** (`transcript-clean.js unreadableScript`: half or
+  more of the letters Cyrillic, Greek, Chinese… — Latin, Arabic-script and Devanagari are readable): the recogniser is not
+  told the language (§6.24), and on a short or clipped utterance it sometimes picks one at random — "No, nothing" came
+  back as "Нет, ничего" on a real call and was answered as a question. It is logged `stt.empty` with `script`, never sent to
+  the brain, and (if long enough to be a person, `UNHEARD.minSpeechMs`) met with "Sorry, I didn't catch that". Reproduced
+  with the real recogniser (2026-11-13): clean synthetic English and Urdu never came back in another language (0 of 21), but
+  half-second Urdu fragments came back as Arabic and as Portuguese — a French "Oui." (Latin script) cannot be caught this
+  way; `answers.js` is what stops it being counted.
 
 **Ending a call well** (`voice/config.js SILENCE`, `voice/closing.js`; tests in voice-session, voice-closing):
 - **Never hangs up on silence without asking.** 15 s after the AGENT stopped talking (not from the caller's last word,
   never while the agent is thinking or speaking) → "Are you still there?"; 10 s more → a polite goodbye line, then the call
   ends (`idle_timeout`). Any sound from the caller cancels both. A caller who hangs up is simply the end. A caller who
-  said "hold on" gets 60 s and then 20 s (`SILENCE.hold`, §6.24 turn-quality item 6).
+  said "hold on" gets 60 s and then 20 s (`SILENCE.hold`, §6.24 turn-quality item 6). **The one exception: the agent's last
+  words were a goodbye** (`CallSession.farewellPending`, set when a reply ends on one, cleared by any sound from the caller or
+  any other line the agent says): the line simply ends after the same quiet (`silence.ending` with `afterFarewell`,
+  `agent_goodbye`) — "Goodbye. Are you still there?" contradicted itself on a real call.
 - **A finished conversation ends itself — decided by rules, owner-controlled** (`voice/closing.js decideCallEnd`, pure;
   the words in `lib/phrases` CLOSINGS, en / ur / Roman Urdu). Per AGENT: `autoEndCalls` (default on) and
   `endCallDelaySeconds` (2–10, default 3) — migration `20261027100000_agent_call_ending`, hand-written, HNSW line removed;
-  console: Agent tab → "Ending the call". The call ends when the agent's reply asked NOTHING and: the caller said goodbye
+  console: Agent tab → "Ending the call". **Only a transfer that is really under way blocks it** (`result.handoff.kind ===
+  "handoff"`): the brain returns a "please rephrase" or a call-back plan in the same field, and treating any plan as a
+  transfer kept a call open after the agent had said Goodbye (2026-11-12). The call ends when the agent's reply asked NOTHING and: the caller said goodbye
   in a short message (≤ 8 words: `intent.js` GOODBYE — `caller_goodbye`); or the agent's previous reply asked "anything
   else?" and the caller declined ("no thanks", "nahi shukriya", "بس" — `no_more_questions`; a plain "no" anywhere else is
   an answer, not a goodbye); or the agent itself closed ("…Have a great day!", "خدا حافظ" in its LAST sentence —
@@ -2746,7 +2788,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 866 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 901 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2937,7 +2979,7 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 866 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off), the echo guard (learning the path, the cold-start and between-sentence waits, windowed utterances, headphones untouched, the session wiring), the spoken refusal of a late phone call, Devanagari repair for the Urdu voice, and the prompt probe judges. No DB, no Gemini, no speech models (§11)
+npm test                 # 901 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off), the echo guard (learning the path, the cold-start and between-sentence waits, windowed utterances, headphones untouched, the session wiring), the spoken refusal of a late phone call, Devanagari repair for the Urdu voice, the prompt probe judges, answering the agent versus asking it (what counts as a failure to understand), the transfer that is cancelled when the caller talks over its announcement, a goodbye that ends the call, and transcripts in a script nobody speaks to the agent. No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 npm run voice:levels     # how loud each English voice is, against SPEECH_LEVEL_DB — names what drifted and prints the table to paste. ZERO quota (§6.24 fast start); -- --tolerance=dB

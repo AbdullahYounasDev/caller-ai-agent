@@ -294,6 +294,16 @@ function asksSomething(message) {
   return /[?؟]/.test(String(message ?? "")) || LANGUAGES.some((language) => language.tokens(message).some((w) => language.questionWords.has(w)));
 }
 
+/**
+ * Does the message carry a question mark or a question word (what, how, کیا, kitna…)? The handoff rules use it to tell
+ * a caller who ASKED something from one who answered (lib/handoff/answers.js).
+ * @param {string} message
+ * @returns {boolean}
+ */
+export function asksQuestion(message) {
+  return asksSomething(message);
+}
+
 function findPhrase(message, { businessName = "", groupsOf, maxWords, fillerOf = (language) => language.filler, leftoverFor = (kind) => LEFTOVER_ALLOWED[kind] }) {
   const text = String(message ?? "");
   if (!text.trim()) return null;

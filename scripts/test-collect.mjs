@@ -280,6 +280,20 @@ r = await say(H, hc3, "hello there");
 ok(r.result.handoff === null, "a greeting in between resets the count: misses must be in a row");
 ok((await prisma.conversation.findUnique({ where: { id: hc3 } })).handoffState.misses === 0, "…and the stored count is back to zero");
 
+// answering the agent is not failing to be understood (lib/handoff/answers.js): a name, then a garbled answer to the next question
+const hc3b = await newConversation(H);
+stub.state.reply = "Hello! May I have your name, please?";
+await say(H, hc3b, "hello there");
+stub.state.reply = "Thank you. May I have your phone number, please?";
+r = await say(H, hc3b, "Ahmed Khan");
+ok(r.result.handoff === null, "a name given when it was asked for is an answer, not a failure to understand");
+stub.state.reply = "Thank you. Is there anything else I can help with?";
+r = await say(H, hc3b, "Oui.");
+ok(r.result.handoff === null && ((await prisma.conversation.findUnique({ where: { id: hc3b } })).handoffState?.misses ?? 0) === 0, "…and neither is a garbled answer to the next question: nobody is passed on, nothing counted");
+stub.state.reply = "I'm sorry, I did not catch that. Could you say it another way?";
+r = await say(H, hc3b, "xyzzy plugh quux frobnicate");
+ok(r.result.handoff?.kind === "rephrase", "a real question the documents cannot answer is still counted after those answers");
+
 const hc4 = await newConversation(H);
 r = await say(H, hc4, "I have a complaint about my bill");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "topic", "an owner's always-forward topic passes the call on");

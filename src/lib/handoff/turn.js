@@ -3,6 +3,7 @@ import { enabledRecordTypes } from "@/lib/collect/config";
 import { handoffAvailable } from "./config";
 import { decideHandoff, readHandoffState, summariseForPerson } from "./decide";
 import { announcementFor } from "./announce";
+import { answersAgentQuestion } from "./answers";
 
 /**
  * ONE TURN'S HANDOFF, from what respond() already knows — the glue between the pure decision
@@ -32,7 +33,11 @@ export function planHandoff({ config, storedState, message, earlierTurns = [], s
   const before = readHandoffState(storedState);
   if (!handoffAvailable(handoffConfig)) return { changed: false, state: before, plan: null, result: null };
 
-  const intent = classifyTurn({ callerText: message, sources, requestState: collection?.state ?? null }).intent;
+  // What the caller just said may be an ANSWER to the agent's own question (a name, a number, "no thanks"): that can
+  // never match a document and is not a sign the agent failed to understand (answers.js).
+  const previousReply = earlierTurns.filter((m) => m.role === "assistant").at(-1)?.content ?? null;
+  const answersAgent = answersAgentQuestion({ message, previousReply });
+  const intent = classifyTurn({ callerText: message, sources, requestState: collection?.state ?? null, answersAgent }).intent;
   const callerMessages = earlierTurns.filter((m) => m.role === "user").map((m) => m.content);
   const { state, action } = decideHandoff({
     config: handoffConfig,
@@ -44,6 +49,7 @@ export function planHandoff({ config, storedState, message, earlierTurns = [], s
       question: intent === INTENTS.QUESTION || intent === INTENTS.FOLLOWUP,
       hasSources: sources.length > 0,
       collecting: Boolean(collection?.state && collection.state !== "idle"),
+      answersAgent,
     },
     nowMs,
     callbackAvailable: enabledRecordTypes(config.collect).includes("callback"),

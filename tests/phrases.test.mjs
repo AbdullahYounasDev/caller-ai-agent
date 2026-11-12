@@ -60,6 +60,8 @@ describe("recognising a generic opener", () => {
     const cases = {
       "Who are you?": "identity",
       "who am I speaking to": "identity",
+      "what are you": "identity",
+      "tell me what you are": "identity",
       "Hi, could you please tell me a bit about your company?": "about",
       "give me overview about your company": "about",
       "what's your business about": "about",

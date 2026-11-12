@@ -12,6 +12,10 @@
  *    answered twice, once for each half. A transcript that ends on a joining word or a
  *    comma is held for a moment (session.js) to see whether the rest follows.
  *
+ * 3. `unreadableScript` — did the recogniser write the call in a script nobody speaks to this agent? It is not told which
+ *    language it is hearing (stt.js), and on a short or clipped utterance it sometimes picks one at random: "No, nothing"
+ *    came back in Cyrillic on a real call. That is not a question for the documents; it is speech we could not read.
+ *
  * English, Urdu script and Roman Urdu — the way callers actually speak. JavaScript's \b does
  * not see Arabic-script letters, so word edges are Unicode-aware here too (collect/phrases.js).
  */
@@ -94,4 +98,35 @@ export function looksUnfinished(text) {
   if (/[.!?؟۔]$/.test(value) && !/(?:\.\.\.|…)$/.test(value)) return false;
   if (/[,،;:\-–—]$|(?:\.\.\.|…)$/.test(value)) return true;
   return JOINING.test(value);
+}
+
+/** Scripts the product speaks (§7): English and Urdu, plus Devanagari, which stt.js asks the recogniser to redo as Urdu. */
+const SPOKEN_SCRIPTS = /[\p{Script=Latin}\p{Script=Arabic}\p{Script=Devanagari}]/u;
+/** The scripts a mistaken language guess turns up in, for the log. */
+const OTHER_SCRIPTS = ["Cyrillic", "Greek", "Han", "Hiragana", "Katakana", "Hangul", "Hebrew", "Thai", "Armenian", "Georgian", "Bengali", "Tamil", "Telugu", "Gujarati", "Gurmukhi", "Ethiopic", "Khmer", "Lao", "Myanmar", "Sinhala"];
+
+/**
+ * The name of the script the transcript is written in when it is not one the callers of this product use — mostly letters
+ * of Cyrillic, Greek, Chinese, Korean… — or null when it is readable. Half or more of the letters decide it, so one
+ * stray foreign letter inside Urdu or English is left alone. Pure.
+ *
+ * @param {string} text
+ * @returns {string|null} e.g. "Cyrillic", or "other"
+ */
+export function unreadableScript(text) {
+  const letters = String(text ?? "").match(/\p{L}/gu) ?? [];
+  if (!letters.length) return null;
+  const foreign = letters.filter((ch) => !SPOKEN_SCRIPTS.test(ch));
+  if (foreign.length * 2 < letters.length) return null;
+  let best = "other";
+  let bestCount = 0;
+  for (const name of OTHER_SCRIPTS) {
+    const re = new RegExp("\\p{Script=" + name + "}", "u");
+    const count = foreign.filter((ch) => re.test(ch)).length;
+    if (count > bestCount) {
+      best = name;
+      bestCount = count;
+    }
+  }
+  return best;
 }
