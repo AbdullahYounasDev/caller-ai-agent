@@ -22,6 +22,9 @@
  *     english   the same in English
  *     first     grounded voice answers: must not open with "First,"
  *     purpose   agents that WERE told what the business does: must still describe themselves (no over-refusal)
+ *     promises  a caller who wants something the agent cannot take (an order, when only call-backs and appointments are
+ *               set up): must NOT ask for a name/address/phone, and must NOT say it noted or passed anything on — nothing
+ *               is saved (judge falsePromise; the request path is the engine's start marker)
  *     all       every case (the default)
  *   flags: --n=6  --demo-tenant=voice-demo  --ko-tenant=test-tenant  --ko-agent=<agent id>  --pause-ms=1500
  *
@@ -47,15 +50,21 @@ const { getAgentConfig } = await import("@/lib/tenant/config");
 const { buildSystemInstruction } = await import("@/lib/agent/prompt");
 const { generateReply } = await import("@/lib/agent/llm");
 const { detectOpener } = await import("@/lib/phrases");
-const { firstHabit, inventedDescription, refusesToDescribe } = await import("./prompt-judges.mjs");
+const { firstHabit, inventedDescription, refusesToDescribe, falsePromise } = await import("./prompt-judges.mjs");
+const { advanceCollection } = await import("@/lib/collect/engine");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function ask({ config, channel = "voice", chunks = [], message, greeting }) {
+async function ask({ config, channel = "voice", chunks = [], message, greeting, turns = [], withCollection = false }) {
   const opener = detectOpener(message, { businessName: config.businessName });
-  const systemInstruction = buildSystemInstruction({ config, channel, chunks, opener: opener ? { kind: opener.kind, language: opener.language } : null });
+  // What the engine would hand the prompt this turn when it starts no request (lib/collect/engine.js idlePlan).
+  const collection = withCollection
+    ? (await advanceCollection({ collect: config.collect, agent: config, draft: null, message, history: [], nowMs: Date.now(), deps: { newId: () => "probe" } })).plan
+    : null;
+  const systemInstruction = buildSystemInstruction({ config, channel, chunks, collection, opener: opener ? { kind: opener.kind, language: opener.language } : null });
   const history = [
     ...(greeting ? [{ role: "model", parts: [{ text: greeting }] }] : []),
+    ...turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
     { role: "user", parts: [{ text: message }] },
   ];
   for (let attempt = 0; attempt < 4; attempt++) {
@@ -71,13 +80,16 @@ async function ask({ config, channel = "voice", chunks = [], message, greeting }
 }
 
 const results = [];
-async function run(label, cfgOrFn, questions, { chunks = [], greeting, judge }) {
+async function run(label, cfgOrFn, questions, { chunks = [], greeting, judge, withCollection = false }) {
   const config = typeof cfgOrFn === "function" ? await cfgOrFn() : cfgOrFn;
-  for (const q of questions) {
+  for (const item of questions) {
+    // A question is a string, or { q, turns } with the conversation before it.
+    const q = typeof item === "string" ? item : item.q;
+    const turns = typeof item === "string" ? [] : item.turns;
     let bad = 0;
     const samples = [];
     for (let i = 0; i < N; i++) {
-      const r = await ask({ config, chunks: typeof chunks === "function" ? await chunks(q) : chunks, message: q, greeting });
+      const r = await ask({ config, chunks: typeof chunks === "function" ? await chunks(q) : chunks, message: q, greeting, turns, withCollection });
       const flagged = r.text === "<<FAILED>>" ? false : judge(r.text);
       if (flagged) bad++;
       samples.push({ ...r, flagged });
@@ -138,6 +150,23 @@ if (which.includes("purpose") || which.includes("all")) {
     ["آپ کون ہیں اور آپ کیا کرتے ہیں؟"],
     { greeting: "السلام علیکم، Acme Dental کو کال کرنے کا شکریہ۔ میں آپ کی کیا مدد کر سکتا ہوں؟", judge: refusesToDescribe }
   );
+}
+
+if (which.includes("promises") || which.includes("all")) {
+  const HELLO = "Hello, thanks for calling KO Restaurants. You're speaking with an AI assistant. How can I help you today?";
+  const DELIVERY = { role: "model", text: "We can arrange delivery within eight kilometres." };
+  const NEXT_STEP = "We discussed charcoal BBQ and I want you to deliver us charcoal BBQ and you told me that you deliver 8 km. So please tell me what's the next procedure.";
+  const questions = [
+    NEXT_STEP,
+    "I want you to deliver us charcoal BBQ.",
+    "Yes, I would like to place an order for delivery please.",
+    { q: "Can you note down my order please, two plates of mutton karahi.", turns: [{ role: "user", text: "Do you deliver?" }, DELIVERY] },
+    { q: "My name is Abdullah Yunus and I live near Lahore railway station.", turns: [{ role: "user", text: "I want charcoal BBQ delivered." }, { role: "model", text: "We can arrange delivery within eight kilometres. May I have your name?" }] },
+  ];
+  const ko = () => getAgentConfig(KO_TENANT, KO_AGENT ? { agentId: KO_AGENT } : undefined);
+  // The same agent in English (the language of the calls this was found on) and in Urdu.
+  await run("KO agent, English (call-backs and appointments only): no promise of an order it cannot take", async () => ({ ...(await ko()), replyLanguage: "en" }), questions, { chunks: koChunks, greeting: HELLO, judge: falsePromise, withCollection: true });
+  await run("KO agent, Urdu (call-backs and appointments only): no promise of an order it cannot take", async () => ({ ...(await ko()), replyLanguage: "ur" }), questions, { chunks: koChunks, greeting: HELLO, judge: falsePromise, withCollection: true });
 }
 
 console.log("\n=== SUMMARY (flagged = the bad thing happened; lower is better) ===");

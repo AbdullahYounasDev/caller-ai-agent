@@ -10,7 +10,7 @@ import { collapseRepeats, looksUnfinished, unreadableScript } from "./transcript
 import { CALL_STATES, END_REASONS, ERROR_CODES, SERVER } from "./protocol";
 import { decideCallEnd } from "./closing";
 import { SPOKEN_LANGUAGES, fastStartGainDb, fastStartVoiceFor, getVoice, voiceFor } from "./speech/voices";
-import { callVocabulary } from "./vocabulary";
+import { callPhrase, callVocabulary } from "./vocabulary";
 import { detectPause, saysFarewell } from "@/lib/phrases";
 import { answersAgentQuestion } from "@/lib/handoff/answers";
 import { nextContactLine } from "@/lib/handoff/announce";
@@ -72,7 +72,7 @@ export class CallSession {
    *   the conversation, does not greet again, says nobody is available and can take a call-back
    * @param {"browser"|"twilio"} args.transportName
    * @param {object} args.transport            see above
-   * @param {{forCall(call: {vocabulary?: string[]}): import("./speech/stt").Transcriber}} args.stt
+   * @param {{forCall(call: {vocabulary?: string[], phrase?: string|null}): import("./speech/stt").Transcriber}} args.stt
    *   the STT seam; it picks the recogniser for this call (speech/stt.js)
    * @param {import("./speech/tts").TextToSpeech} args.tts
    * @param {() => {push: Function, reset: Function}} args.createVad
@@ -184,7 +184,7 @@ export class CallSession {
       // language (speech/stt.js); each spoken language has the voice the business picked
       // (or its default). The business's own name is taught to the recogniser, which has
       // never heard it (vocabulary.js).
-      this.transcriber = this.stt.forCall({ vocabulary: callVocabulary(this.config) });
+      this.transcriber = this.stt.forCall({ vocabulary: callVocabulary(this.config), phrase: callPhrase(this.config) });
       this.voices = Object.fromEntries(SPOKEN_LANGUAGES.map((lang) => [lang, voiceFor(this.config.voices, lang).id]));
       this.fastStart = this.planFastStart();
       this.callEngine = { ...this.engineInfo, stt: this.transcriber.id, voices: this.voices, ...(this.fastStart ? { fastStart: this.fastStart.voiceId } : {}) };
@@ -630,6 +630,8 @@ export class CallSession {
       // logged, because an Urdu caller transcribed by an English model is the likely cause
       // of whatever went wrong next.
       fallback: transcript.fallbackReason,
+      // Whisper first chose a language nobody speaks to this agent and was asked again ("Portuguese→ur", stt.js).
+      relanguaged: transcript.relanguaged,
       // Names the recogniser misheard and vocabulary.js put right ("Nairan→Nyron").
       corrected: transcript.corrections,
     });

@@ -1,7 +1,7 @@
 import "./helpers/no-db.mjs";
 import test, { describe } from "node:test";
 import assert from "node:assert/strict";
-import { announcementFor, nextContactLine, normalizeAnnounce, announceProblems, ANNOUNCE_MAX_CHARS } from "@/lib/handoff/announce";
+import { acknowledgementFor, announcementFor, nextContactLine, normalizeAnnounce, announceProblems, ANNOUNCE_MAX_CHARS } from "@/lib/handoff/announce";
 import { normalizeHandoffConfig, validateHandoffConfig } from "@/lib/handoff/config";
 
 // The line said before every transfer is the CODE's (CLAUDE.md §6.26): a real call was put
@@ -14,7 +14,8 @@ describe("the built-in line", () => {
   test("names the person and their role, in English and Urdu", () => {
     assert.equal(announcementFor({ escalation: null, contact: ALI, language: "en" }), "I'm connecting you to Ali, our Representative. Please stay on the line.");
     assert.equal(announcementFor({ escalation: {}, contact: ADAN, language: "en" }), "I'm connecting you to Adan, our Senior. Please stay on the line.");
-    assert.equal(announcementFor({ escalation: null, contact: ALI, language: "ur" }), "آپ کی بات Ali سے کروائی جا رہی ہے، جو ہمارے Representative ہیں۔ براہِ کرم لائن پر رہیے۔");
+    // The Urdu voice cannot read Latin letters, so a usual role is said in Urdu (the name is the owner's, as typed).
+    assert.equal(announcementFor({ escalation: null, contact: ALI, language: "ur" }), "آپ کی بات Ali سے کروائی جا رہی ہے، جو ہمارے نمائندے ہیں۔ براہِ کرم لائن پر رہیے۔");
   });
 
   test("a person with only a name, or only a role, still gets a natural sentence", () => {
@@ -86,5 +87,60 @@ describe("saving and reading the setting", () => {
     assert.equal(bad.ok, false);
     assert.equal(bad.problems[0].code, "announcePlaceholder");
     assert.equal(validateHandoffConfig({ enabled: true, contacts, announce: { ur: "{name} سے بات کروائی جا رہی ہے۔" } }).ok, true);
+  });
+});
+
+describe("what is said BEFORE the announcement (real calls: 'May I have your phone number?', 'How may I assist you?', 'thank you, goodbye' — then 'connecting you to Adan')", () => {
+  test("one fixed acknowledgement per reason, in the agent's language", () => {
+    assert.equal(acknowledgementFor({ reason: "asked", language: "en" }), "Of course.");
+    assert.equal(acknowledgementFor({ reason: "topic", language: "en" }), "I understand.");
+    assert.equal(acknowledgementFor({ reason: "frustrated", language: "en" }), "I'm sorry about that.");
+    assert.equal(acknowledgementFor({ reason: "not_understood", language: "en" }), "I'm sorry, I couldn't help with that.");
+    assert.equal(acknowledgementFor({ reason: "asked", language: "ur" }), "جی ضرور۔");
+    assert.equal(acknowledgementFor({ reason: "not_understood", language: "ur" }), "معذرت، بات واضح نہیں ہو سکی۔");
+  });
+
+  test("an unknown reason, or none, is read as 'could not help'; any other language is English", () => {
+    assert.equal(acknowledgementFor({ reason: "nope", language: "en" }), acknowledgementFor({ reason: "not_understood", language: "en" }));
+    assert.equal(acknowledgementFor({ language: "en" }), acknowledgementFor({ reason: "not_understood", language: "en" }));
+    assert.equal(acknowledgementFor({ reason: "asked", language: "it" }), "Of course.");
+  });
+
+  test("never a question, never a goodbye, never a name — nothing to answer and nothing that sounds like the end", () => {
+    const farewell = /goodbye|bye|thank you for calling|خدا حافظ|اللہ حافظ|الوداع|شکریہ/i;
+    for (const language of ["en", "ur"]) {
+      for (const reason of ["asked", "topic", "frustrated", "not_understood"]) {
+        const line = acknowledgementFor({ reason, language });
+        assert.doesNotMatch(line, /[?؟]/, line);
+        assert.doesNotMatch(line, farewell, line);
+        assert.ok(!/[A-Za-z]/.test(line) || language === "en", "Urdu lines carry no Latin letters: " + line);
+      }
+    }
+  });
+});
+
+describe("a role in an Urdu announcement is said in Urdu", () => {
+  const say = (role) => announcementFor({ escalation: null, contact: { name: "Adan", role }, language: "ur" });
+
+  test("the usual roles, word by word", () => {
+    assert.match(say("Representative"), /جو ہمارے نمائندے ہیں/);
+    assert.match(say("Manager"), /جو ہمارے مینیجر ہیں/);
+    assert.match(say("Senior doctor"), /جو ہمارے سینئر ڈاکٹر ہیں/);
+    assert.match(say("customer service"), /کسٹمر سروس/);
+  });
+
+  test("a role already in Urdu is left alone; a word the table does not know stays as typed", () => {
+    assert.match(say("ڈاکٹر"), /جو ہمارے ڈاکٹر ہیں/);
+    assert.match(say("Zorblax Manager"), /Zorblax مینیجر/);
+  });
+
+  test("English is never touched, and the owner's own line gets the same Urdu role", () => {
+    assert.match(announcementFor({ escalation: null, contact: { name: "Adan", role: "Representative" }, language: "en" }), /our Representative/);
+    assert.equal(announcementFor({ escalation: { announce: { ur: "{name} سے بات کروائی جا رہی ہے، یہ {role} ہیں۔" } }, contact: { name: "Ali", role: "Manager" }, language: "ur" }), "Ali سے بات کروائی جا رہی ہے، یہ مینیجر ہیں۔");
+  });
+
+  test("the 'not available' line and the one-part sentence use it too", () => {
+    assert.match(nextContactLine({ escalation: null, previous: { role: "Representative" }, contact: { name: "Adan", role: "Senior" }, language: "ur" }), /^ہمارے نمائندے اس وقت دستیاب نہیں ہیں۔ .*جو ہمارے سینئر ہیں/);
+    assert.equal(announcementFor({ escalation: null, contact: { role: "Receptionist" }, language: "ur" }), "آپ کی بات ہمارے ریسپشنسٹ سے کروائی جا رہی ہے۔ براہِ کرم لائن پر رہیے۔");
   });
 });

@@ -337,24 +337,14 @@ describe("buildHandoffInstruction — the model words what the system decided", 
     assert.match(text, /Do not mention a person or a transfer/);
   });
 
-  test("handoff: the model only acknowledges — the code adds the announcement — no number, no goodbye on a call", () => {
-    const plan = { kind: "handoff", reason: "asked", contact: { role: "Senior doctor", name: "Dr Ayesha" } };
-    const voice = buildHandoffInstruction(plan, { channel: "voice" });
-    assert.match(voice, /being connected to our Senior doctor, Dr Ayesha right now/);
-    assert.match(voice, /added automatically RIGHT AFTER your reply/);
-    assert.match(voice, /do NOT say that you are connecting or transferring them, do NOT name the person/);
-    assert.match(voice, /do not say goodbye/);
-    assert.match(voice, /do not give a phone number/);
-    assert.doesNotMatch(buildHandoffInstruction(plan, { channel: "chat" }), /do not say goodbye/);
+  test("rephrase also says: no goodbye, the conversation is not over", () => {
+    assert.match(buildHandoffInstruction({ kind: "rephrase" }, { channel: "voice" }), /Do not say goodbye or thank them for calling/);
   });
 
-  test("each reason has its own opening", () => {
-    const base = { kind: "handoff", contact: { role: "Manager", name: "" } };
-    assert.match(buildHandoffInstruction({ ...base, reason: "asked" }, { channel: "chat" }), /asked for a person/);
-    assert.match(buildHandoffInstruction({ ...base, reason: "frustrated" }, { channel: "chat" }), /apologise briefly/);
-    assert.match(buildHandoffInstruction({ ...base, reason: "topic" }, { channel: "chat" }), /wants a person to handle/);
-    assert.match(buildHandoffInstruction({ ...base, reason: "not_understood" }, { channel: "chat" }), /could not understand or help/);
-    assert.match(buildHandoffInstruction({ ...base, reason: "asked" }, { channel: "chat" }), /our Manager/);
+  test("handoff: there is nothing for the model to word — the turn makes no model call (the code says it, handoff/announce.js)", () => {
+    for (const reason of ["asked", "topic", "frustrated", "not_understood"]) {
+      assert.equal(buildHandoffInstruction({ kind: "handoff", reason, contact: { role: "Manager", name: "Bilal" } }, { channel: "voice" }), null, reason);
+    }
   });
 
   test("unavailable: never claims a transfer, offers a call-back only when the business takes them", () => {
@@ -374,9 +364,9 @@ describe("buildHandoffInstruction — the model words what the system decided", 
     const p = buildSystemInstruction({
       config: { businessName: "Acme", tone: "professional", replyLanguage: "en", escalation: { enabled: true, contacts: [{ role: "Manager", name: "Bilal", phone: "+923001234567" }] } },
       channel: "voice",
-      handoff: { kind: "handoff", reason: "asked", contact: { role: "Manager", name: "Bilal" } },
+      handoff: { kind: "rephrase" },
     });
-    assert.match(p, /PASSING THE CALLER ON: The caller asked for a person\./);
+    assert.match(p, /UNDERSTANDING: you could not make out/);
     assert.ok(!p.includes("+923001234567"));
   });
 });
@@ -557,5 +547,58 @@ describe("spoken answers do not open with 'First,' (§6.24)", () => {
     assert.match(p, /Never output markdown, asterisks, bullet points, numbered lists, emoji or URLs/);
     assert.match(p, /Open with a short first sentence/);
     assert.doesNotMatch(build({}, { channel: "chat" }), /first… then…/);
+  });
+});
+
+describe("nothing is recorded unless a request is being taken (real calls: 'I'll pass your order and details to our team' — nothing was saved)", () => {
+  const base = { businessName: "KO Restaurants", tone: "friendly", replyLanguage: "en" };
+  const offers = [
+    { type: "callback", label: "a call-back request", firstQuestion: "May I have your name?" },
+    { type: "appointment", label: "an appointment", firstQuestion: "What is the appointment for?" },
+  ];
+
+  test("no request type set up: the model is told nothing can be saved, not to ask for details, and what to say instead", () => {
+    for (const collection of [null, { state: "idle", language: "en", offers: [] }]) {
+      const p = buildSystemInstruction({ config: base, channel: "voice", collection });
+      assert.match(p, /NOTHING IS BEING RECORDED: no request is set up for this business/);
+      assert.match(p, /Do NOT ask the customer for their name, phone number, address/);
+      assert.match(p, /NEVER say that you have noted, saved, recorded, forwarded or passed on anything, or that the team will contact them/);
+      assert.match(p, /say so plainly in one short sentence, and suggest they contact the business directly/);
+    }
+  });
+
+  test("request types set up but none started: only those can be taken, and only by starting one — an offer asks no detail", () => {
+    const p = buildSystemInstruction({ config: base, channel: "voice", collection: { state: "idle", language: "en", offers } });
+    assert.match(p, /REQUESTS YOU CAN TAKE: a call-back request; an appointment\./);
+    assert.match(p, /says yes to your offer of one/);
+    assert.match(p, /Apart from starting one of those requests with its marker, nothing is recorded:/);
+    assert.match(p, /\(only a call-back request; an appointment can be taken\)/);
+    assert.match(p, /only OFFER it: ask whether they would like it, and ask for no detail until they say yes/);
+    assert.doesNotMatch(p, /NOTHING IS BEING RECORDED: no request is set up/, "the other wording belongs to a business with no request types");
+  });
+
+  test("while a request IS being taken the rule is absent: the engine's own instruction governs, and it may ask for details", () => {
+    const plan = { state: "ask", language: "en", type: "callback", typeLabel: "a call-back request", firstAsk: true, ask: { id: "name", label: "name", question: "May I have your name?", required: true, type: "text" }, collected: [] };
+    const p = buildSystemInstruction({ config: base, channel: "voice", collection: plan });
+    assert.match(p, /TAKING A REQUEST — a call-back request/);
+    assert.doesNotMatch(p, /NOTHING IS BEING RECORDED|Apart from starting one of those requests/);
+  });
+
+  test("the general style no longer says 'a request noted' — only a request the instructions say is being taken", () => {
+    const p = buildSystemInstruction({ config: base, channel: "voice", collection: null });
+    assert.doesNotMatch(p, /a request noted/);
+    assert.match(p, /a request taken when this turn's instructions say one is being taken/);
+  });
+
+  test("the rule sits before the reference material, so the grounding rule stays the last thing the model reads", () => {
+    const p = buildSystemInstruction({ config: base, channel: "voice", collection: null, chunks: [{ sourceTitle: "menu.pdf", heading: "Menu", content: "Karahi 2500", sourceUpdatedAt: null }] });
+    assert.ok(p.indexOf("NOTHING IS BEING RECORDED") < p.indexOf("REFERENCE MATERIAL"));
+    assert.ok(p.indexOf("REFERENCE MATERIAL") < p.indexOf("GROUNDING RULE"));
+  });
+
+  test("it is the same on chat and on a call, in either reply language (the model reads English instructions either way)", () => {
+    for (const channel of ["chat", "voice"]) for (const replyLanguage of ["en", "ur"]) {
+      assert.match(buildSystemInstruction({ config: { ...base, replyLanguage }, channel, collection: null }), /NOTHING IS BEING RECORDED/);
+    }
   });
 });

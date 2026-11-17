@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { enabledRecordTypes } from "@/lib/collect/config";
 import { advanceCollection, draftFromMarker, readsAsAnswer } from "@/lib/collect/engine";
 import { planHandoff } from "@/lib/handoff/turn";
+import { acknowledgementFor } from "@/lib/handoff/announce";
 import { handoffAvailable } from "@/lib/handoff/config";
 import { decideHandoff, readHandoffState, newHandoffState, summariseForPerson } from "@/lib/handoff/decide";
 import { announcementFor } from "@/lib/handoff/announce";
@@ -317,11 +318,21 @@ export async function respond({
       }
     : undefined;
   const streamChunk = passOn ? (text) => passOn(markers.push(text)) : undefined;
+  // A TURN THAT PASSES THE CALLER TO A PERSON MAKES NO MODEL CALL: what is said is one fixed acknowledgement and then the
+  // announcement of who they are being put through to (lib/handoff/announce.js). Asked to "say one short sentence, no
+  // question, no goodbye", the model on real calls asked for a phone number, said "thank you, goodbye" and named the person
+  // itself — right before a transfer. It also saves the call a model round trip at the moment the caller is waiting.
+  const acknowledgement = handoffTurn.result?.kind === "handoff" ? acknowledgementFor({ reason: handoffTurn.result.reason, language: config.replyLanguage }) : null;
   let rawReply;
   try {
-    rawReply = streamChunk
-      ? await generateReplyStream({ systemInstruction, history, onChunk: streamChunk, onProvider })
-      : await generateReply({ systemInstruction, history, onProvider });
+    if (acknowledgement !== null) {
+      rawReply = acknowledgement;
+      passOn?.(acknowledgement);
+    } else {
+      rawReply = streamChunk
+        ? await generateReplyStream({ systemInstruction, history, onChunk: streamChunk, onProvider })
+        : await generateReply({ systemInstruction, history, onProvider });
+    }
   } catch (err) {
     // The customer never heard this turn's question or read-back, so the request must not
     // have moved on either: put the draft back as it was. (If the turn had SAVED a request,

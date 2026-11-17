@@ -46,15 +46,79 @@ export function callVocabulary(config) {
 }
 
 /**
+ * The WHOLE business name, when it holds a word too short to be corrected on its own ("KO Restaurants": "KO" has one
+ * consonant sound, so the vocabulary above rightly leaves it out) next to a long one. Real calls heard it as "Kew
+ * restaurants" and "Cave Resturants". The recogniser gets it as its spelling prompt, and correctTranscript can put a
+ * sound-alike of the short word right: the long word beside it is the anchor that makes that safe. Null otherwise.
+ * @param {{businessName?: string}} config
+ * @returns {string|null}
+ */
+export function callPhrase(config) {
+  const name = config?.businessName?.trim();
+  if (!name || name === PLACEHOLDER_BUSINESS_NAME) return null;
+  const words = name.match(WORD) ?? [];
+  const short = words.some((w) => soundKey(w).length < MIN_SKELETON);
+  const long = words.some((w) => soundKey(w).length >= MIN_SKELETON);
+  return short && long ? words.join(" ") : null;
+}
+
+/** A word that can stand in for a short name word: capitalised (a recogniser capitalises what it takes for a name), at most
+ *  five letters, the same first sound and no more than one extra consonant sound. "Kew", "Cave", "Cow" for "KO". */
+function standsInForShortWord(candidate, shortWord) {
+  if (!/^[A-Z]/.test(candidate) || candidate.length > 5) return false;
+  const a = soundKey(candidate);
+  const b = soundKey(shortWord);
+  return a[0] === b[0] && a.length <= b.length + 1;
+}
+
+/**
+ * "Kew restaurants" → "KO Restaurants": the phrase's long words are found by sound (anywhere in the case they came in),
+ * and the capitalised word right before (or after) one of them takes the short word's place. Only ever next to a long
+ * word of the name: a lone "Kew" or "cow" is left alone.
+ */
+function correctPhrase(text, phrase, corrections) {
+  const words = phrase.match(WORD) ?? [];
+  const tokens = [...text.matchAll(WORD)].map((m) => ({ word: m[0], start: m.index, end: m.index + m[0].length }));
+  const adjacent = (a, b) => /^\s+$/.test(text.slice(tokens[a].end, tokens[b].start));
+  const out = [];
+  for (let i = 0; i + words.length <= tokens.length; i++) {
+    let fits = true;
+    for (let k = 0; k < words.length && fits; k++) {
+      const token = tokens[i + k];
+      if (k > 0 && !adjacent(i + k - 1, i + k)) fits = false;
+      else if (soundKey(words[k]).length >= MIN_SKELETON) fits = soundKey(token.word) === soundKey(words[k]);
+      else if (token.word === words[k]) fits = true;
+      else if (!standsInForShortWord(token.word, words[k])) fits = false;
+    }
+    if (!fits) continue;
+    const heard = text.slice(tokens[i].start, tokens[i + words.length - 1].end);
+    if (heard === phrase) continue;
+    // The right words in another case are not a mishearing: nothing to put right.
+    if (heard.toLowerCase() === phrase.toLowerCase()) continue;
+    out.push({ start: tokens[i].start, end: tokens[i + words.length - 1].end, heard });
+    i += words.length - 1;
+  }
+  let result = text;
+  for (const { start, end, heard } of out.reverse()) {
+    corrections.unshift(`${heard}→${phrase}`);
+    result = result.slice(0, start) + phrase + result.slice(end);
+  }
+  return result;
+}
+
+/**
  * Replace sound-alikes of vocabulary words with the real spelling.
  * @param {string} text  a transcript
  * @param {string[]} vocabulary
+ * @param {{phrase?: string|null}} [options]  the whole business name (callPhrase)
  * @returns {{text: string, corrections: string[]}}  corrections as "heard→meant"
  */
-export function correctTranscript(text, vocabulary) {
-  if (!text || !vocabulary?.length) return { text, corrections: [] };
-  const terms = vocabulary.map((term) => ({ term, key: soundKey(term), lower: term.toLowerCase() }));
+export function correctTranscript(text, vocabulary, { phrase = null } = {}) {
+  if (!text || (!vocabulary?.length && !phrase)) return { text, corrections: [] };
   const corrections = [];
+  if (phrase) text = correctPhrase(text, phrase, corrections);
+  if (!vocabulary?.length) return { text, corrections };
+  const terms = vocabulary.map((term) => ({ term, key: soundKey(term), lower: term.toLowerCase() }));
 
   const corrected = text.replace(WORD, (word, offset) => {
     if (!/^[A-Z]/.test(word)) return word;

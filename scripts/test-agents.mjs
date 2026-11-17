@@ -276,8 +276,12 @@ const dubHuman = await promptFor(kbDublin, askPerson);
 const lonHuman = await promptFor(kbLondon, askPerson);
 ok(dubHuman.result.handoff?.kind === "handoff" && dubHuman.result.handoff.contacts[0].name === "Siobhan", "call forwarding: Dublin passes the caller to ITS person");
 ok(!lonHuman.result.handoff, "call forwarding: London (not set up) does not");
-ok(/ALWAYS reply in Urdu/.test(dubHuman.instruction) && /ALWAYS reply in English/.test(lonHuman.instruction), "reply language is per agent");
-ok(dubHuman.instruction.includes("12:00") && !lonHuman.instruction.includes("12:00"), "opening hours are per agent");
+// (a turn that passes the caller on makes no model call, so the prompt is read from an ordinary question)
+const dubAsk = await promptFor(kbDublin, "what time do you open");
+const lonAsk = await promptFor(kbLondon, "what time do you open");
+ok(/ALWAYS reply in Urdu/.test(dubAsk.instruction) && /ALWAYS reply in English/.test(lonAsk.instruction), "reply language is per agent");
+ok(dubAsk.instruction.includes("12:00") && !lonAsk.instruction.includes("12:00"), "opening hours are per agent");
+ok(dubHuman.result.reply.startsWith("جی ضرور۔") && dubHuman.result.reply.includes("Siobhan"), "the words before a transfer are in THAT agent's language, naming ITS person");
 ok(dubHuman.result.collection === null && lonHuman.result.collection !== null, "what the agent collects is per agent (London takes requests, Dublin does not)");
 ok((await getAgentConfig(KB, { agentId: kbDublin, skipCache: true })).escalation.contacts.length === 1
   && (await getAgentConfig(KB, { agentId: kbLondon, skipCache: true })).escalation.contacts.length === 0, "forwarding contacts are stored per agent");

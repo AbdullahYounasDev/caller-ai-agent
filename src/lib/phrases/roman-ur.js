@@ -191,6 +191,9 @@ export const CLOSINGS = {
     "kuch nahi",
     "aur kuch nahi",
     "nahi bas",
+    "bas ho gaya/gayi/gya/gyi",
+    "nahi bas ho gaya/gayi/gya/gyi",
+    "bas theek hai",
   ],
   farewell: [
     "khuda hafiz",
@@ -204,6 +207,7 @@ export const CLOSINGS = {
 export const CLOSING_FILLER = [
   "nahi", "bas", "ji", "jee", "shukriya", "bohat", "bahut", "aap", "ka", "ki", "hai", "hain", "theek", "acha", "achha", "sir", "janab",
   "meherbani", "haan", "aur", "bhai", "sahab", "sahib", "baji", "thanks", "thank", "you", "ok", "okay", "khuda", "hafiz", "allah", "sab",
+  "gaya", "gayi", "gya", "gyi",
 ];
 
 /** Words with no meaning of their own in an opener (see en.js FILLER), in their canonical spelling. */

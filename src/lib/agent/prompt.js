@@ -67,15 +67,34 @@ const CHANNEL_STYLE = {
 };
 
 // Aim at a conclusion, never at hurrying the caller. Owners asked for the agent to lead a
-// conversation to a result — an answer given, a request noted, a person connected — without
+// conversation to a result — an answer given, a request taken, a person connected — without
 // ever sounding impatient, so both halves are stated, and the second half is the stronger.
+// "A request taken" is only ever true when this turn's instructions say one is being taken
+// (TAKING A REQUEST, below): the model once read "a request noted" as licence to note orders it
+// had nowhere to save (NO_REQUEST_CORE).
 const HELPING_STYLE =
   "Be solution-oriented: work out what the caller needs, answer it directly, and move toward a clear next step or " +
-  "conclusion (a question answered, a request noted, a person connected). Ask at most ONE question at a time, never " +
+  "conclusion (a question answered, a request taken when this turn's instructions say one is being taken, a person connected). Ask at most ONE question at a time, never " +
   "repeat back what the caller just said word for word, and keep to what they asked. But never rush, hurry, interrupt " +
   "or talk down to anyone: be patient, polite and warm, let people take their time, and never end a thought with a " +
   "push to finish. When their need is met, ask once whether there is anything else; if there is not, close briefly and " +
   "kindly (thank them and say goodbye).";
+
+/**
+ * WHEN NO REQUEST IS BEING TAKEN, NOTHING IS BEING RECORDED — and the model is told so. Found on real calls (2026-11-12): a
+ * restaurant agent set up for call-backs and appointments only was asked to deliver an order; nothing was started, nothing
+ * could be saved, and the model asked for a name, an address and a phone number and then said "I'll pass your order and
+ * details to our team; they'll contact you shortly". Measured with the real model (npm run prompt:probe -- --case=promises,
+ * CLAUDE.md §6.26): 15 of 40 samples did it before this rule. A request exists only when the engine has started one
+ * (lib/collect/engine.js; TAKING A REQUEST below) — otherwise any "noted" or "passed on" is a promise to a real customer
+ * that nobody keeps.
+ */
+const NO_REQUEST_CORE =
+  "you cannot save, note down, pass on or forward anything, " +
+  "and nobody on the team has been told anything. Do NOT ask the customer for their name, phone number, address or any " +
+  "other personal detail, and NEVER say that you have noted, saved, recorded, forwarded or passed on anything, or that " +
+  "the team will contact them. If the customer wants something you cannot take here (an order, a booking, a delivery " +
+  "request…), say so plainly in one short sentence";
 
 // The call ends by itself once the conversation is over (lib/voice/closing.js). At that moment a
 // reply that asks one more question keeps the line open, and a goodbye said while the caller still
@@ -292,6 +311,8 @@ export function buildSystemInstruction({ config, channel, chunks = [], collectio
   // grounding rule and the conflict rule stay the last things the model reads.
   const collecting = collection ? buildCollectionInstruction(collection, { channel }) : null;
   if (collecting) sections.push(collecting);
+  // No request type set up at all (or none that fits): nothing can be recorded, and the model must not pretend.
+  else sections.push(`NOTHING IS BEING RECORDED: no request is set up for this business, so ${NO_REQUEST_CORE}, and suggest they contact the business directly. (Passing them to a person is decided elsewhere in these instructions, never by you.)`);
 
   // --- 7. Knowledge + the grounding rule -----------------------------------
   // Last on purpose: it's the longest section and the rule that must survive
@@ -668,30 +689,11 @@ export function buildHandoffInstruction(plan, { channel }) {
       return (
         "UNDERSTANDING: you could not make out what the caller wanted, or the reference material has nothing for it. " +
         "Say so honestly in ONE short, kind sentence (do not guess or invent an answer) and ask them to put it another " +
-        "way or give a little more detail. Do not mention a person or a transfer."
+        "way or give a little more detail. Do not mention a person or a transfer. Do not say goodbye or thank them for " +
+        "calling: the conversation is not over."
       );
-    case "handoff": {
-      const who = describeContact(plan.contact);
-      const why =
-        plan.reason === "asked"
-          ? "The caller asked for a person."
-          : plan.reason === "frustrated"
-            ? "The caller feels they are not being understood: apologise briefly and sincerely, in one clause."
-            : plan.reason === "topic"
-              ? "This is a matter the business wants a person to handle."
-              : "You could not understand or help the caller after trying.";
-      // The announcement itself ("I'm connecting you to Ali, our Representative…") is added by the code
-      // right after this reply (lib/handoff/announce.js) — a model asked to say it sometimes did not.
-      // So the model only acknowledges, and must NOT announce, or the caller hears it twice.
-      return (
-        `PASSING THE CALLER ON: ${why} The caller is being connected to ${who} right now, and a fixed sentence ` +
-        "telling them who they are being connected to is added automatically RIGHT AFTER your reply. So reply with " +
-        "ONE short, warm sentence only — acknowledge what they asked, or apologise briefly if you could not help — and " +
-        "do NOT say that you are connecting or transferring them, do NOT name the person, " +
-        (channel === "voice" ? "do not say goodbye, do not ask anything, " : "do not ask anything, ") +
-        "do not give a phone number, do not guess a waiting time, and do not continue with the original question."
-      );
-    }
+    // There is no "handoff" case: a turn that passes the caller on makes no model call (respond.js,
+    // handoff/announce.js acknowledgementFor) — nothing here to word.
     case "unavailable":
       return (
         "PASSING THE CALLER ON — NOBODY IS AVAILABLE: the caller needs a person, but the business is closed right now, so no " +
@@ -791,11 +793,13 @@ export function buildCollectionInstruction(plan, { channel }) {
     // model copies what it is shown: a real call once read "[[START code]]" aloud.
     const markers = plan.offers.map((o) => `${markerFor(o.type)} for ${o.label}`).join(", ");
     return (
-      `REQUESTS YOU CAN TAKE: ${list}. ${never} If the customer clearly wants one of these, say in one short sentence ` +
+      `REQUESTS YOU CAN TAKE: ${list}. ${never} If the customer clearly wants one of these — or says yes to your offer of one — say in one short sentence ` +
       `that you can take their details now, then ask the first question (${first}) in ${replyName}. ` +
       `Begin your reply with exactly one of these markers, copied exactly as written: ${markers}. ` +
       "The marker is removed before the customer sees or hears it. Use it only when you are about to ask the first " +
-      "question of that request, never for anything else, and never mention it."
+      "question of that request, never for anything else, and never mention it. " +
+      // Only a request started with the marker is recorded. Anything else the customer wants is not.
+      `Apart from starting one of those requests with its marker, nothing is recorded: ${NO_REQUEST_CORE} (only ${list} can be taken) and offer one of those instead — only OFFER it: ask whether they would like it, and ask for no detail until they say yes (then begin with the marker).`
     );
   }
 

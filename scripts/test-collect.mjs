@@ -247,14 +247,16 @@ ok(prismaRow.escalation.contacts[0].phone === "+923001234567", "…in the databa
 
 events.length = 0;
 const hc1 = await newConversation(H);
-stub.state.reply = "Of course, I understand.";
+// The model would say something wrong here (a question, a goodbye); the turn must not use it at all.
+stub.state.reply = "May I have your phone number, please? Thank you for calling. Goodbye.";
 r = await say(H, hc1, "I want to speak to the senior doctor please");
 ok(r.result.handoff?.kind === "handoff" && r.result.handoff.reason === "asked", "asking for a person passes the call on");
 ok(r.result.handoff.contacts[0].role === "Senior doctor" && r.result.handoff.contacts[1].role === "Representative", "the contact the caller named is tried first, the others follow");
 ok(r.result.handoff.contacts[0].phone === "+923215551234" && /asked to speak to a person/.test(r.result.handoff.summary), "the transport gets the number and a summary for the person");
-ok(/PASSING THE CALLER ON/.test(r.instruction) && /do NOT name the person/.test(r.instruction), "the model only acknowledges — it is told the announcement is added for it");
+ok(r.instruction === "", "a turn that passes the caller on makes NO model call");
 const ANNOUNCED = "I'm connecting you to Dr Ayesha, our Senior doctor. Please stay on the line.";
-ok(r.result.reply === `Of course, I understand. ${ANNOUNCED}` && r.streamed.endsWith(ANNOUNCED), "the fixed line naming the person is ALWAYS added by the code, streamed and returned");
+ok(r.result.reply === `Of course. ${ANNOUNCED}` && r.streamed === `Of course. ${ANNOUNCED}`, "the caller hears the code's own acknowledgement and then the line naming the person — nothing the model could add");
+ok(!/[?]|goodbye|phone number/i.test(r.result.reply), "…no question, no goodbye");
 const handoffReply = (await prisma.message.findMany({ where: { conversationId: hc1, role: "assistant" }, orderBy: { createdAt: "desc" } }))[0];
 ok(handoffReply.content.endsWith(ANNOUNCED), "…and stored, so the transcript shows what the caller heard");
 ok(r.result.handoff.announcement === ANNOUNCED, "…and handed to the adapter");
@@ -303,7 +305,7 @@ await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afte
 const hc4b = await newConversation(H);
 stub.state.reply = "I'm sorry to hear that.";
 r = await say(H, hc4b, "I have a complaint about my bill");
-ok(r.result.reply === "I'm sorry to hear that. Please hold, Bilal from our Representative team will be right with you.", "the owner's own line is said instead, filled in for the person being called");
+ok(r.result.reply === "I understand. Please hold, Bilal from our Representative team will be right with you.", "the owner's own line is said instead, filled in for the person being called");
 await saveAgentConfig(H, { escalation: { enabled: true, contacts: CONTACTS, afterMisses: 2, topics: ["complaint"] } });
 
 // unheard speech (the voice session reports it)
@@ -336,8 +338,13 @@ const hc8 = await newConversation(H);
 await saveAgentConfig(H, { hours: null });
 stub.state.reply = () => { throw new Error("stub: model down"); };
 let failed = false;
-try { await say(H, hc8, "I want to speak to a person"); } catch { failed = true; }
-ok(failed && (await prisma.conversation.findUnique({ where: { id: hc8 } })).handoffState === null, "a failed reply does not leave the call marked as passed on");
+// (a turn that passes the caller on makes no model call, so the failing turn is one that only counts a miss)
+try { await say(H, hc8, "xyzzy plugh quux frobnicate"); } catch { failed = true; }
+ok(failed && (await prisma.conversation.findUnique({ where: { id: hc8 } })).handoffState === null, "a failed reply does not leave the miss counted");
+// …and the caller who asks for a person is passed on even while the model is down: nothing in that turn needs it
+const hc8b = await newConversation(H);
+r = await say(H, hc8b, "I want to speak to a person");
+ok(r.result.handoff?.kind === "handoff" && r.result.reply.startsWith("Of course."), "a handoff turn works with the model down");
 stub.state.reply = (n) => `Reply ${n}.`;
 
 // the start marker mid-reply never reaches the customer (the real call: "[[START code]]")

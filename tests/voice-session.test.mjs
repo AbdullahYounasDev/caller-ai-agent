@@ -393,7 +393,7 @@ describe("CallSession", () => {
     await h.session.start();
     // The recogniser is asked for with the business's vocabulary ONLY: every call must
     // understand Urdu and English whichever language it answers in.
-    assert.deepEqual(h.sttCalls, [{ vocabulary: ["Nyron"] }]);
+    assert.deepEqual(h.sttCalls, [{ vocabulary: ["Nyron"], phrase: null }]);
     // Urdu greeting, male voice → masculine verb.
     assert.match(`${h.spoken[0].text} ${h.spoken[1].text} ${h.spoken[2].text}`, /^السلام علیکم، Nyron کو کال کرنے کا شکریہ۔ آپ ایک اے آئی اسسٹنٹ سے بات کر رہے ہیں۔ .*سکتا ہوں؟$/);
     assert.equal(h.spoken[0].voiceId, "kokoro:hm_omega");
@@ -2010,5 +2010,29 @@ describe("what the caller answered is not logged as a question the documents fai
     await h.settle();
     assert.equal(h.recorded.turns[1].outcome, "conversational");
     assert.equal(h.recorded.turns[0].outcome, "no_knowledge");
+  });
+});
+
+describe("the recogniser is given the business's whole name when a word of it is too short to correct alone (a real call: 'KO Restaurants' heard as 'Kew restaurants')", () => {
+  test("KO Restaurants: the long word as vocabulary, the whole name as the phrase", async () => {
+    const h = harness({ config: { businessName: "KO Restaurants" } });
+    await h.session.start();
+    assert.deepEqual(h.sttCalls, [{ vocabulary: ["Restaurants"], phrase: "KO Restaurants" }]);
+  });
+
+  test("a name with only long words has no phrase", async () => {
+    const h = harness({ config: { businessName: "Nyron" } });
+    await h.session.start();
+    assert.equal(h.sttCalls[0].phrase, null);
+  });
+
+  test("a language the recogniser had to be asked again about (stt.js) is on the call timeline", async () => {
+    const h = harness({ replies: [streams("Nine to six.")] });
+    await h.session.start();
+    h.session.transcriber = { transcribe: async () => ({ text: "What are your hours?", ms: 5, engine: "fake", relanguaged: "Portuguese→en" }) };
+    h.advance(5000);
+    h.hear({ type: "start" }, utterance);
+    await h.settle();
+    assert.equal(h.recorded.events.find((e) => e.type === "stt.completed").data.relanguaged, "Portuguese→en");
   });
 });

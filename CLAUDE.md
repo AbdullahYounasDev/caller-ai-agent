@@ -147,7 +147,7 @@ scripts/
   voice-levels.mjs             # `npm run voice:levels` — re-measures how loud each English voice is and names the entries of SPEECH_LEVEL_DB that drifted, ZERO quota (§6.24 fast start)
   voice-listen.mjs             # `npm run voice:listen` — renders replies "natural voice" vs "fast start" into ONE wav each (./listen, gitignored) to judge by ear, ZERO quota (§6.24)
   voice-echo.mjs               # `npm run voice:echo` — the echo guard against a simulated room: real voices, the real detector, false interruptions with and without the guard, ZERO quota (§6.24)
-  prompt-probe.mjs             # `npm run prompt:probe` — the REAL prompt against the REAL chat model, N samples per question, judged by prompt-judges.mjs: invented business description, over-refusal, the "First," opener. Spends chat quota (§6.24)
+  prompt-probe.mjs             # `npm run prompt:probe` — the REAL prompt against the REAL chat model, N samples per question, judged by prompt-judges.mjs: invented business description, over-refusal, the "First," opener, a promise nothing keeps ("noted", "passed to our team" with nothing saved). Spends chat quota (§6.24, §6.25)
   twilio-smoke.mjs             # `npm run twilio:smoke` — a fake Twilio calls the REAL app + gateway: signature refusals, an answered call, μ-law audio both ways, the call record (§6.30)
   check-locales.mjs            # translation parity; runs on `npm run build`
   check-db.mjs                 # guards the HNSW index Prisma keeps dropping (§6.1)
@@ -249,7 +249,7 @@ src/lib/
     extract.js / validate.js / phrases.js / marker.js / store.js   # understanding, judging, small words, start marker, draft persistence
     order.js                   # an order read against the MENU: dishes + quantities, merging changes, display — pure
   handoff/                     # ★ PASSING A CALLER TO A PERSON (§6.26) — settings, the decision (pure), the per-turn glue
-    config.js / phrases.js / answers.js / decide.js / turn.js   # escalation settings · asking-for-a-person & not-understood rules · did the caller ANSWER or ask? · decideHandoff · what respond() gets back
+    config.js / phrases.js / answers.js / decide.js / turn.js / announce.js   # escalation settings · asking-for-a-person & not-understood rules · did the caller ANSWER or ask? · decideHandoff · what respond() gets back · EVERYTHING the caller hears around a transfer: the acknowledgement and the announcement, fixed text (§6.26)
   phrases/                     # ★ GENERIC OPENERS (§6.20): en.js · ur.js · roman-ur.js = the WORDS, one file per way of writing (who-are-you / about / offerings / help / are-you-a-robot; PAUSES: hold-on / still-here; CLOSINGS: anything-else / no-thanks / farewell; question words, filler, greeting notice words) · index.js = the matcher, pure
   standins/                    # fake backend (customers, records, events, phone numbers, call recordings) behind fixed interfaces — what Haseeb replaces (§4, §6.25, §6.29)
   telephony/                   # routing.js (pure: E.164, who answers a number) · route-cache.js · errors.js (§6.29)
@@ -1742,7 +1742,16 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   language into the wrong one); it gets a short primer in Urdu script plus English, and if it
   still answers in Devanagari the same audio is asked once more with `language=ur`. A Groq failure
   or 6 s timeout falls back to Parakeet for that utterance and is logged
-  (`stt.completed.fallback`). Without a key an Urdu-speaking caller is NOT understood: the call
+  (`stt.completed.fallback`). **A language nobody speaks to this agent is asked again** (`stt.js`, 2026-11-13): Whisper reports the
+  language it decided on (`verbose_json`), and on a short or clipped utterance it sometimes picks another — measured with the
+  real recogniser on half-second Urdu fragments it answered "Arabic" and "Portuguese" ("جی میرا نمبر" → "Dimi,"), and a real
+  call came back as Russian ("No, nothing" → "Нет, ничего"; clean synthetic speech never did: 0 of 21). When the language is
+  neither English nor Urdu the same audio is asked again with `en` and with `ur` in parallel and the answer with the higher
+  average log-probability is kept (`relanguaged: "Portuguese→ur"` on the result and on `stt.completed`); a failed retry keeps the
+  first answer. Measured on those fragments the more-confident answer was the right language in most cases, not all — it is a
+  repair, not a guarantee, and the unreadable-script check of §6.26 is still behind it. A call with an explicit language is never
+  second-guessed. **A 429 (rate limit) is waited out once**, if the wait (`Retry-After`, 0.8 s when none) is at most 1.5 s, before
+  the local engine takes over — which cannot hear Urdu at all; a longer wait falls back at once (the call is live). Without a key an Urdu-speaking caller is NOT understood: the call
   logs `stt.urdu_unavailable` and the console's voice picker says so.
 - **Voices — a catalog of only real voices** (`speech/voices.js`, pure, imported by the gateway,
   `PUT /api/agent-config` and the console). Two engines:
@@ -1771,7 +1780,14 @@ browser mic ─ws─► VOICE GATEWAY (npm run voice, port 3001) ─────
   retrieved). A capitalised word with the name's first letter and consonant skeleton (y/w/h count
   as vowels) is replaced; at a sentence start it must also be within one letter, so "Small" never
   becomes "Smile". Whisper also gets the vocabulary as its `prompt`. Corrections are logged on
-  `stt.completed` (`corrected`). Backstop in the prompt: `voiceHearingInstruction` tells the model
+  `stt.completed` (`corrected`). **A name with a word too short to correct alone** ("KO Restaurants": "KO" has one consonant sound,
+  so it is rightly not in the vocabulary — real calls heard "Kew restaurants" and "Cave Resturants") also yields a PHRASE
+  (`callPhrase`): Whisper's prompt starts with the whole name, and `correctTranscript(…, { phrase })` puts right a CAPITALISED word of
+  at most five letters, with the short word's first sound and at most one more consonant sound, standing right before (or after) the
+  name's long word — the long word, matched by sound in any case, is the anchor that makes it safe ("Kew restaurants" → "KO
+  Restaurants"; a lone "Kew", "cow", "hello cave restaurants" in lower case, "Kitchen Restaurants" and "Cowhouse Restaurants" are
+  left alone). Known limit: an ordinary capitalised word of that shape before the anchor — "Cheap restaurants" at the start of a
+  sentence — would be corrected too; it is rare and the effect is mild. Backstop in the prompt: `voiceHearingInstruction` tells the model
   the customer's words are a transcript and sound-alike names mean that name. Product names are not
   in the vocabulary yet — same matcher, a new source.
 - **The agent's gender is the voice's gender.** On the voice channel the prompt states it
@@ -2161,6 +2177,26 @@ taken. Backend responsibilities that are stood in for are in
   time is a wall-clock string (`scheduledLocal`), not an instant.
 - **Urdu specifics:** digits in Urdu/Arabic-Indic form and spoken digits are normalised; yes/no
   is token-based ("جی نہیں" is NO — "ji" is a filler); regexes use Unicode word edges, never `\b`.
+- **When no request is being taken, nothing is recorded — and the model is told so** (`prompt.js NO_REQUEST_CORE`, 2026-11-13). A
+  restaurant agent set up for call-backs and appointments only was asked to deliver an order on real calls (2026-11-12): nothing
+  was started and nothing could be saved, yet the model asked for a name, an address and a phone number and said "I'll pass your
+  order and details to our team; they'll contact you shortly". The general style said "a request noted" and the idle instruction
+  listed only what CAN be taken, so the model filled the gap itself. Now: a business with no request type at all gets "NOTHING IS BEING
+  RECORDED… do NOT ask for a name, phone number, address…, NEVER say noted/saved/passed on or that the team will contact them… say
+  plainly you cannot take that here"; a business with request types gets the same rule inside "REQUESTS YOU CAN TAKE" — only those
+  can be taken, only by the engine's start marker, an offer asks for no detail until the caller says yes (and a yes to the agent's own
+  offer starts the request); while a request IS being taken (`TAKING A REQUEST`) the rule is absent and the engine's instruction
+  governs. The rule says nothing about passing the caller to a person: that is decided elsewhere (§6.26), and the first wording that
+  suggested it contradicted the closed-hours instruction (caught by `test:collect`). **Measured** (`npm run prompt:probe --
+  --case=promises`, the KO agent in English and in Urdu, 5 questions × 2 languages × 4 samples, Groq gpt-oss-120b; the judge
+  `falsePromise` flags asking for personal details or claiming something was noted/passed on/will be followed up when the reply
+  carries no start marker): **13 of 40 before, 1 of 40 after** (one intermediate wording: 2 of 40; the FINAL wording, 3 samples per question: **0 of 30**). Checked afterwards that the rule did not undo the earlier prompt fixes (§6.20, §6.24; same probe, 2 samples per question, Groq gpt-oss-120b): a name-only agent invented a description 0 of 4, grounded voice answers opened "First," 0 of 6, and agents that WERE told what the business does still described it 0 of 6 refusals.
+  The five questions include the real call's own wording and a caller giving a name unasked. Honest limits: one model, four samples
+  per question, a regular-expression judge calibrated on this model's wording (it was corrected twice by reading samples: it first
+  missed "Sure, I can note that down. براہِ کرم اپنا نام بتائیں۔" and flagged "as noted in the price list" — both are tests now); the
+  remaining sample asked a caller in Urdu to give an address and payment details. It does not make the agent TAKE an order — an
+  order type needs the owner's menu (§6.25 orders); it only stops it pretending. The dashboard should tell an owner whose callers ask for
+  something their agent cannot take (backend, not built).
 - **Stand-ins, not a second backend.** `lib/standins/*` (customers, records, events) sit behind
   fixed interfaces; nothing else touches those tables. The AI never reads them back (§6.11).
 - **Orders (restaurants) — the third request type, `order`** (reference `OR-…`). Fields: name, phone, `order_items`,
@@ -2194,7 +2230,7 @@ taken. Backend responsibilities that are stood in for are in
   - **Never "your order is placed", never a price it was not given:** an order plan tells the model the order is
     noted and the team confirms it and the total; prices and totals only from the reference material.
 
-**Verified:** `npm test` (539 unit tests when this was built — 901 today, §10 — incl. the whole engine with faked extractor),
+**Verified:** `npm test` (539 unit tests when this was built — 943 today, §10 — incl. the whole engine with faked extractor),
 `npm run test:collect` (the full flow against the real database with a faked model: configure →
 converse → save at the last required detail → correction updates the same row → optional answers update it → close → idempotent retry → status workflow and the lock on worked-on rows), screenshots of both tabs in
 English and Urdu/RTL. **Not verified:** the real model's wording of a plan turn in Urdu on
@@ -2226,7 +2262,7 @@ engine's, behind three seams (a phone call is a transport swap — §6.30):
   forward to is read as OFF and refused on save (`validation:handoff.*`, en + ur). **Phone numbers are never put in a
   prompt and never sent to a browser** (the chat route strips them; events carry ids only).
 - **The decision is code, not the model** (`handoff/decide.js decideHandoff`, pure, one call per message from
-  `respond()` via `handoff/turn.js planHandoff`; the model only WORDS it, `prompt.js buildHandoffInstruction`):
+  `respond()` via `handoff/turn.js planHandoff`; the model only WORDS a "rephrase" or an "unavailable" plan, `prompt.js buildHandoffInstruction`; a transfer itself is worded by the code, below):
   1. the caller asks for a person (`asksForHuman`, en/ur/Roman Urdu) → hand off now (`asked`), to the contact whose
      role/name the caller mentioned, else the owner's first; 2. an owner topic word ("complaint") → hand off
      (`topic`); 3. **not understanding, counted in a row**: first time → the agent says so honestly and asks the
@@ -2257,9 +2293,19 @@ engine's, behind three seams (a phone call is a transport swap — §6.30):
   Restaurants. How… What… what you are and how you can help me") no longer hides it.
   State is `conversations.handoff_state` (migration `20261021120000_conversation_handoff_state`, hand-written, HNSW line
   removed), restored if the reply fails; a conversation already passed on is not forwarded twice (chat has no hang-up).
-- **What the caller hears before a transfer is the CODE's, never the model's** (`handoff/announce.js`, pure). A real call
-  was forwarded in silence: the model was told to announce the transfer and greeted the caller instead. Now the model
-  is told to say ONE short acknowledgement and NOT to announce or name anyone, and `respond()` appends a fixed line
+- **EVERYTHING the caller hears around a transfer is the CODE's, never the model's** (`handoff/announce.js`, pure). A real call
+  was forwarded in silence: the model was told to announce the transfer and greeted the caller instead; the first fix kept the
+  model for a one-sentence acknowledgement and on real calls (2026-11-12) it still asked "May I have your phone number?" and "How
+  may I assist you?" right before "connecting you to Adan", and in Urdu said "آپ کا شکریہ، الوداع" (thanks, goodbye) in the same
+  breath. So **a turn that passes the caller on makes NO model call** (`respond.js`): the reply is one fixed acknowledgement for
+  the reason (`acknowledgementFor`: "Of course." asked · "I understand." topic · "I'm sorry about that." frustrated · "I'm sorry, I
+  couldn't help with that." not understood; Urdu equivalents without gendered verbs or Latin letters; never a question, never a
+  goodbye — tests pin it) and then the announcement. It also saves a model round trip while the caller waits, and works with the
+  model down (`test:collect`). The "please rephrase" instruction now also says not to say goodbye or thank them for calling. **Roles in
+  an Urdu announcement** are said in Urdu script from a fixed table of the usual roles ("Representative" → "نمائندے", "Senior doctor" →
+  "سینئر ڈاکٹر"; unknown words stay as typed): measured with the real Urdu voice and Whisper (2026-11-13) the voice already read a
+  Latin word acceptably ("Representative" heard as "رپرزنٹیو", "Adan" as "ادان"), so this is consistency in an Urdu sentence, not a
+  rescue; a NAME in Urdu script ("عدنان") is heard correctly where "Adan" is not quite. `respond()` then adds a fixed line
   for the person being called — "I'm connecting you to Ali, our Representative. Please stay on the line." — to the
   streamed, returned and stored reply (chat and voice alike; `result.handoff.announcement`). The owner may write their
   own line per language (`announce` {en?, ur?}, ≤200 chars, `{name}` and `{role}` the only placeholders — anything else
@@ -2321,7 +2367,9 @@ engine's, behind three seams (a phone call is a transport swap — §6.30):
   caller is talking. If the caller closed but the reply had no goodbye, the fixed `voiceLine("closing")` ("Thank you for
   calling. Goodbye.") is said first. Then: the agent's audio finishes → the owner's seconds of quiet → the call ends
   (`agent_goodbye`, event `call.ended_by_itself` with the trigger; `call.closing` logs the decision). Speech in that quiet
-  stops the countdown; a cough or click that turns out to be nothing restarts it; anything real cancels it. Off = the
+  stops the countdown; a cough or click that turns out to be nothing restarts it; anything real cancels it. The "that's all" forms
+  include "نہیں بس ہو گئی آپ کا شکریہ", "bas ho gaya", "that is enough", "all done", "that's all I needed" (a real call said the first
+  and it was not recognised; a garbled hearing of it, "نہیں بوش ہوئی آپ کو", cannot be). Off = the
   caller hangs up (the silence check-in below still ends a silent line). On calls with the switch on, the prompt asks the
   model for ONE short thanks-and-goodbye sentence at that point and no further question (`CALL_ENDING_STYLE`).
 - **Solution-oriented but never hurried** (`prompt.js HELPING_STYLE`, in every prompt): work toward an answer, a request
@@ -2788,7 +2836,7 @@ right language, with history persisted per tenant.
 7. **Shared HNSW index** — tenant-filter starvation is guarded per transaction but
    capped by `hnsw.max_scan_tuples`; past that, per-tenant partitioning (§6.1).
    At today's few hundred chunks the planner does not even use HNSW.
-8. **Unit tests cover the pure logic only.** `npm test` (tests/, 901 cases) pins
+8. **Unit tests cover the pure logic only.** `npm test` (tests/, 943 cases) pins
    chunk.js, query.js's trigger heuristics, prompt.js, crawl.js's address/HTML
    handling, i18n, jobs.js (stubbed prisma), extract.js's pure helpers,
    `rankCandidates`, and the voice channel: the whole `CallSession` flow with faked
@@ -2979,13 +3027,13 @@ npm run db:down          # stop Postgres
 # ── checks ──
 npm run db:check         # HNSW index, pgvector version + iterative scans, language columns, embedding scheme (§6.1–§6.3)
 npm run i18n:check       # translation key + placeholder parity
-npm test                 # 901 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off), the echo guard (learning the path, the cold-start and between-sentence waits, windowed utterances, headphones untouched, the session wiring), the spoken refusal of a late phone call, Devanagari repair for the Urdu voice, the prompt probe judges, answering the agent versus asking it (what counts as a failure to understand), the transfer that is cancelled when the caller talks over its announcement, a goodbye that ends the call, and transcripts in a script nobody speaks to the agent. No DB, no Gemini, no speech models (§11)
+npm test                 # 943 unit tests: the Twilio phone path (signature, the gateway-capacity check, the way back from an unanswered transfer, call recording, the VAD pre-roll, tokens, TwiML, the webhook's decisions, the transfer chain, the transport's wire format, μ-law and resampling), the business summary (no prices, form, the prompt), restaurant orders (reading dishes against the menu, merging changes, pickup/delivery, conditional fields, the whole conversation), ending a call by itself (the words, the decision, the settings, the session), the forwarding line (built-in, owner's, next person), pauses (split-sentence merge, hold-on, still-here), smooth speech (silence trim, pause per join, cut points, gap logging), generic openers (the word files, en/ur/Roman Urdu, what the brain does with one), the call greeting (built-in, owner's, warnings), phone numbers (E.164, routing, cache, signed line), knowledge per agent (rule, input, SQL shape, per-turn scoping), handoff (settings, phrases, decision, per-turn plan), marker,  collect (validate, config, phrases, the whole engine), chunk, tables, query + retrieveForTurn flow (incl. the first question of a call), breaker, keyword-query, prompt (incl. a business never told what it does), crawl, i18n, jobs, extract, rankCandidates, OpenAI-compatible providers (local stand-in), voice (session flow, chunking, voices, STT routing, intent, tickets, PCM, wire format), the fast start (which fast voice opens for which, the level gain, the session with it on and off), the echo guard (learning the path, the cold-start and between-sentence waits, windowed utterances, headphones untouched, the session wiring), the spoken refusal of a late phone call, Devanagari repair for the Urdu voice, the prompt probe judges, answering the agent versus asking it (what counts as a failure to understand), the transfer that is cancelled when the caller talks over its announcement, a goodbye that ends the call, transcripts in a script nobody speaks to the agent, the recogniser asked again when it guessed a language nobody speaks and waiting out a rate limit, a short business name ("KO Restaurants") put right, the "that's all" forms in three ways of writing, a transfer turn with no model call (acknowledgement per reason, Urdu roles), and "nothing is recorded unless a request is being taken" (the prompt and the judge that measures it). No DB, no Gemini, no speech models (§11)
 npm run voice:smoke      # speech models only: TTS → STT round trip, 16 kHz and simulated phone audio, VAD. ZERO quota (§6.24)
 npm run voice:gaps       # silence at every join inside a spoken reply, real voices, before vs now. ZERO quota (§6.24); -- --voice=ID --slow=N
 npm run voice:levels     # how loud each English voice is, against SPEECH_LEVEL_DB — names what drifted and prints the table to paste. ZERO quota (§6.24 fast start); -- --tolerance=dB
 npm run voice:listen     # renders replies "natural voice, 1.5 s silence, fast start" into ONE wav each in ./listen (gitignored) to judge by ear. ZERO quota (§6.24 fast start); -- --voice=ID --out=DIR
 npm run voice:echo       # the echo guard against a SIMULATED room: real voices and detector, a greeting then a reply per trial; false interruptions with and without the guard, whether a person still gets through, headphones unchanged. ZERO quota (§6.24 echo guard); -- --rooms=30 --seed=N --kinds=echo,talk-over,headphones --verbose [--trace [--slot0]]
-npm run prompt:probe     # the REAL prompt against the REAL chat model, N samples per question, judged by scripts/prompt-judges.mjs (invented description / over-refusal / "First," opener). SPENDS CHAT QUOTA; pins the provider, no fallback (§6.24); -- --case=urdu,english,first,purpose --n=6 --demo-tenant=ID --ko-tenant=ID --ko-agent=ID
+npm run prompt:probe     # the REAL prompt against the REAL chat model, N samples per question, judged by scripts/prompt-judges.mjs (invented description / over-refusal / "First," opener / a promise nothing keeps). SPENDS CHAT QUOTA; pins the provider, no fallback (§6.24); -- --case=urdu,english,first,purpose,promises --n=6 --demo-tenant=ID --ko-tenant=ID --ko-agent=ID
 #   -- --call [--tenant=ID] [--agent=ID] [--gateway=localhost:3002] [--say="…"] [--lang=en|ur]   a REAL call through dev + voice with a synthetic caller — spends 1 chat + 1 embedding.
 #      Without --agent the tenant's DEFAULT agent answers, and it cannot see a document limited to another agent (§6.28): name the agent that owns the knowledge.
 npm run twilio:smoke     # a fake Twilio calls the REAL app + gateway (needs both running, TWILIO_* set; a fresh fake number each run, so runs may follow each other at once): signature refusals, an answered call, μ-law audio both ways, the call record — spends a chat request only with a model key (§6.30)

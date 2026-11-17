@@ -152,6 +152,12 @@ export const CLOSINGS = {
     "کچھ نہیں",
     "اور کچھ نہیں",
     "نہیں بس",
+    // "that's enough / that's all done": the way callers actually say it
+    "بس ہو گیا/گئی",
+    "نہیں بس ہو گیا/گئی",
+    "ہو گیا/گئی بس",
+    "بس ٹھیک ہے",
+    "ٹھیک ہے بس",
   ],
   farewell: [
     "خدا حافظ",
@@ -166,7 +172,7 @@ export const CLOSINGS = {
 /** Words with no meaning of their own in a "no, that's all" (see en.js CLOSING_FILLER). */
 export const CLOSING_FILLER = [
   "نہیں", "بس", "جی", "شکریہ", "بہت", "آپ", "کا", "کی", "ہے", "ٹھیک", "اچھا", "سر", "جناب", "مہربانی", "ہاں", "اور",
-  "بھائی", "صاحب", "باجی", "میڈم", "خدا", "حافظ", "اللہ", "سب", "بالکل",
+  "بھائی", "صاحب", "باجی", "میڈم", "خدا", "حافظ", "اللہ", "سب", "بالکل", "ہو", "گیا", "گئی",
 ];
 
 /** Words with no meaning of their own in an opener (see en.js FILLER). */

@@ -14,6 +14,12 @@
  * placeholders {name} and {role}; empty = the built-in one. If the first person does not answer,
  * `nextContactLine` says so and names the next one.
  *
+ * THE WORDS BEFORE IT ARE THE CODE'S TOO (`acknowledgementFor`). The model used to be asked for "one short, warm
+ * sentence, no question, no goodbye, do not name anyone" and, on real calls, did not obey: it asked "May I have your phone
+ * number?" and "How may I assist you?" right before the announcement, and said "Thank you, goodbye" (in Urdu: "آپ کا شکریہ،
+ * الوداع") in the same breath as "connecting you to Adan". A turn that passes the caller to a person now makes no model call
+ * at all: the reply is one fixed acknowledgement for the reason, then the announcement.
+ *
  * Pure, no I/O: used by the brain (respond.js appends it to the reply, on every channel), by the
  * voice session (the "not answering, trying the next person" line) and by the console (the
  * preview under each person). Tests: tests/handoff-announce.test.mjs.
@@ -51,6 +57,50 @@ const NOT_ANSWERING = {
   en: "{previous} isn't available right now.",
   ur: "{previous} اس وقت دستیاب نہیں ہیں۔",
 };
+
+/**
+ * What is said in front of the announcement, by the reason for the transfer. No question, no goodbye, no name: nothing for
+ * the caller to answer and nothing that sounds like the call is over. Urdu is free of gendered verb forms (the voice may be
+ * either) and of Latin letters.
+ */
+const ACKNOWLEDGEMENT = {
+  en: { asked: "Of course.", topic: "I understand.", frustrated: "I'm sorry about that.", not_understood: "I'm sorry, I couldn't help with that." },
+  ur: { asked: "جی ضرور۔", topic: "جی، بات سمجھ آ گئی۔", frustrated: "معذرت، آپ کو پریشانی ہوئی۔", not_understood: "معذرت، بات واضح نہیں ہو سکی۔" },
+};
+
+/**
+ * @param {object} args
+ * @param {string|null} [args.reason]  asked | topic | frustrated | not_understood (anything else is read as not_understood)
+ * @param {"en"|"ur"} args.language    the agent's reply language
+ * @returns {string}
+ */
+export function acknowledgementFor({ reason, language }) {
+  const lines = ACKNOWLEDGEMENT[lang(language)];
+  return lines[reason] ?? lines.not_understood;
+}
+
+/**
+ * A role as the owner typed it, in a form that fits an Urdu sentence ("ہمارے …"): a real call showed
+ * "…Adan سے کروائی جا رہی ہے، جو ہمارے Representative ہیں" in the chat, half English in an Urdu sentence. CONSISTENCY, not a
+ * rescue: measured with the real Urdu voice and Whisper (2026-11-13) the voice already reads a Latin word acceptably
+ * ("Representative" was heard as "رپرزنٹیو", "Adan" as "ادان"), so nothing was being spelled out. A fixed table of the
+ * usual roles, word by word; a word it does not know is left as typed, and a role already written in Urdu is never touched.
+ * Names are the owner's as typed: a name written in Urdu script ("عدنان") is heard correctly, "Adan" as "ادان" — the owner's
+ * own line (announce.ur) or an Urdu-script name is the way to say it exactly.
+ */
+const URDU_ROLE_WORDS = {
+  representative: "نمائندے", rep: "نمائندے", manager: "مینیجر", senior: "سینئر", owner: "مالک", doctor: "ڈاکٹر", dr: "ڈاکٹر",
+  supervisor: "سپروائزر", receptionist: "ریسپشنسٹ", sales: "سیلز", support: "سپورٹ", lead: "لیڈ", team: "ٹیم", agent: "ایجنٹ",
+  specialist: "ماہر", assistant: "اسسٹنٹ", executive: "ایگزیکٹو", accountant: "اکاؤنٹنٹ", director: "ڈائریکٹر", officer: "آفیسر",
+  staff: "اسٹاف", admin: "ایڈمن", consultant: "کنسلٹنٹ", advisor: "ایڈوائزر", adviser: "ایڈوائزر", head: "ہیڈ", chef: "شیف",
+  customer: "کسٹمر", service: "سروس", care: "کیئر", billing: "بلنگ", technical: "ٹیکنیکل", general: "جنرل", branch: "برانچ", front: "فرنٹ", desk: "ڈیسک",
+};
+
+/** @param {string} role @param {"en"|"ur"} l */
+function roleFor(role, l) {
+  if (l !== "ur" || !role) return role;
+  return role.replace(/[A-Za-z]+/g, (word) => URDU_ROLE_WORDS[word.toLowerCase()] ?? word);
+}
 
 const lang = (language) => (language === "ur" ? "ur" : "en");
 const tidy = (text) =>
@@ -115,7 +165,7 @@ export function announceProblems(value) {
 export function announcementFor({ escalation, contact, language }) {
   const l = lang(language);
   const name = String(contact?.name ?? "").trim();
-  const role = String(contact?.role ?? "").trim();
+  const role = roleFor(String(contact?.role ?? "").trim(), l);
   const own = normalizeAnnounce(escalation?.announce)[l];
   if (own) {
     return tidy(
@@ -143,6 +193,6 @@ export function announcementFor({ escalation, contact, language }) {
  */
 export function nextContactLine({ escalation, previous, contact, language }) {
   const l = lang(language);
-  const before = String(previous?.name ?? "").trim() || (previous?.role ? (l === "ur" ? `ہمارے ${previous.role}` : `Our ${previous.role}`) : l === "ur" ? "وہ" : "That person");
+  const before = String(previous?.name ?? "").trim() || (previous?.role ? (l === "ur" ? `ہمارے ${roleFor(String(previous.role).trim(), l)}` : `Our ${previous.role}`) : l === "ur" ? "وہ" : "That person");
   return `${NOT_ANSWERING[l].split("{previous}").join(before)} ${announcementFor({ escalation, contact, language: l })}`;
 }

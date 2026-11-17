@@ -111,3 +111,20 @@ describe("the settings", () => {
     }
   });
 });
+
+describe("the many ways a caller says 'that's all' after 'is there anything else?' (a real call: 'نہیں بس ہو گئی آپ کا شکریہ')", () => {
+  test("Urdu, Roman Urdu and English forms that used to be missed", () => {
+    for (const text of [
+      "نہیں بس ہو گئی آپ کا شکریہ", "نہیں بس ہو گئی، شکریہ", "بس ہو گئی", "بس ہو گیا", "جی بس ہو گیا شکریہ", "نہیں جی بس ہو گیا", "ہو گیا بس شکریہ",
+      "nahi bas ho gaya shukriya", "bas ho gayi", "nahi bas ho gaya", "bas ho gaya ji",
+      "That is enough, thanks", "Enough, thank you", "No, that's all I needed", "I am all done, thanks", "All done.",
+    ]) assert.equal(isDecliningMore(text), true, text);
+  });
+
+  test("a question, a request or an answer that merely contains the words is NOT a decline", () => {
+    for (const text of [
+      "نہیں بس ہو گئی آپ کا شکریہ کیا آپ ڈیلیوری کرتے ہیں؟", "بس کتنے کی ہے؟", "kya bas ho gaya?", "No, what about Sundays?", "I want a table",
+      "بس اسٹاپ کہاں ہے", "No, my number is 0300 1234567", "Enough of the spice please, what else do you have",
+    ]) assert.equal(isDecliningMore(text), false, text);
+  });
+});

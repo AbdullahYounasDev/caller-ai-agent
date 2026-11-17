@@ -40,6 +40,12 @@ import { correctTranscript } from "../vocabulary";
  * — it sometimes writes short Urdu as Hindi — the same audio is asked once more with
  * language=ur.
  *
+ * Whisper reports the language it decided on. When that is NEITHER English nor Urdu (a short or clipped utterance
+ * sometimes comes back as Arabic, Portuguese, Russian…: "No, nothing" → "Нет, ничего" on a real call) the audio is asked
+ * again with English and with Urdu, and the answer it was surer of (its own average log-probability) is kept; the result
+ * carries `relanguaged` ("Portuguese→ur") so the timeline shows it. A 429 (rate limit) is waited out once, if the wait is
+ * short, before the local engine takes over: that engine cannot hear Urdu at all.
+ *
  * A hosted call that fails or times out falls back to Parakeet for that utterance — a
  * caller speaking English is still understood, and the failure is reported, not hidden.
  *
@@ -80,15 +86,16 @@ export function createSpeechToText({ engine, env = process.env, fetchImpl = fetc
 
     /**
      * The transcriber for one call. It takes no language: see the header.
-     * @param {{vocabulary?: string[]}} [call]
+     * @param {{vocabulary?: string[], phrase?: string|null}} [call]  `phrase`: the whole business name, when it holds a
+     *   word too short to correct alone (vocabulary.js callPhrase)
      * @returns {Transcriber}
      */
-    forCall({ vocabulary = [] } = {}) {
+    forCall({ vocabulary = [], phrase = null } = {}) {
       const useGroq = mode === "groq" || (mode === "auto" && Boolean(groqKey));
       const transcriber = useGroq
-        ? groqTranscriber({ apiKey: groqKey, model: groqModel, vocabulary, fallback: local, fetchImpl })
+        ? groqTranscriber({ apiKey: groqKey, model: groqModel, vocabulary, phrase, fallback: local, fetchImpl })
         : local;
-      return withVocabulary(transcriber, vocabulary);
+      return withVocabulary(transcriber, vocabulary, phrase);
     },
   };
 }
@@ -116,13 +123,13 @@ function localTranscriber(engine) {
 }
 
 /** The same transcriber, with the call's names spelled the way the business spells them. */
-function withVocabulary(transcriber, vocabulary) {
-  if (!vocabulary.length) return transcriber;
+function withVocabulary(transcriber, vocabulary, phrase = null) {
+  if (!vocabulary.length && !phrase) return transcriber;
   return {
     ...transcriber,
     async transcribe(samples) {
       const result = await transcriber.transcribe(samples);
-      const { text, corrections } = correctTranscript(result.text, vocabulary);
+      const { text, corrections } = correctTranscript(result.text, vocabulary, { phrase });
       return corrections.length ? { ...result, text, corrections } : result;
     },
   };
@@ -137,21 +144,32 @@ const WHISPER_PRIMER = "السلام علیکم۔ Hello. آپ کی appointment �
 /** Hindi's script. Whisper sometimes writes short Urdu in it, which nothing downstream reads. */
 const DEVANAGARI = /[\u0900-\u097F]/;
 
+/** The languages callers speak to this product (§7). Whisper names them in English, capitalised. */
+const SPOKEN_LANGUAGES = new Set(["english", "urdu"]);
+/** A rate limit is waited out only when it is this short; the call is live. */
+const MAX_RATE_LIMIT_WAIT_MS = 1500;
+/** When a 429 says nothing about how long. */
+const DEFAULT_RATE_LIMIT_WAIT_MS = 800;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 /**
  * Exported for tests (fake fetch).
  * @param {object} args
  * @param {string} [args.language]  an explicit hint; the product leaves it unset (see the header)
  * @returns {Transcriber}
  */
-export function groqTranscriber({ apiKey, model, language, vocabulary = [], fallback, fetchImpl = fetch }) {
+export function groqTranscriber({ apiKey, model, language, vocabulary = [], phrase = null, fallback, fetchImpl = fetch, sleep = delay }) {
   const id = `groq:${model}`;
-  const prompt = [vocabulary.join(", "), WHISPER_PRIMER].filter(Boolean).join(". ");
+  const prompt = [phrase, vocabulary.join(", "), WHISPER_PRIMER].filter(Boolean).join(". ");
 
-  async function ask(samples, hint) {
+  /** One request. Returns what Whisper wrote, the language it decided on and how sure it was (null when it did not say). */
+  async function request(samples, hint) {
     const form = new FormData();
     form.append("file", new Blob([encodeWav(samples, SAMPLE_RATE)], { type: "audio/wav" }), "utterance.wav");
     form.append("model", model);
-    form.append("response_format", "json");
+    // verbose_json: the same text plus the language it chose and a confidence per segment.
+    form.append("response_format", "verbose_json");
     form.append("temperature", "0");
     if (hint) form.append("language", hint);
     // Whisper reads its prompt as the text that came before this audio — the standard
@@ -164,9 +182,42 @@ export function groqTranscriber({ apiKey, model, language, vocabulary = [], fall
       body: form,
       signal: AbortSignal.timeout(HOSTED_TIMEOUT_MS),
     });
-    if (!res.ok) throw new Error(`Groq STT HTTP ${res.status}`);
+    if (!res.ok) {
+      const error = new Error(`Groq STT HTTP ${res.status}`);
+      error.status = res.status;
+      error.retryAfter = res.headers?.get?.("retry-after") ?? null;
+      throw error;
+    }
     const data = await res.json();
-    return String(data?.text ?? "").trim();
+    const logprobs = (Array.isArray(data?.segments) ? data.segments : []).map((s) => s?.avg_logprob).filter((v) => Number.isFinite(v));
+    return {
+      text: String(data?.text ?? "").trim(),
+      language: typeof data?.language === "string" ? data.language : null,
+      confidence: logprobs.length ? logprobs.reduce((a, b) => a + b, 0) / logprobs.length : null,
+    };
+  }
+
+  /** request(), waiting out one short rate limit. */
+  async function ask(samples, hint) {
+    try {
+      return await request(samples, hint);
+    } catch (err) {
+      if (err?.status !== 429) throw err;
+      const seconds = Number.parseFloat(err.retryAfter);
+      const wait = Number.isFinite(seconds) && seconds >= 0 ? Math.round(seconds * 1000) : DEFAULT_RATE_LIMIT_WAIT_MS;
+      if (wait > MAX_RATE_LIMIT_WAIT_MS) throw err;
+      await sleep(wait);
+      return request(samples, hint);
+    }
+  }
+
+  /** The utterance asked again in English and in Urdu: the answer Whisper was surer of. Null if both fail. */
+  async function askBothLanguages(samples) {
+    const tries = await Promise.all(["en", "ur"].map((hint) => ask(samples, hint).then((r) => ({ ...r, hint }), () => null)));
+    const answers = tries.filter((r) => r?.text);
+    if (!answers.length) return null;
+    // Without a confidence to compare, the first answer (English) stands.
+    return answers.reduce((best, r) => ((r.confidence ?? -Infinity) > (best.confidence ?? -Infinity) ? r : best));
   }
 
   return {
@@ -175,11 +226,23 @@ export function groqTranscriber({ apiKey, model, language, vocabulary = [], fall
     async transcribe(samples) {
       const started = performance.now();
       try {
-        let text = await ask(samples, language);
-        // Urdu written in Devanagari is Hindi to every reader downstream: ask again, once,
-        // telling Whisper it is Urdu.
-        if (!language && DEVANAGARI.test(text)) text = (await ask(samples, "ur")) || text;
-        return { text, ms: Math.round(performance.now() - started), engine: id };
+        const first = await ask(samples, language);
+        let text = first.text;
+        let relanguaged;
+        if (!language) {
+          if (DEVANAGARI.test(text)) {
+            // Urdu written in Devanagari is Hindi to every reader downstream: ask again, once,
+            // telling Whisper it is Urdu.
+            text = (await ask(samples, "ur")).text || text;
+          } else if (first.language && !SPOKEN_LANGUAGES.has(first.language.toLowerCase())) {
+            const better = await askBothLanguages(samples);
+            if (better) {
+              text = better.text;
+              relanguaged = `${first.language}→${better.hint}`;
+            }
+          }
+        }
+        return { text, ms: Math.round(performance.now() - started), engine: id, ...(relanguaged ? { relanguaged } : {}) };
       } catch (err) {
         const reason = err?.name === "TimeoutError" ? `timed out after ${HOSTED_TIMEOUT_MS} ms` : String(err?.message ?? err);
         console.warn(`[voice] ${id} failed (${reason}) — transcribing locally instead`);
